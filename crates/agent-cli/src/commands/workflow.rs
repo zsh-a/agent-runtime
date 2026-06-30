@@ -202,7 +202,7 @@ fn resolve_command_registry_path(
         (Some(path), None) => Ok(CommandRegistryPath::Catalog(Utf8PathBuf::from(path))),
         (None, Some(path)) => Ok(CommandRegistryPath::Registry(Utf8PathBuf::from(path))),
         (None, None) => Ok(CommandRegistryPath::Registry(Utf8PathBuf::from(
-            "examples/agent-runtime/agents.yaml",
+            "examples/agents.yaml",
         ))),
     }
 }
@@ -280,7 +280,7 @@ mod tests {
         let frontmatter = CommandFrontmatter {
             description: Some("Replay review".to_owned()),
             agent: "execution_review".to_owned(),
-            catalog: Some("fixtures/agent-runtime/catalog.valid.json".to_owned()),
+            catalog: Some("fixtures/contracts/catalog.valid.json".to_owned()),
             registry: None,
             source_run_id: Some("run_01".to_owned()),
             source_run_status: Some(agent_core::AgentRunStatus::Completed),
@@ -299,7 +299,7 @@ mod tests {
     fn command_template_parses_frontmatter_and_json_fence() {
         let markdown = r#"---
 agent: echo_agent
-registry: examples/agent-runtime/agents.yaml
+registry: examples/agents.yaml
 ---
 
 ```json
@@ -314,7 +314,7 @@ registry: examples/agent-runtime/agents.yaml
         assert_eq!(template.frontmatter.agent, "echo_agent");
         assert_eq!(
             template.frontmatter.registry.as_deref(),
-            Some("examples/agent-runtime/agents.yaml")
+            Some("examples/agents.yaml")
         );
         assert_eq!(template.input, json!({"message": "hello"}));
     }

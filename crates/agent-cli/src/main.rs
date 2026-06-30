@@ -51,7 +51,7 @@ use tools::tool_overrides;
 use trace_store::read_json;
 use tui::{TuiOptions, run_tui};
 
-const DEFAULT_REGISTRY: &str = "examples/agent-runtime/agents.yaml";
+const DEFAULT_REGISTRY: &str = "examples/agents.yaml";
 const DEFAULT_STORE: &str = ".agent-runtime/store";
 const DEFAULT_EVAL_STORE: &str = ".agent-runtime/eval-store";
 const DEFAULT_HOST: &str = "127.0.0.1";

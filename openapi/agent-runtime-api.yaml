@@ -57,7 +57,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: "../schemas/agent-runtime/tool-spec.schema.json"
+                  $ref: "../schemas/tool-spec.schema.json"
   /runs:
     get:
       operationId: listRuns
@@ -128,7 +128,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "../schemas/agent-runtime/trace.schema.json"
+                $ref: "../schemas/trace.schema.json"
         "404":
           description: Trace was not found.
           content:
@@ -234,7 +234,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: "../schemas/agent-runtime/proposal-envelope.schema.json"
+                  $ref: "../schemas/proposal-envelope.schema.json"
     post:
       operationId: createProposal
       requestBody:
@@ -249,7 +249,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "../schemas/agent-runtime/proposal-envelope.schema.json"
+                $ref: "../schemas/proposal-envelope.schema.json"
         "500":
           description: Proposal creation failed.
           content:
@@ -272,7 +272,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "../schemas/agent-runtime/proposal-envelope.schema.json"
+                $ref: "../schemas/proposal-envelope.schema.json"
         "404":
           description: Proposal was not found.
           content:
@@ -365,7 +365,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: "../schemas/agent-runtime/session-record.schema.json"
+                  $ref: "../schemas/session-record.schema.json"
     post:
       operationId: createSession
       requestBody:
@@ -522,9 +522,9 @@ components:
       required: [result, trace]
       properties:
         result:
-          $ref: "../schemas/agent-runtime/run-result.schema.json"
+          $ref: "../schemas/run-result.schema.json"
         trace:
-          $ref: "../schemas/agent-runtime/trace.schema.json"
+          $ref: "../schemas/trace.schema.json"
       additionalProperties: false
     AgentRunRecord:
       type: object
@@ -610,9 +610,9 @@ components:
           type: string
           minLength: 1
         result:
-          $ref: "../schemas/agent-runtime/run-result.schema.json"
+          $ref: "../schemas/run-result.schema.json"
         trace:
-          $ref: "../schemas/agent-runtime/trace.schema.json"
+          $ref: "../schemas/trace.schema.json"
         output_matches:
           type: boolean
       additionalProperties: false
@@ -727,9 +727,9 @@ components:
           minimum: 0
       additionalProperties: false
     HookEvent:
-      $ref: "../schemas/agent-runtime/hook-event.schema.json"
+      $ref: "../schemas/hook-event.schema.json"
     PromptManifest:
-      $ref: "../schemas/agent-runtime/prompt-manifest.schema.json"
+      $ref: "../schemas/prompt-manifest.schema.json"
     ProposalCreateRequest:
       type: object
       required: [run_id, agent_id, kind, summary]
@@ -765,9 +765,9 @@ components:
       required: [decision, proposal]
       properties:
         decision:
-          $ref: "../schemas/agent-runtime/approval-decision.schema.json"
+          $ref: "../schemas/approval-decision.schema.json"
         proposal:
-          $ref: "../schemas/agent-runtime/proposal-envelope.schema.json"
+          $ref: "../schemas/proposal-envelope.schema.json"
       additionalProperties: false
     ProposalActionResponse:
       type: object
@@ -782,7 +782,7 @@ components:
         tool_output:
           type: object
         proposal:
-          $ref: "../schemas/agent-runtime/proposal-envelope.schema.json"
+          $ref: "../schemas/proposal-envelope.schema.json"
       additionalProperties: false
     SessionCreateRequest:
       type: object
@@ -800,27 +800,27 @@ components:
       required: [session, thread]
       properties:
         session:
-          $ref: "../schemas/agent-runtime/session-record.schema.json"
+          $ref: "../schemas/session-record.schema.json"
         thread:
-          $ref: "../schemas/agent-runtime/thread-record.schema.json"
+          $ref: "../schemas/thread-record.schema.json"
       additionalProperties: false
     ThreadWithSteps:
       type: object
       required: [thread, steps]
       properties:
         thread:
-          $ref: "../schemas/agent-runtime/thread-record.schema.json"
+          $ref: "../schemas/thread-record.schema.json"
         steps:
           type: array
           items:
-            $ref: "../schemas/agent-runtime/step-record.schema.json"
+            $ref: "../schemas/step-record.schema.json"
       additionalProperties: false
     SessionShowResponse:
       type: object
       required: [session, threads]
       properties:
         session:
-          $ref: "../schemas/agent-runtime/session-record.schema.json"
+          $ref: "../schemas/session-record.schema.json"
         threads:
           type: array
           items:
@@ -850,7 +850,7 @@ components:
           type: string
           pattern: "^thread_"
         thread:
-          $ref: "../schemas/agent-runtime/thread-record.schema.json"
+          $ref: "../schemas/thread-record.schema.json"
       additionalProperties: false
     ErrorResponse:
       type: object

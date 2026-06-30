@@ -538,7 +538,7 @@ mod tests {
             catalog_path: None,
             trace_path: None,
             store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agent-runtime/agents.yaml"),
+            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
             tool_overrides: ToolOverrides::default(),
             chat: test_chat_options("mock response"),
             timeout_seconds: 60,
@@ -574,7 +574,7 @@ mod tests {
             catalog_path: None,
             trace_path: None,
             store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agent-runtime/agents.yaml"),
+            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
             tool_overrides: ToolOverrides::default(),
             chat: test_chat_options("chat answer"),
             timeout_seconds: 60,
@@ -613,7 +613,7 @@ mod tests {
             catalog_path: None,
             trace_path: None,
             store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agent-runtime/agents.yaml"),
+            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
             tool_overrides: ToolOverrides::default(),
             chat: test_chat_options("unused"),
             timeout_seconds: 60,
@@ -626,7 +626,7 @@ mod tests {
         state.clear_log();
 
         let events: Vec<ChatTurnEvent> = serde_json::from_str(include_str!(
-            "../../../../docs/fixtures/agent_chat_turn_events.json"
+            "../../../../fixtures/docs/agent_chat_turn_events.json"
         ))
         .expect("shared chat turn events fixture");
         let mut assistant_text = String::new();
@@ -664,7 +664,7 @@ mod tests {
             catalog_path: None,
             trace_path: None,
             store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agent-runtime/agents.yaml"),
+            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
             tool_overrides: ToolOverrides::default(),
             chat: test_chat_options("unused"),
             timeout_seconds: 60,
@@ -677,7 +677,7 @@ mod tests {
         state.clear_log();
 
         let events: Vec<ChatTurnEvent> = serde_json::from_str(include_str!(
-            "../../../../docs/fixtures/agent_chat_ask_user_turn_events.json"
+            "../../../../fixtures/docs/agent_chat_ask_user_turn_events.json"
         ))
         .expect("shared ask_user turn events fixture");
         let mut assistant_text = String::new();
@@ -719,7 +719,7 @@ mod tests {
             catalog_path: None,
             trace_path: None,
             store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agent-runtime/agents.yaml"),
+            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
             tool_overrides: ToolOverrides::default(),
             chat: test_chat_options("mock response"),
             timeout_seconds: 60,
@@ -750,7 +750,7 @@ mod tests {
             catalog_path: None,
             trace_path: None,
             store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agent-runtime/agents.yaml"),
+            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
             tool_overrides: ToolOverrides::default(),
             chat: test_chat_options("mock response"),
             timeout_seconds: 60,

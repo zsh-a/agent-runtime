@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn committed_chat_turn_fixtures_match_runtime_types() {
         let request: ChatTurnRequest = serde_json::from_str(include_str!(
-            "../../../fixtures/agent-runtime/chat-turn-request.valid.json"
+            "../../../fixtures/contracts/chat-turn-request.valid.json"
         ))
         .expect("request fixture");
         let state = chat_turn_initial_state(&request).expect("request creates state");
@@ -982,11 +982,11 @@ mod tests {
         assert_eq!(state.max_tool_rounds, 4);
 
         let pending_state: ChatTurnState = serde_json::from_str(include_str!(
-            "../../../fixtures/agent-runtime/chat-turn-state.requires-tool-results.valid.json"
+            "../../../fixtures/contracts/chat-turn-state.requires-tool-results.valid.json"
         ))
         .expect("state fixture");
         let result: ChatToolResult = serde_json::from_str(include_str!(
-            "../../../fixtures/agent-runtime/chat-tool-result.valid.json"
+            "../../../fixtures/contracts/chat-tool-result.valid.json"
         ))
         .expect("tool result fixture");
         let resumed =
@@ -995,7 +995,7 @@ mod tests {
         assert!(resumed.pending_tool_calls.is_empty());
 
         let event: ChatTurnEvent = serde_json::from_str(include_str!(
-            "../../../fixtures/agent-runtime/chat-turn-event.round-finished.requires-tool-results.valid.json"
+            "../../../fixtures/contracts/chat-turn-event.round-finished.requires-tool-results.valid.json"
         ))
         .expect("event fixture");
         assert_eq!(event.kind, ChatTurnEventKind::RoundFinished);
@@ -1005,7 +1005,7 @@ mod tests {
     #[test]
     fn shared_agent_chat_turn_event_fixture_matches_runtime_types() {
         let events: Vec<ChatTurnEvent> = serde_json::from_str(include_str!(
-            "../../../docs/fixtures/agent_chat_turn_events.json"
+            "../../../fixtures/docs/agent_chat_turn_events.json"
         ))
         .expect("shared chat turn events fixture");
 

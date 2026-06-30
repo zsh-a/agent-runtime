@@ -5,157 +5,157 @@ use serde_json::Value;
 #[test]
 fn committed_fixtures_match_json_schemas() {
     assert_valid(
-        "schemas/agent-runtime/run-request.schema.json",
-        "fixtures/agent-runtime/run-request.valid.json",
+        "schemas/run-request.schema.json",
+        "fixtures/contracts/run-request.valid.json",
     );
     assert_invalid(
-        "schemas/agent-runtime/run-request.schema.json",
-        "fixtures/agent-runtime/run-request.invalid.missing-protocol-version.json",
+        "schemas/run-request.schema.json",
+        "fixtures/contracts/run-request.invalid.missing-protocol-version.json",
     );
     assert_valid(
-        "schemas/agent-runtime/run-result.schema.json",
-        "fixtures/agent-runtime/run-result.completed.valid.json",
+        "schemas/run-result.schema.json",
+        "fixtures/contracts/run-result.completed.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/trace.schema.json",
-        "fixtures/agent-runtime/trace.valid.json",
+        "schemas/trace.schema.json",
+        "fixtures/contracts/trace.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/trace.schema.json",
-        "fixtures/agent-runtime/trace.valid.closed-early-step.json",
+        "schemas/trace.schema.json",
+        "fixtures/contracts/trace.valid.closed-early-step.json",
     );
     assert_invalid(
-        "schemas/agent-runtime/trace.schema.json",
-        "fixtures/agent-runtime/trace.invalid.missing-step-run-state.json",
+        "schemas/trace.schema.json",
+        "fixtures/contracts/trace.invalid.missing-step-run-state.json",
     );
     assert_invalid(
-        "schemas/agent-runtime/trace.schema.json",
-        "fixtures/agent-runtime/trace.invalid.missing-step-terminal-reason.json",
+        "schemas/trace.schema.json",
+        "fixtures/contracts/trace.invalid.missing-step-terminal-reason.json",
     );
     assert_invalid(
-        "schemas/agent-runtime/trace.schema.json",
-        "fixtures/agent-runtime/trace.invalid.unknown-step-terminal-reason.json",
+        "schemas/trace.schema.json",
+        "fixtures/contracts/trace.invalid.unknown-step-terminal-reason.json",
     );
     assert_invalid(
-        "schemas/agent-runtime/trace.schema.json",
-        "fixtures/agent-runtime/trace.invalid.unknown-step-status.json",
+        "schemas/trace.schema.json",
+        "fixtures/contracts/trace.invalid.unknown-step-status.json",
     );
     assert_invalid(
-        "schemas/agent-runtime/trace.schema.json",
-        "fixtures/agent-runtime/trace.invalid.non-string-step-tool-name.json",
+        "schemas/trace.schema.json",
+        "fixtures/contracts/trace.invalid.non-string-step-tool-name.json",
     );
     assert_invalid(
-        "schemas/agent-runtime/trace.schema.json",
-        "fixtures/agent-runtime/trace.invalid.empty-step-tool-name.json",
+        "schemas/trace.schema.json",
+        "fixtures/contracts/trace.invalid.empty-step-tool-name.json",
     );
     assert_invalid(
-        "schemas/agent-runtime/trace.schema.json",
-        "fixtures/agent-runtime/trace.invalid.mismatched-step-run-state-status.json",
+        "schemas/trace.schema.json",
+        "fixtures/contracts/trace.invalid.mismatched-step-run-state-status.json",
     );
     assert_invalid(
-        "schemas/agent-runtime/trace.schema.json",
-        "fixtures/agent-runtime/trace.invalid.mismatched-step-terminal-status.json",
+        "schemas/trace.schema.json",
+        "fixtures/contracts/trace.invalid.mismatched-step-terminal-status.json",
     );
     assert_valid(
-        "schemas/agent-runtime/catalog.schema.json",
-        "fixtures/agent-runtime/catalog.valid.json",
+        "schemas/catalog.schema.json",
+        "fixtures/contracts/catalog.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/debug-bundle-manifest.schema.json",
-        "fixtures/agent-runtime/debug-bundle-manifest.valid.json",
+        "schemas/debug-bundle-manifest.schema.json",
+        "fixtures/contracts/debug-bundle-manifest.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/debug-state-snapshot.schema.json",
-        "fixtures/agent-runtime/debug-state-snapshot.valid.json",
+        "schemas/debug-state-snapshot.schema.json",
+        "fixtures/contracts/debug-state-snapshot.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/debug-replay-config.schema.json",
-        "fixtures/agent-runtime/debug-replay-config.valid.json",
+        "schemas/debug-replay-config.schema.json",
+        "fixtures/contracts/debug-replay-config.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/recovery-report.schema.json",
-        "fixtures/agent-runtime/recovery-report.valid.json",
+        "schemas/recovery-report.schema.json",
+        "fixtures/contracts/recovery-report.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/prompt-manifest.schema.json",
-        "fixtures/agent-runtime/prompt-manifest.valid.json",
+        "schemas/prompt-manifest.schema.json",
+        "fixtures/contracts/prompt-manifest.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/tool-call-record.schema.json",
-        "fixtures/agent-runtime/tool-call-record.valid.json",
+        "schemas/tool-call-record.schema.json",
+        "fixtures/contracts/tool-call-record.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/tool-source-manifest.schema.json",
-        "fixtures/agent-runtime/tool-source.example.json",
+        "schemas/tool-source-manifest.schema.json",
+        "fixtures/contracts/tool-source.example.json",
     );
     assert_valid(
-        "schemas/agent-runtime/tool-source-manifest.schema.json",
-        "fixtures/agent-runtime/mcp-tool-source.example.json",
+        "schemas/tool-source-manifest.schema.json",
+        "fixtures/contracts/mcp-tool-source.example.json",
     );
     assert_valid(
-        "schemas/agent-runtime/tool-source-manifest.schema.json",
-        "fixtures/agent-runtime/http-tool-source.example.json",
+        "schemas/tool-source-manifest.schema.json",
+        "fixtures/contracts/http-tool-source.example.json",
     );
     assert_valid(
-        "schemas/agent-runtime/hook-event.schema.json",
-        "fixtures/agent-runtime/hook-event.valid.json",
+        "schemas/hook-event.schema.json",
+        "fixtures/contracts/hook-event.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/proposal-envelope.schema.json",
-        "fixtures/agent-runtime/proposal-envelope.valid.json",
+        "schemas/proposal-envelope.schema.json",
+        "fixtures/contracts/proposal-envelope.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/approval-decision.schema.json",
-        "fixtures/agent-runtime/approval-decision.valid.json",
+        "schemas/approval-decision.schema.json",
+        "fixtures/contracts/approval-decision.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/llm-request.schema.json",
-        "fixtures/agent-runtime/llm-request.valid.json",
+        "schemas/llm-request.schema.json",
+        "fixtures/contracts/llm-request.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/llm-response.schema.json",
-        "fixtures/agent-runtime/llm-response.valid.json",
+        "schemas/llm-response.schema.json",
+        "fixtures/contracts/llm-response.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/chat-turn-request.schema.json",
-        "fixtures/agent-runtime/chat-turn-request.valid.json",
+        "schemas/chat-turn-request.schema.json",
+        "fixtures/contracts/chat-turn-request.valid.json",
     );
     assert_invalid(
-        "schemas/agent-runtime/chat-turn-request.schema.json",
-        "fixtures/agent-runtime/chat-turn-request.invalid.missing-messages.json",
+        "schemas/chat-turn-request.schema.json",
+        "fixtures/contracts/chat-turn-request.invalid.missing-messages.json",
     );
     assert_valid(
-        "schemas/agent-runtime/chat-turn-state.schema.json",
-        "fixtures/agent-runtime/chat-turn-state.requires-tool-results.valid.json",
+        "schemas/chat-turn-state.schema.json",
+        "fixtures/contracts/chat-turn-state.requires-tool-results.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/chat-tool-result.schema.json",
-        "fixtures/agent-runtime/chat-tool-result.valid.json",
+        "schemas/chat-tool-result.schema.json",
+        "fixtures/contracts/chat-tool-result.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/chat-turn-event.schema.json",
-        "fixtures/agent-runtime/chat-turn-event.round-finished.requires-tool-results.valid.json",
+        "schemas/chat-turn-event.schema.json",
+        "fixtures/contracts/chat-turn-event.round-finished.requires-tool-results.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/session-record.schema.json",
-        "fixtures/agent-runtime/session-record.valid.json",
+        "schemas/session-record.schema.json",
+        "fixtures/contracts/session-record.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/thread-record.schema.json",
-        "fixtures/agent-runtime/thread-record.valid.json",
+        "schemas/thread-record.schema.json",
+        "fixtures/contracts/thread-record.valid.json",
     );
     assert_valid(
-        "schemas/agent-runtime/step-record.schema.json",
-        "fixtures/agent-runtime/step-record.valid.json",
+        "schemas/step-record.schema.json",
+        "fixtures/contracts/step-record.valid.json",
     );
 }
 
 #[test]
 fn example_registry_agents_match_agent_spec_schema() {
-    let schema = read_json("schemas/agent-runtime/agent-spec.schema.json");
+    let schema = read_json("schemas/agent-spec.schema.json");
     let validator = jsonschema::validator_for(&schema).expect("agent schema compiles");
-    let registry: Value = serde_yaml::from_str(&read_text("examples/agent-runtime/agents.yaml"))
-        .expect("example registry parses");
+    let registry: Value =
+        serde_yaml::from_str(&read_text("examples/agents.yaml")).expect("example registry parses");
     let agents = registry
         .get("agents")
         .and_then(Value::as_array)
@@ -171,12 +171,12 @@ fn example_registry_agents_match_agent_spec_schema() {
 
 #[test]
 fn committed_eval_cases_match_schema() {
-    let schema = read_json("schemas/agent-runtime/eval-case.schema.json");
+    let schema = read_json("schemas/eval-case.schema.json");
     let validator = jsonschema::validator_for(&schema).expect("eval case schema compiles");
     for path in [
-        "evals/agent-runtime/catalog_dry_run.yaml",
-        "evals/agent-runtime/tool_call_sequence.yaml",
-        "evals/agent-runtime/proposal_expectation.yaml",
+        "evals/catalog_dry_run.yaml",
+        "evals/tool_call_sequence.yaml",
+        "evals/proposal_expectation.yaml",
     ] {
         let instance: Value =
             serde_yaml::from_str(&read_text(path)).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -232,11 +232,11 @@ fn openapi_contract_documents_http_server_routes() {
     );
     assert_eq!(
         openapi["components"]["schemas"]["HookEvent"]["$ref"],
-        "../schemas/agent-runtime/hook-event.schema.json"
+        "../schemas/hook-event.schema.json"
     );
     assert_eq!(
         openapi["components"]["schemas"]["PromptManifest"]["$ref"],
-        "../schemas/agent-runtime/prompt-manifest.schema.json"
+        "../schemas/prompt-manifest.schema.json"
     );
     assert_eq!(
         openapi["paths"]["/runs/{run_id}"]["get"]["responses"]["200"]["content"]["application/json"]
@@ -255,7 +255,7 @@ fn openapi_contract_documents_http_server_routes() {
     assert_eq!(
         openapi["paths"]["/runs/{run_id}/trace"]["get"]["responses"]["200"]["content"]["application/json"]
             ["schema"]["$ref"],
-        "../schemas/agent-runtime/trace.schema.json"
+        "../schemas/trace.schema.json"
     );
     assert_eq!(
         openapi["paths"]["/runs/{run_id}/events"]["get"]["responses"]["200"]["content"]["text/event-stream"]

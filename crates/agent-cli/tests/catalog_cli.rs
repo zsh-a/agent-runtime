@@ -14,7 +14,7 @@ fn catalog_summary_reads_flutter_export_shape() {
         .args([
             "catalog",
             "summary",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
         ])
         .assert()
         .success()
@@ -38,7 +38,7 @@ fn catalog_agents_and_tools_are_printable() {
         .args([
             "catalog",
             "agents",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
         ])
         .assert()
         .success()
@@ -52,7 +52,7 @@ fn catalog_agents_and_tools_are_printable() {
         .args([
             "catalog",
             "tools",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
         ])
         .assert()
         .success()
@@ -71,7 +71,7 @@ fn catalog_prompt_manifest_records_prompt_model_and_block_hashes() {
         .args([
             "catalog",
             "prompt-manifest",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
         ])
         .assert()
         .success()
@@ -98,8 +98,8 @@ fn validate_accepts_valid_schema_fixture() {
     let output = agent_cmd()
         .args([
             "validate",
-            "../../schemas/agent-runtime/run-request.schema.json",
-            "../../fixtures/agent-runtime/run-request.valid.json",
+            "../../schemas/run-request.schema.json",
+            "../../fixtures/contracts/run-request.valid.json",
         ])
         .assert()
         .success()
@@ -117,8 +117,8 @@ fn validate_rejects_invalid_schema_fixture() {
     let output = agent_cmd()
         .args([
             "validate",
-            "../../schemas/agent-runtime/run-request.schema.json",
-            "../../fixtures/agent-runtime/run-request.invalid.missing-protocol-version.json",
+            "../../schemas/run-request.schema.json",
+            "../../fixtures/contracts/run-request.invalid.missing-protocol-version.json",
         ])
         .assert()
         .failure()
@@ -145,7 +145,7 @@ fn config_profile_drives_run_defaults() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = dir.path().join("configured-run-store");
     let config_path = dir.path().join("agent-runtime.toml");
-    let registry = std::path::Path::new("../../examples/agent-runtime/agents.yaml")
+    let registry = std::path::Path::new("../../examples/agents.yaml")
         .canonicalize()
         .expect("registry path");
     std::fs::write(
@@ -183,7 +183,7 @@ timeout_seconds = 5
             "run",
             "echo_agent",
             "--input",
-            "../../examples/agent-runtime/fixtures/echo-input.json",
+            "../../examples/fixtures/echo-input.json",
         ])
         .assert()
         .success()
@@ -207,9 +207,9 @@ fn run_can_use_catalog_backed_dry_run_registry() {
             "run",
             "execution_review",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input",
-            "../../fixtures/agent-runtime/run-request.valid.json",
+            "../../fixtures/contracts/run-request.valid.json",
             "--store",
             store.to_str().expect("utf8 store path"),
             "--trace-out",
@@ -248,9 +248,9 @@ fn replay_can_execute_from_trace() {
             "run",
             "execution_review",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input",
-            "../../fixtures/agent-runtime/run-request.valid.json",
+            "../../fixtures/contracts/run-request.valid.json",
             "--store",
             store.to_str().expect("utf8 store path"),
             "--trace-out",
@@ -265,7 +265,7 @@ fn replay_can_execute_from_trace() {
             trace_path.to_str().expect("utf8 trace path"),
             "--execute",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--store",
             store.to_str().expect("utf8 store path"),
             "--trace-out",
@@ -304,9 +304,9 @@ fn replay_can_run_deterministically_from_trace_without_writing_store() {
             "run",
             "execution_review",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input",
-            "../../fixtures/agent-runtime/run-request.valid.json",
+            "../../fixtures/contracts/run-request.valid.json",
             "--store",
             store.to_str().expect("utf8 store path"),
             "--trace-out",
@@ -404,7 +404,7 @@ fn inspect_and_debug_bundle_export_use_file_store() {
             "run",
             "execution_review",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input",
             input_path.to_str().expect("utf8 input path"),
             "--session",
@@ -482,7 +482,7 @@ fn inspect_and_debug_bundle_export_use_file_store() {
             "--out",
             bundle.to_str().expect("utf8 bundle path"),
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
         ])
         .assert()
         .success()
@@ -734,7 +734,7 @@ fn catalog_dry_run_can_call_process_tool_host() {
             "run",
             "execution_review",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input",
             input_path.to_str().expect("utf8 input path"),
             "--trace-out",
@@ -816,7 +816,7 @@ fn catalog_dry_run_retries_retryable_process_tool_errors() {
             "run",
             "execution_review",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input",
             input_path.to_str().expect("utf8 input path"),
             "--trace-out",
@@ -893,7 +893,7 @@ fn metrics_summary_counts_runs_tools_and_proposals() {
             "run",
             "execution_review",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input",
             input_path.to_str().expect("utf8 input path"),
             "--store",
@@ -962,7 +962,7 @@ fn catalog_dry_run_can_call_mock_tool_from_file() {
             "run",
             "execution_review",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input",
             input_path.to_str().expect("utf8 input path"),
             "--mock-tool",
@@ -992,7 +992,7 @@ fn tool_cli_lists_catalog_tools_and_calls_process_tool_host() {
             "tool",
             "list",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
         ])
         .assert()
         .success()
@@ -1009,7 +1009,7 @@ fn tool_cli_lists_catalog_tools_and_calls_process_tool_host() {
             "call",
             "propose_fake",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input-json",
             r#"{"value":42}"#,
             "--tool-host",
@@ -1036,7 +1036,7 @@ fn tool_cli_can_call_inline_mock_tool() {
             "call",
             "propose_fake",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input-json",
             r#"{"value":42}"#,
             "--mock-tool",
@@ -1238,7 +1238,7 @@ fn tool_cli_rejects_tools_missing_from_catalog() {
             "call",
             "missing_tool",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--tool-host",
             agent_bin.to_str().expect("utf8 agent bin"),
             "dev-tool-host",
@@ -1253,9 +1253,9 @@ fn tui_once_renders_catalog_and_trace_snapshot() {
         .args([
             "tui",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--trace",
-            "../../fixtures/agent-runtime/trace.valid.json",
+            "../../fixtures/contracts/trace.valid.json",
             "--once",
         ])
         .assert()
@@ -1290,7 +1290,7 @@ fn stdio_server_handles_catalog_summary_and_agent_run() {
             "serve",
             "--stdio",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--store",
             store.to_str().expect("utf8 store path"),
             "--tool-host",
@@ -1338,7 +1338,7 @@ fn http_server_handles_catalog_summary_and_agent_run() {
         .args([
             "serve",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--store",
             store.to_str().expect("utf8 store path"),
             "--host",
@@ -1428,7 +1428,7 @@ fn config_profile_drives_http_serve_defaults() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = dir.path().join("configured-http-store");
     let config_path = dir.path().join("agent-runtime.toml");
-    let catalog = std::path::Path::new("../../fixtures/agent-runtime/catalog.valid.json")
+    let catalog = std::path::Path::new("../../fixtures/contracts/catalog.valid.json")
         .canonicalize()
         .expect("catalog path");
     let port = reserve_local_port();
@@ -1476,7 +1476,7 @@ fn http_server_lists_and_calls_tools() {
         .args([
             "serve",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--store",
             store.to_str().expect("utf8 store path"),
             "--host",
@@ -1518,7 +1518,7 @@ fn http_server_persists_and_decides_proposals() {
         .args([
             "serve",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--store",
             store.to_str().expect("utf8 store path"),
             "--host",
@@ -1628,7 +1628,7 @@ fn http_server_persists_sessions_threads_and_steps() {
         .args([
             "serve",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--store",
             store.to_str().expect("utf8 store path"),
             "--host",
@@ -1708,7 +1708,7 @@ fn eval_runs_catalog_dry_run_and_checks_expectations() {
     let output = agent_cmd()
         .args([
             "eval",
-            "../../evals/agent-runtime/catalog_dry_run.yaml",
+            "../../evals/catalog_dry_run.yaml",
             "--store",
             store.to_str().expect("utf8 store path"),
         ])
@@ -1753,7 +1753,7 @@ fn eval_checks_expected_tool_call_sequence() {
     let output = agent_cmd()
         .args([
             "eval",
-            "../../evals/agent-runtime/tool_call_sequence.yaml",
+            "../../evals/tool_call_sequence.yaml",
             "--store",
             store.to_str().expect("utf8 store path"),
         ])
@@ -1782,7 +1782,7 @@ fn eval_checks_expected_proposals() {
     let output = agent_cmd()
         .args([
             "eval",
-            "../../evals/agent-runtime/proposal_expectation.yaml",
+            "../../evals/proposal_expectation.yaml",
             "--store",
             store.to_str().expect("utf8 store path"),
         ])
@@ -1821,7 +1821,7 @@ fn eval_runs_scoring_hook_and_reports_score() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = dir.path().join("eval-score-store");
     let eval_file = dir.path().join("scored.yaml");
-    let catalog = std::path::Path::new("../../fixtures/agent-runtime/catalog.valid.json")
+    let catalog = std::path::Path::new("../../fixtures/contracts/catalog.valid.json")
         .canonicalize()
         .expect("catalog path");
     let agent_bin = assert_cmd::cargo::cargo_bin("agent");
@@ -1914,7 +1914,7 @@ fn eval_can_run_directory_suites() {
     let output = agent_cmd()
         .args([
             "eval",
-            "../../evals/agent-runtime",
+            "../../evals",
             "--store",
             store.to_str().expect("utf8 store path"),
         ])
@@ -1951,9 +1951,9 @@ fn eval_create_generates_case_and_golden_trace_from_run_store() {
             "run",
             "execution_review",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input",
-            "../../fixtures/agent-runtime/run-request.valid.json",
+            "../../fixtures/contracts/run-request.valid.json",
             "--store",
             store.to_str().expect("utf8 store path"),
         ])
@@ -1974,7 +1974,7 @@ fn eval_create_generates_case_and_golden_trace_from_run_store() {
             "--store",
             store.to_str().expect("utf8 store path"),
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--out",
             eval_file.to_str().expect("utf8 eval path"),
             "--id",
@@ -2061,7 +2061,7 @@ fn eval_create_generates_proposal_expectations_from_run_store() {
             "run",
             "execution_review",
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--input",
             input_file.to_str().expect("utf8 input path"),
             "--store",
@@ -2084,7 +2084,7 @@ fn eval_create_generates_proposal_expectations_from_run_store() {
             "--store",
             store.to_str().expect("utf8 store path"),
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--out",
             eval_file.to_str().expect("utf8 eval path"),
             "--id",
@@ -2227,7 +2227,7 @@ fn proposal_cli_persists_and_decides_proposals() {
             "--store",
             store.to_str().expect("utf8 store path"),
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--mock-tool",
             r#"propose_fake={"applied":true}"#,
         ])
@@ -2250,7 +2250,7 @@ fn proposal_cli_persists_and_decides_proposals() {
             "--store",
             store.to_str().expect("utf8 store path"),
             "--catalog",
-            "../../fixtures/agent-runtime/catalog.valid.json",
+            "../../fixtures/contracts/catalog.valid.json",
             "--mock-tool",
             r#"propose_fake={"undone":true}"#,
         ])
