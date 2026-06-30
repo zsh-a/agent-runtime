@@ -29,6 +29,18 @@ crates/
   agent-chat/       Shared ChatTurn request/event contract and provider/tool loop
   agent-cli/        Local developer surfaces and host adapters
 
+crates/agent-core/src/
+  lib.rs            Public exports only
+  ids.rs            Agent/run/proposal/session/thread/step identifiers
+  errors.rs         Agent, store, and tool error records
+  catalog.rs        Agent specs, schedules, catalog, prompt manifest
+  run.rs            Run request/result/status and runtime records
+  trace.rs          Trace and hook event wire records
+  session.rs        Session/thread/step records
+  proposal.rs       Proposal envelope and approval decisions
+  services.rs       Host service traits
+  stores.rs         Run/state/session/proposal/lock store traits
+
 crates/agent-runtime/src/
   lib.rs            Public exports only
   runner.rs         AgentRunner lifecycle, retry/timeout, idempotency keys
@@ -62,7 +74,12 @@ crates/agent-llm/src/
   tests.rs          Provider request mapping and SSE stream tests
 
 crates/agent-chat/src/
-  lib.rs            ChatTurnRequest, ChatTurnEvent, ChatTurnRunner, tool-round loop
+  lib.rs            Public exports and tests
+  types.rs          ChatTurn request/state/event/tool-result wire DTOs
+  state.rs          Pure chat turn state transitions
+  runner.rs         LLM/tool continuation loop and stream orchestration
+  events.rs         Event sender helpers
+  error.rs          ChatTurn error mapping
 
 crates/agent-cli/src/
   main.rs           clap wiring and top-level command dispatch only
@@ -70,7 +87,8 @@ crates/agent-cli/src/
   commands/         Thin command handlers for run/catalog/tool/proposal/session/llm/cmd
   catalog.rs        Catalog loading, prompt manifest, catalog dry-run registry
   registry.rs       YAML registry and local example agent implementations
-  tools.rs          CLI AgentServices, mock tools, process/MCP/HTTP tool sources
+  tools.rs          Tool facade and CLI AgentServices
+  tools/            Tool source manifests, process/MCP/HTTP adapters, shared errors
   runtime_server.rs HTTP/stdio runtime orchestration over AgentRunner
   server.rs         HTTP and stdio server transport handlers
   replay.rs         Trace replay modes and output comparison
@@ -143,7 +161,7 @@ TUI uses persistent natural input by default. Plain text runs the shared
 | Change LLM provider behavior | `crates/agent-llm/src/providers/` | `rtk cargo test -p agent-llm` |
 | Change ChatTurn behavior | `crates/agent-chat/`, `schemas/chat-turn-*.schema.json`, ChatTurn fixtures | `rtk cargo test -p agent-chat`, `rtk cargo test -p agent-cli --test contracts` |
 | Change CLI command behavior | `crates/agent-cli/src/commands/` plus supporting module | focused command test, `rtk cargo test -p agent-cli` |
-| Change tool host behavior | `crates/agent-cli/src/tools.rs` | CLI tool tests |
+| Change tool host behavior | `crates/agent-cli/src/tools.rs`, `crates/agent-cli/src/tools/` | CLI tool tests |
 | Change proposal apply behavior | `crates/agent-cli/src/proposal.rs` | proposal CLI tests |
 
 ## Invariants
@@ -151,6 +169,10 @@ TUI uses persistent natural input by default. Plain text runs the shared
 - All top-level runtime wire messages carry `protocol_version: "agent.v1"`.
 - Cross-language contracts are JSON-first. Keep envelopes stable and put
   business-specific data in `input`, `output`, `payload`, or `metadata`.
+- Committed JSON Schemas under `schemas/` are the authoritative wire contract.
+  Runtime DTOs must deserialize every committed valid fixture that maps to a
+  Rust type, and contract changes must update schemas, fixtures, and contract
+  tests in the same change.
 - Runtime crates must not import host app framework or business feature code.
 - TUI natural input must execute through `ChatTurnRunner`. Runtime debugging
   slash commands may execute through `AgentRunner`, but must still use shared
@@ -161,7 +183,8 @@ TUI uses persistent natural input by default. Plain text runs the shared
 These are intentional or pending differences from the long-term design:
 
 - No standalone `agent-tools` crate exists yet. Tool traits live in
-  `agent-core`; CLI adapters own concrete tool hosts.
+  `agent-core`; concrete process/MCP/HTTP adapters are isolated under
+  `crates/agent-cli/src/tools/` pending a future crate extraction.
 - There is no standalone `bindings/dart` or `bindings/ts` SDK package.
 - Trace is event-first (`events`) and does not currently expose a separate
   `spans` array.

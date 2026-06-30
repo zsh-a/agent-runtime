@@ -1,5 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use agent_chat::{ChatToolResult, ChatTurnEvent, ChatTurnRequest, ChatTurnState};
+use agent_core::{
+    AgentRunResult, AgentRuntimeCatalog, AgentTrace, ApprovalDecision, HookEvent, PromptManifest,
+    ProposalEnvelope, RunRequest, SessionRecord, StepRecord, ThreadRecord,
+};
+use agent_llm::{LlmRequest, LlmResponse};
+use agent_runtime::RecoveryReport;
 use serde_json::Value;
 
 #[test]
@@ -148,6 +155,33 @@ fn committed_fixtures_match_json_schemas() {
         "schemas/step-record.schema.json",
         "fixtures/contracts/step-record.valid.json",
     );
+}
+
+#[test]
+fn committed_valid_fixtures_deserialize_to_runtime_types() {
+    assert_deserializes::<RunRequest>("fixtures/contracts/run-request.valid.json");
+    assert_deserializes::<AgentRunResult>("fixtures/contracts/run-result.completed.valid.json");
+    assert_deserializes::<AgentTrace>("fixtures/contracts/trace.valid.json");
+    assert_deserializes::<AgentTrace>("fixtures/contracts/trace.valid.closed-early-step.json");
+    assert_deserializes::<AgentRuntimeCatalog>("fixtures/contracts/catalog.valid.json");
+    assert_deserializes::<RecoveryReport>("fixtures/contracts/recovery-report.valid.json");
+    assert_deserializes::<PromptManifest>("fixtures/contracts/prompt-manifest.valid.json");
+    assert_deserializes::<HookEvent>("fixtures/contracts/hook-event.valid.json");
+    assert_deserializes::<ProposalEnvelope>("fixtures/contracts/proposal-envelope.valid.json");
+    assert_deserializes::<ApprovalDecision>("fixtures/contracts/approval-decision.valid.json");
+    assert_deserializes::<LlmRequest>("fixtures/contracts/llm-request.valid.json");
+    assert_deserializes::<LlmResponse>("fixtures/contracts/llm-response.valid.json");
+    assert_deserializes::<ChatTurnRequest>("fixtures/contracts/chat-turn-request.valid.json");
+    assert_deserializes::<ChatTurnState>(
+        "fixtures/contracts/chat-turn-state.requires-tool-results.valid.json",
+    );
+    assert_deserializes::<ChatToolResult>("fixtures/contracts/chat-tool-result.valid.json");
+    assert_deserializes::<ChatTurnEvent>(
+        "fixtures/contracts/chat-turn-event.round-finished.requires-tool-results.valid.json",
+    );
+    assert_deserializes::<SessionRecord>("fixtures/contracts/session-record.valid.json");
+    assert_deserializes::<ThreadRecord>("fixtures/contracts/thread-record.valid.json");
+    assert_deserializes::<StepRecord>("fixtures/contracts/step-record.valid.json");
 }
 
 #[test]
@@ -318,6 +352,14 @@ fn assert_invalid(schema_path: &str, instance_path: &str) {
         !validator.is_valid(&instance),
         "{instance_path} unexpectedly matched {schema_path}"
     );
+}
+
+fn assert_deserializes<T>(instance_path: &str)
+where
+    T: serde::de::DeserializeOwned,
+{
+    let _: T = serde_json::from_str(&read_text(instance_path))
+        .unwrap_or_else(|e| panic!("{instance_path}: {e}"));
 }
 
 fn assert_json_valid(validator: &jsonschema::Validator, instance: &Value) {

@@ -5,8 +5,15 @@ use agent_core::{
 };
 use async_trait::async_trait;
 use camino::{Utf8Path, Utf8PathBuf};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::io::AsyncWriteExt;
 
 use crate::util::{same_scope, sort_and_limit_runs};
+
+static TEMP_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct FileRunStore {
     root: Utf8PathBuf,
@@ -225,9 +232,55 @@ impl AgentSessionStore for FileSessionStore {
 
 async fn write_json(path: &Utf8Path, value: &impl serde::Serialize) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(value).map_err(map_json_err)?;
-    fs_err::tokio::write(path, bytes)
+    let parent = path
+        .parent()
+        .ok_or_else(|| StoreError::new(format!("path has no parent: {path}")))?;
+    fs_err::tokio::create_dir_all(parent)
         .await
-        .map_err(map_store_err)
+        .map_err(map_store_err)?;
+    let temp_path = temp_write_path(path)?;
+
+    let write_result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temp_path.as_std_path())
+            .await?;
+        file.write_all(&bytes).await?;
+        file.sync_all().await?;
+        drop(file);
+        fs_err::tokio::rename(&temp_path, path).await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+
+    if let Err(err) = write_result {
+        let _ = fs_err::tokio::remove_file(&temp_path).await;
+        return Err(map_store_err(err));
+    }
+
+    Ok(())
+}
+
+fn temp_write_path(path: &Utf8Path) -> Result<Utf8PathBuf, StoreError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StoreError::new(format!("path has no parent: {path}")))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| StoreError::new(format!("path has no file name: {path}")))?;
+    let counter = TEMP_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+
+    Ok(parent.join(format!(
+        ".{file_name}.{}.{}.{}.tmp",
+        std::process::id(),
+        nanos,
+        counter
+    )))
 }
 
 async fn read_optional_json<T>(path: &Utf8Path) -> Result<Option<T>, StoreError>

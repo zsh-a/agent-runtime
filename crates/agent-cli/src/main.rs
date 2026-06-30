@@ -35,10 +35,7 @@ use commands::run::{RunCliOptions, TickCliOptions, run_agent_once, tick_agents};
 use commands::session::{SessionCommand, run_session_command};
 use commands::tool::{ToolCommand, run_tool_command};
 use commands::workflow::{CommandRunOptions, create_command_from_run, run_command_template};
-use config::{
-    configured_path, configured_paths, configured_string, configured_u16, configured_u32,
-    configured_u64, load_agent_config,
-};
+use config::load_agent_config;
 use debug_bundle::export_debug_bundle;
 use dev_stdio::{run_dev_mcp_server, run_dev_tool_host};
 use eval::{create_eval_from_run, run_dev_score_hook, run_eval_path};
@@ -57,6 +54,99 @@ const DEFAULT_EVAL_STORE: &str = ".agent-runtime/eval-store";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8765;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+
+#[derive(Debug)]
+struct AppContext {
+    config: config::EffectiveAgentConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedExecutionOptions {
+    timeout_seconds: u64,
+    max_retries: u32,
+    retry_backoff_ms: u64,
+}
+
+impl AppContext {
+    fn new(config: config::EffectiveAgentConfig) -> Self {
+        Self { config }
+    }
+
+    fn config(&self) -> &config::EffectiveAgentConfig {
+        &self.config
+    }
+
+    fn registry(&self, value: Utf8PathBuf) -> Utf8PathBuf {
+        config::configured_path(
+            value,
+            DEFAULT_REGISTRY,
+            self.config.runtime.registry.as_ref(),
+        )
+    }
+
+    fn catalog(&self, value: Option<Utf8PathBuf>) -> Option<Utf8PathBuf> {
+        value.or_else(|| self.config.runtime.catalog.clone())
+    }
+
+    fn required_catalog(&self, value: Option<Utf8PathBuf>) -> Result<Utf8PathBuf> {
+        self.catalog(value)
+            .ok_or_else(|| miette!("--catalog or runtime.catalog in config is required"))
+    }
+
+    fn store(&self, value: Utf8PathBuf) -> Utf8PathBuf {
+        config::configured_path(value, DEFAULT_STORE, self.config.runtime.store.as_ref())
+    }
+
+    fn eval_store(&self, value: Utf8PathBuf) -> Utf8PathBuf {
+        if value == Utf8PathBuf::from(DEFAULT_EVAL_STORE) {
+            self.config
+                .runtime
+                .eval_store
+                .clone()
+                .or_else(|| self.config.runtime.store.clone())
+                .unwrap_or(value)
+        } else {
+            value
+        }
+    }
+
+    fn tool_sources(&self, values: Vec<Utf8PathBuf>) -> Vec<Utf8PathBuf> {
+        config::configured_paths(values, self.config.runtime.tool_sources.as_ref())
+    }
+
+    fn execution(
+        &self,
+        timeout_seconds: u64,
+        max_retries: u32,
+        retry_backoff_ms: u64,
+    ) -> ResolvedExecutionOptions {
+        ResolvedExecutionOptions {
+            timeout_seconds: config::configured_u64(
+                timeout_seconds,
+                DEFAULT_TIMEOUT_SECONDS,
+                self.config.runtime.timeout_seconds,
+            ),
+            max_retries: config::configured_u32(max_retries, 0, self.config.runtime.max_retries),
+            retry_backoff_ms: config::configured_u64(
+                retry_backoff_ms,
+                0,
+                self.config.runtime.retry_backoff_ms,
+            ),
+        }
+    }
+
+    fn stdio(&self, value: bool) -> bool {
+        value || self.config.runtime.stdio.unwrap_or(false)
+    }
+
+    fn host(&self, value: String) -> String {
+        config::configured_string(value, DEFAULT_HOST, self.config.runtime.host.as_ref())
+    }
+
+    fn port(&self, value: u16) -> u16 {
+        config::configured_u16(value, DEFAULT_PORT, self.config.runtime.port)
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "agent")]
@@ -290,7 +380,7 @@ enum CmdCommand {
     Create {
         #[arg(long)]
         from_run: String,
-        #[arg(long, default_value = ".agent-runtime/store")]
+        #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
         #[arg(long)]
         out: Utf8PathBuf,
@@ -307,7 +397,7 @@ enum CmdCommand {
         catalog: Option<Utf8PathBuf>,
         #[arg(long)]
         registry: Option<Utf8PathBuf>,
-        #[arg(long, default_value = ".agent-runtime/store")]
+        #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
         #[arg(long, num_args = 1.., value_name = "COMMAND")]
         tool_host: Vec<String>,
@@ -317,7 +407,7 @@ enum CmdCommand {
         tool_source: Vec<Utf8PathBuf>,
         #[arg(long)]
         trace_out: Option<Utf8PathBuf>,
-        #[arg(long, default_value_t = 60)]
+        #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECONDS)]
         timeout_seconds: u64,
         #[arg(long, default_value_t = 0)]
         max_retries: u32,
@@ -330,7 +420,7 @@ enum CmdCommand {
 enum DebugBundleCommand {
     Export {
         run_id: String,
-        #[arg(long, default_value = ".agent-runtime/store")]
+        #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
         #[arg(long)]
         out: Utf8PathBuf,
@@ -384,12 +474,12 @@ async fn main() -> Result<()> {
         .ok();
 
     let cli = Cli::parse();
-    let config = load_agent_config(cli.config.clone(), cli.profile.as_deref()).await?;
+    let context =
+        AppContext::new(load_agent_config(cli.config.clone(), cli.profile.as_deref()).await?);
 
     match cli.command {
         Command::List { registry } => {
-            let registry =
-                configured_path(registry, DEFAULT_REGISTRY, config.runtime.registry.as_ref());
+            let registry = context.registry(registry);
             let registry = load_registry(registry).await?;
             let specs = registry.list_specs();
             println!(
@@ -413,19 +503,11 @@ async fn main() -> Result<()> {
             max_retries,
             retry_backoff_ms,
         } => {
-            let catalog = catalog.or_else(|| config.runtime.catalog.clone());
-            let registry =
-                configured_path(registry, DEFAULT_REGISTRY, config.runtime.registry.as_ref());
-            let tool_source = configured_paths(tool_source, config.runtime.tool_sources.as_ref());
-            let store = configured_path(store, DEFAULT_STORE, config.runtime.store.as_ref());
-            let timeout_seconds = configured_u64(
-                timeout_seconds,
-                DEFAULT_TIMEOUT_SECONDS,
-                config.runtime.timeout_seconds,
-            );
-            let max_retries = configured_u32(max_retries, 0, config.runtime.max_retries);
-            let retry_backoff_ms =
-                configured_u64(retry_backoff_ms, 0, config.runtime.retry_backoff_ms);
+            let catalog = context.catalog(catalog);
+            let registry = context.registry(registry);
+            let tool_source = context.tool_sources(tool_source);
+            let store = context.store(store);
+            let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
             run_agent_once(RunCliOptions {
                 agent_id,
                 registry,
@@ -436,16 +518,15 @@ async fn main() -> Result<()> {
                 session,
                 thread,
                 store,
-                timeout_seconds,
-                max_retries,
-                retry_backoff_ms,
+                timeout_seconds: execution.timeout_seconds,
+                max_retries: execution.max_retries,
+                retry_backoff_ms: execution.retry_backoff_ms,
             })
             .await?;
         }
         Command::Tick { registry, store } => {
-            let registry =
-                configured_path(registry, DEFAULT_REGISTRY, config.runtime.registry.as_ref());
-            let store = configured_path(store, DEFAULT_STORE, config.runtime.store.as_ref());
+            let registry = context.registry(registry);
+            let store = context.store(store);
             tick_agents(TickCliOptions { registry, store }).await?;
         }
         Command::Replay {
@@ -463,19 +544,11 @@ async fn main() -> Result<()> {
             max_retries,
             retry_backoff_ms,
         } => {
-            let catalog = catalog.or_else(|| config.runtime.catalog.clone());
-            let registry =
-                configured_path(registry, DEFAULT_REGISTRY, config.runtime.registry.as_ref());
-            let tool_source = configured_paths(tool_source, config.runtime.tool_sources.as_ref());
-            let store = configured_path(store, DEFAULT_STORE, config.runtime.store.as_ref());
-            let timeout_seconds = configured_u64(
-                timeout_seconds,
-                DEFAULT_TIMEOUT_SECONDS,
-                config.runtime.timeout_seconds,
-            );
-            let max_retries = configured_u32(max_retries, 0, config.runtime.max_retries);
-            let retry_backoff_ms =
-                configured_u64(retry_backoff_ms, 0, config.runtime.retry_backoff_ms);
+            let catalog = context.catalog(catalog);
+            let registry = context.registry(registry);
+            let tool_source = context.tool_sources(tool_source);
+            let store = context.store(store);
+            let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
             let mode = if execute {
                 match mode {
                     Some(ReplayMode::View | ReplayMode::Deterministic) => {
@@ -498,9 +571,9 @@ async fn main() -> Result<()> {
                         tool_source,
                         store,
                         trace_out,
-                        timeout_seconds,
-                        max_retries,
-                        retry_backoff_ms,
+                        timeout_seconds: execution.timeout_seconds,
+                        max_retries: execution.max_retries,
+                        retry_backoff_ms: execution.retry_backoff_ms,
                     })
                     .await?;
                 }
@@ -514,7 +587,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Inspect { run_id, store } => {
-            let store = configured_path(store, DEFAULT_STORE, config.runtime.store.as_ref());
+            let store = context.store(store);
             let store = FileRunStore::new(store).await.into_diagnostic()?;
             let record = store
                 .get_run(&RunId(run_id.clone()))
@@ -592,24 +665,20 @@ async fn main() -> Result<()> {
         }
         Command::Config { command } => match command {
             ConfigCommand::Show => {
-                print_json(&config)?;
+                print_json(context.config())?;
             }
         },
         Command::Recover {
             store,
             timeout_seconds,
         } => {
-            let store = configured_path(store, DEFAULT_STORE, config.runtime.store.as_ref());
-            let timeout_seconds = configured_u64(
-                timeout_seconds,
-                DEFAULT_TIMEOUT_SECONDS,
-                config.runtime.timeout_seconds,
-            );
+            let store = context.store(store);
+            let execution = context.execution(timeout_seconds, 0, 0);
             let store = FileRunStore::new(store).await.into_diagnostic()?;
             let report = recover_stale_runs(
                 &store,
                 &ExecutionPolicy {
-                    timeout: Duration::from_secs(timeout_seconds),
+                    timeout: Duration::from_secs(execution.timeout_seconds),
                     max_retries: 0,
                     retry_backoff: Duration::ZERO,
                     max_concurrent_runs: 1,
@@ -673,14 +742,12 @@ async fn main() -> Result<()> {
             host,
             port,
         } => {
-            let catalog = catalog
-                .or_else(|| config.runtime.catalog.clone())
-                .ok_or_else(|| miette!("--catalog or runtime.catalog in config is required"))?;
-            let store = configured_path(store, DEFAULT_STORE, config.runtime.store.as_ref());
-            let tool_source = configured_paths(tool_source, config.runtime.tool_sources.as_ref());
-            let stdio = stdio || config.runtime.stdio.unwrap_or(false);
-            let host = configured_string(host, DEFAULT_HOST, config.runtime.host.as_ref());
-            let port = configured_u16(port, DEFAULT_PORT, config.runtime.port);
+            let catalog = context.required_catalog(catalog)?;
+            let store = context.store(store);
+            let tool_source = context.tool_sources(tool_source);
+            let stdio = context.stdio(stdio);
+            let host = context.host(host);
+            let port = context.port(port);
             let server = RuntimeServer::new(
                 catalog,
                 store,
@@ -715,19 +782,11 @@ async fn main() -> Result<()> {
             retry_backoff_ms,
             once,
         } => {
-            let catalog = catalog.or_else(|| config.runtime.catalog.clone());
-            let registry =
-                configured_path(registry, DEFAULT_REGISTRY, config.runtime.registry.as_ref());
-            let store = configured_path(store, DEFAULT_STORE, config.runtime.store.as_ref());
-            let tool_source = configured_paths(tool_source, config.runtime.tool_sources.as_ref());
-            let timeout_seconds = configured_u64(
-                timeout_seconds,
-                DEFAULT_TIMEOUT_SECONDS,
-                config.runtime.timeout_seconds,
-            );
-            let max_retries = configured_u32(max_retries, 0, config.runtime.max_retries);
-            let retry_backoff_ms =
-                configured_u64(retry_backoff_ms, 0, config.runtime.retry_backoff_ms);
+            let catalog = context.catalog(catalog);
+            let registry = context.registry(registry);
+            let store = context.store(store);
+            let tool_source = context.tool_sources(tool_source);
+            let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
             run_tui(TuiOptions {
                 catalog_path: catalog,
                 trace_path: trace,
@@ -745,9 +804,9 @@ async fn main() -> Result<()> {
                     max_output_tokens,
                     max_tool_rounds,
                 },
-                timeout_seconds,
-                max_retries,
-                retry_backoff_ms,
+                timeout_seconds: execution.timeout_seconds,
+                max_retries: execution.max_retries,
+                retry_backoff_ms: execution.retry_backoff_ms,
                 once,
             })
             .await?;
@@ -765,18 +824,9 @@ async fn main() -> Result<()> {
             id,
             golden_trace,
         } => {
-            let store = if store == Utf8PathBuf::from(DEFAULT_EVAL_STORE) {
-                config
-                    .runtime
-                    .eval_store
-                    .clone()
-                    .or_else(|| config.runtime.store.clone())
-                    .unwrap_or(store)
-            } else {
-                store
-            };
-            let catalog = catalog.or_else(|| config.runtime.catalog.clone());
-            let tool_source = configured_paths(tool_source, config.runtime.tool_sources.as_ref());
+            let store = context.eval_store(store);
+            let catalog = context.catalog(catalog);
+            let tool_source = context.tool_sources(tool_source);
             let result = if eval_path.as_str() == "create" || from_run.is_some() {
                 create_eval_from_run(
                     from_run.ok_or_else(|| miette!("--from-run is required"))?,

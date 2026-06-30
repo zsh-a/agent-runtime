@@ -769,6 +769,7 @@ fn normalize_volatile_json(value: &mut Value) {
                 "finished_at",
                 "occurred_at",
                 "expires_at",
+                "duration_ms",
                 "runtime_version",
             ] {
                 map.remove(key);
