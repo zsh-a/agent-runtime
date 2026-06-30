@@ -1,0 +1,8 @@
+/target/
+/.agent-runtime/store/
+/.agent-runtime/eval-store/
+/.agent-runtime/server-store/
+/.agent-runtime/commands/generated/
+*.log
+*.tmp
+.DS_Store
