@@ -22,6 +22,9 @@ Host application adapters and business-domain code are intentionally not part of
 this standalone repo. Host applications consume the JSON contracts, CLI/server
 surfaces, or Rust crates through their own adapters.
 
+Integration guidance for host applications lives under `docs/integration/`,
+including the NaviWealth-style Flutter FRB native bridge guide.
+
 ## Common Commands
 
 ```bash

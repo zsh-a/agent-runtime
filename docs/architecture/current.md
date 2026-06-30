@@ -109,6 +109,11 @@ fixtures/contracts/
 
 openapi/agent-runtime-api.yaml
   Minimal HTTP API contract for server-first clients.
+
+docs/integration/
+  Host-application integration guidance. `flutter-frb-native-bridge.md`
+  documents the NaviWealth-style Flutter FRB/native bridge pattern without
+  making Flutter or product code part of this standalone runtime repository.
 ```
 
 ## Runtime Layers
@@ -186,6 +191,9 @@ These are intentional or pending differences from the long-term design:
   `agent-core`; concrete process/MCP/HTTP adapters are isolated under
   `crates/agent-cli/src/tools/` pending a future crate extraction.
 - There is no standalone `bindings/dart` or `bindings/ts` SDK package.
+- Flutter FRB/native bridge guidance exists as documentation only; this
+  standalone repository does not contain a generated Flutter package or FRB
+  bindings.
 - Trace is event-first (`events`) and does not currently expose a separate
   `spans` array.
 - `ProposalEnvelope` does not carry a `risk` field; risk is currently expressed
