@@ -13,6 +13,8 @@ use futures::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
 use serde::Serialize;
 use serde_json::{Value, json};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::JoinHandle;
 
 use crate::{
     catalog::{load_catalog_registry, read_catalog},
@@ -23,7 +25,7 @@ use crate::{
     trace_store::write_store_trace,
 };
 
-use super::data::{TuiState, read_trace};
+use super::data::{TuiState, TuiUpdate, read_trace};
 
 pub(super) async fn execute_command(state: &mut TuiState, input: &str) -> Result<()> {
     let input = input.trim();
@@ -36,20 +38,39 @@ pub(super) async fn execute_command(state: &mut TuiState, input: &str) -> Result
     execute_slash_command(state, command.trim()).await
 }
 
+pub(super) fn start_natural_language_task(
+    state: &mut TuiState,
+    text: String,
+    sender: UnboundedSender<TuiUpdate>,
+) -> JoinHandle<()> {
+    let mut messages = state.chat_messages.clone();
+    messages.push(user_message(text.clone()));
+    let options = state.options.clone();
+    state.push_user_message(text);
+    state.start_assistant_stream();
+    state.set_busy(true);
+    tokio::spawn(async move {
+        if let Err(error) = run_natural_language_stream(options, messages, sender.clone()).await {
+            let _ = sender.send(TuiUpdate::Error(error.to_string()));
+        }
+        let _ = sender.send(TuiUpdate::Busy(false));
+    })
+}
+
 async fn execute_slash_command(state: &mut TuiState, input: &str) -> Result<()> {
     let (verb, rest) = split_once(input);
     match verb {
         "help" | "?" => show_help(state),
-        "clear" => state.clear_log(),
+        "clear" => state.clear_output(),
         "refresh" => {
             state.refresh().await?;
-            state.push_log("refreshed catalog/trace/store");
+            state.push_event("refreshed catalog/trace/store");
         }
         "run" => run_agent_command(state, rest).await?,
         "tool" | "call" => tool_call_command(state, rest).await?,
         "trace" | "replay" => load_trace_command(state, rest).await?,
         "inspect" => inspect_run_command(state, rest).await?,
-        other => state.push_log(format!(
+        other => state.push_system_message(format!(
             "unknown command '/{other}'. Try: /help, /run, /tool, /replay, /inspect, /refresh, /clear"
         )),
     }
@@ -57,26 +78,28 @@ async fn execute_slash_command(state: &mut TuiState, input: &str) -> Result<()> 
 }
 
 fn show_help(state: &mut TuiState) {
-    state.push_log("Type natural language and press Enter to run the default agent.");
-    state.push_log("Slash commands:");
-    state.push_log("  /run <agent_id> [json|text]  run a specific agent");
-    state.push_log("  /tool <name> [json]          call a tool through active CLI services");
-    state.push_log("  /replay <trace_path>         load a trace into the Trace panel");
-    state.push_log("  /inspect <run_id>            load a persisted run record summary");
-    state.push_log("  /refresh                     reload catalog, trace, and recent runs");
-    state.push_log("  /clear                       clear the output panel");
+    state.push_system_message(
+        "Type natural language and press Enter to chat with the default agent.\n\n\
+        Slash commands:\n\
+        /run <agent_id> [json|text]  run a specific runtime agent\n\
+        /tool <name> [json]          call a tool through active CLI services\n\
+        /replay <trace_path>         load a trace into the side panel\n\
+        /inspect <run_id>            load a persisted run record summary\n\
+        /refresh                     reload catalog, trace, and recent runs\n\
+        /clear                       clear chat and activity",
+    );
 }
 
 async fn run_natural_language_command(state: &mut TuiState, text: &str) -> Result<()> {
     let agent_id = default_agent_id(state).await?;
-    state.push_log(format!("you: {text}"));
+    state.push_user_message(text.to_owned());
     run_chat_turn(state, &agent_id, text).await
 }
 
 async fn run_agent_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let (agent_id, json_input) = split_name_and_json(rest, "agent id")?;
     let input = parse_run_input(json_input)?;
-    state.push_log(format!("/run {agent_id} {}", compact_json(&input)));
+    state.push_user_message(format!("/run {agent_id} {}", compact_json(&input)));
     run_agent_with_input(state, &agent_id, input, "slash_command").await
 }
 
@@ -131,12 +154,12 @@ async fn run_agent_with_input(
         outcome.trace,
     );
     state.refresh_runs().await?;
-    state.push_log(format!(
+    state.push_event(format!(
         "run {} {} {:?}",
         outcome.result.run_id.0, outcome.result.agent_id, outcome.result.status
     ));
     if let Some(summary) = outcome.result.summary {
-        state.push_log(format!("summary: {summary}"));
+        state.push_event(format!("summary: {summary}"));
     }
     push_agent_output(state, &outcome.result.output);
     Ok(())
@@ -145,13 +168,13 @@ async fn run_agent_with_input(
 async fn tool_call_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let (name, json_input) = split_name_and_json(rest, "tool name")?;
     let input = parse_json_or_default(json_input, "tool input")?;
-    state.push_log(format!("/tool {name} {}", compact_json(&input)));
+    state.push_user_message(format!("/tool {name} {}", compact_json(&input)));
     let services = CliServices::new(state.options.tool_overrides.clone());
     let output = services
         .call_tool(&name, input)
         .await
         .map_err(|err| miette!(err.record.message))?;
-    state.push_log(pretty_json(&output));
+    state.push_tool_message(Some(name), pretty_json(&output));
     Ok(())
 }
 
@@ -179,7 +202,8 @@ async fn run_chat_turn(state: &mut TuiState, agent_id: &str, text: &str) -> Resu
         agent_id: Some(agent_id.to_owned()),
         provider: state.options.chat.provider.clone(),
         model: state.options.chat.model.clone(),
-        messages: state.chat_messages.clone(),
+        messages: chat_request_messages(&state.options, agent_id, state.chat_messages.clone())
+            .await?,
         temperature: state.options.chat.temperature,
         max_output_tokens: state.options.chat.max_output_tokens,
         tools: chat_tools(state).await?,
@@ -194,6 +218,7 @@ async fn run_chat_turn(state: &mut TuiState, agent_id: &str, text: &str) -> Resu
     let mut stream = runner.stream(request);
     let mut assistant_text = String::new();
     let mut final_response = None;
+    state.start_assistant_stream();
     while let Some(event) = stream.next().await {
         let event = event.map_err(|err| miette!(err.record.message))?;
         apply_chat_event_to_tui(state, &event, &mut assistant_text, &mut final_response);
@@ -204,6 +229,7 @@ async fn run_chat_turn(state: &mut TuiState, agent_id: &str, text: &str) -> Resu
         .filter(|content| !content.is_empty())
         .unwrap_or(assistant_text);
     if !assistant_content.is_empty() {
+        state.replace_streaming_assistant(assistant_content.clone());
         state.chat_messages.push(LlmMessage {
             role: LlmRole::Assistant,
             content: Value::String(assistant_content),
@@ -214,12 +240,91 @@ async fn run_chat_turn(state: &mut TuiState, agent_id: &str, text: &str) -> Resu
     Ok(())
 }
 
+async fn run_natural_language_stream(
+    options: super::data::TuiOptions,
+    mut messages: Vec<LlmMessage>,
+    sender: UnboundedSender<TuiUpdate>,
+) -> Result<()> {
+    let agent_id = default_agent_id_from_options(&options).await?;
+    let provider = provider_from_options(&options.chat)?;
+    let proposal_store = Arc::new(
+        FileProposalStore::new(options.store_path.clone())
+            .await
+            .into_diagnostic()?,
+    );
+    let services = Arc::new(CliServices::with_proposal_store(
+        options.tool_overrides.clone(),
+        proposal_store,
+    ));
+    let runner = ChatTurnRunner::new(provider, services);
+    let request = ChatTurnRequest {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        turn_id: None,
+        surface: Some("agent_tui".to_owned()),
+        mode: Some("natural_language".to_owned()),
+        session_id: None,
+        thread_id: None,
+        agent_id: Some(agent_id.clone()),
+        provider: options.chat.provider.clone(),
+        model: options.chat.model.clone(),
+        messages: chat_request_messages(&options, &agent_id, messages.clone()).await?,
+        temperature: options.chat.temperature,
+        max_output_tokens: options.chat.max_output_tokens,
+        tools: chat_tools_from_options(&options).await?,
+        metadata: json!({
+            "source": "agent_tui",
+            "surface": "agent_tui",
+            "mode": "natural_language",
+        }),
+        max_tool_rounds: options.chat.max_tool_rounds,
+    };
+
+    let mut stream = runner.stream(request);
+    let mut assistant_text = String::new();
+    let mut final_response = None;
+    while let Some(event) = stream.next().await {
+        let event = event.map_err(|err| miette!(err.record.message))?;
+        for update in updates_from_chat_event(&event, &mut assistant_text, &mut final_response) {
+            let _ = sender.send(update);
+        }
+    }
+    let assistant_content = final_response
+        .as_ref()
+        .map(|response: &agent_llm::LlmResponse| response.content.clone())
+        .filter(|content| !content.is_empty())
+        .unwrap_or(assistant_text);
+    if !assistant_content.is_empty() {
+        let _ = sender.send(TuiUpdate::AssistantReplace(assistant_content.clone()));
+        messages.push(LlmMessage {
+            role: LlmRole::Assistant,
+            content: Value::String(assistant_content),
+            name: None,
+            metadata: json!({}),
+        });
+        let _ = sender.send(TuiUpdate::ChatMessages(messages));
+    } else {
+        let _ = sender.send(TuiUpdate::AssistantFinish);
+    }
+    Ok(())
+}
+
 fn apply_chat_event_to_tui(
     state: &mut TuiState,
     event: &ChatTurnEvent,
     assistant_text: &mut String,
     final_response: &mut Option<agent_llm::LlmResponse>,
 ) {
+    for update in updates_from_chat_event(event, assistant_text, final_response) {
+        state.apply_update(update);
+    }
+}
+
+fn updates_from_chat_event(
+    event: &ChatTurnEvent,
+    assistant_text: &mut String,
+    final_response: &mut Option<agent_llm::LlmResponse>,
+) -> Vec<TuiUpdate> {
+    let mut updates = Vec::new();
     match event.kind {
         ChatTurnEventKind::Started => {
             let provider = event
@@ -232,82 +337,90 @@ fn apply_chat_event_to_tui(
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            state.push_log(format!("chat started: {provider}/{model}"));
+            updates.push(TuiUpdate::Event(format!(
+                "chat started: {provider}/{model}"
+            )));
         }
         ChatTurnEventKind::LlmStarted => {
-            state.push_log(format!("round {} started", event.round));
+            updates.push(TuiUpdate::Event(format!("round {} started", event.round)));
         }
         ChatTurnEventKind::Delta => {
             if let Some(content) = &event.content {
                 assistant_text.push_str(content);
-                state.push_log(format!("agent: {content}"));
+                updates.push(TuiUpdate::AssistantDelta(content.clone()));
             }
         }
         ChatTurnEventKind::ThinkingDelta => {
             if let Some(content) = &event.content {
-                state.push_log(format!("thinking: {content}"));
+                updates.push(TuiUpdate::Event(format!("thinking: {content}")));
             }
         }
         ChatTurnEventKind::ThinkingSignatureDelta => {}
         ChatTurnEventKind::ToolCallStart => {
-            state.push_log(format!(
+            updates.push(TuiUpdate::Event(format!(
                 "tool start: {} {}",
                 event.tool_call_id.as_deref().unwrap_or(""),
                 event.tool_name.as_deref().unwrap_or("")
-            ));
+            )));
         }
         ChatTurnEventKind::ToolCallDelta => {
             if let Some(partial) = &event.partial_input_json {
-                state.push_log(format!(
+                updates.push(TuiUpdate::Event(format!(
                     "tool args {}: {partial}",
                     event.tool_call_id.as_deref().unwrap_or("")
-                ));
+                )));
             }
         }
         ChatTurnEventKind::ToolCallEnd => {
-            state.push_log(format!(
+            updates.push(TuiUpdate::Event(format!(
                 "tool ready: {} {}",
                 event.tool_call_id.as_deref().unwrap_or(""),
                 event.tool_name.as_deref().unwrap_or("")
-            ));
+            )));
         }
         ChatTurnEventKind::ToolResult => {
             let tool_name = event.tool_name.as_deref().unwrap_or("");
             let output = event.tool_output.as_ref().unwrap_or(&Value::Null);
             if tool_name == "ask_user" {
                 if let Some(lines) = decision_request_lines(output) {
-                    for line in lines {
-                        state.push_log(line);
-                    }
+                    updates.push(TuiUpdate::ToolMessage {
+                        title: Some(tool_name.to_owned()),
+                        content: lines.join("\n"),
+                    });
                 } else {
-                    state.push_log(format!("tool result: {tool_name} {}", compact_json(output)));
+                    updates.push(TuiUpdate::ToolMessage {
+                        title: Some(tool_name.to_owned()),
+                        content: format!("tool result: {}", compact_json(output)),
+                    });
                 }
             } else {
-                state.push_log(format!("tool result: {tool_name} {}", compact_json(output)));
+                updates.push(TuiUpdate::ToolMessage {
+                    title: Some(tool_name.to_owned()),
+                    content: format!("tool result: {}", compact_json(output)),
+                });
             }
         }
         ChatTurnEventKind::Usage => {
             if let Some(usage) = &event.usage {
-                state.push_log(format!(
+                updates.push(TuiUpdate::Event(format!(
                     "usage: input={} output={} total={}",
                     usage.input_tokens, usage.output_tokens, usage.total_tokens
-                ));
+                )));
             }
         }
         ChatTurnEventKind::RoundFinished => {
             if let Some(response) = &event.response {
                 *final_response = Some(response.clone());
-                state.push_log(format!(
+                updates.push(TuiUpdate::Event(format!(
                     "round {} finished: {:?}",
                     event.round, response.finish_reason
-                ));
+                )));
             }
         }
         ChatTurnEventKind::Error => {
-            state.push_log(format!(
-                "chat error: {}",
-                event.content.as_deref().unwrap_or("unknown error")
-            ));
+            let message = event.content.as_deref().unwrap_or("unknown error");
+            updates.push(TuiUpdate::AssistantReplace(format!("Error: {message}")));
+            updates.push(TuiUpdate::Event(format!("chat error: {message}")));
         }
         ChatTurnEventKind::Done => {
             let reason = event
@@ -315,17 +428,83 @@ fn apply_chat_event_to_tui(
                 .get("stop_reason")
                 .and_then(Value::as_str)
                 .unwrap_or("done");
-            state.push_log(format!("done: {reason} in {} round(s)", event.round));
+            updates.push(TuiUpdate::AssistantFinish);
+            updates.push(TuiUpdate::Event(format!(
+                "done: {reason} in {} round(s)",
+                event.round
+            )));
         }
     }
+    updates
 }
 
 async fn chat_tools(state: &TuiState) -> Result<Vec<ToolSpec>> {
-    let mut tools = match &state.options.catalog_path {
+    chat_tools_from_options(&state.options).await
+}
+
+async fn chat_request_messages(
+    options: &super::data::TuiOptions,
+    agent_id: &str,
+    messages: Vec<LlmMessage>,
+) -> Result<Vec<LlmMessage>> {
+    let Some(system_prompt) = catalog_system_prompt(options, agent_id).await? else {
+        return Ok(messages);
+    };
+    let mut request_messages = Vec::with_capacity(messages.len() + 1);
+    request_messages.push(LlmMessage {
+        role: LlmRole::System,
+        content: Value::String(system_prompt),
+        name: None,
+        metadata: json!({"source": "agent_catalog"}),
+    });
+    request_messages.extend(messages);
+    Ok(request_messages)
+}
+
+async fn catalog_system_prompt(
+    options: &super::data::TuiOptions,
+    agent_id: &str,
+) -> Result<Option<String>> {
+    let Some(path) = &options.catalog_path else {
+        return Ok(None);
+    };
+    let catalog = read_catalog(path.clone()).await?;
+    let Some(agent) = catalog.agents.iter().find(|agent| agent.id == agent_id) else {
+        return Ok(None);
+    };
+
+    let mut sections = vec![format!("You are {}.", agent.name)];
+    if let Some(description) = agent
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+    {
+        sections.push(description.to_owned());
+    }
+    let mut prompt_blocks = catalog.prompt_blocks;
+    prompt_blocks.sort_by_key(|block| block.index);
+    for block in prompt_blocks {
+        let text = block.text.trim();
+        if !text.is_empty() {
+            sections.push(text.to_owned());
+        }
+    }
+    if !catalog.tools.is_empty() {
+        sections.push(
+            "Use the provided tools when they are necessary. Keep normal replies concise and direct."
+                .to_owned(),
+        );
+    }
+    Ok(Some(sections.join("\n\n")))
+}
+
+async fn chat_tools_from_options(options: &super::data::TuiOptions) -> Result<Vec<ToolSpec>> {
+    let mut tools = match &options.catalog_path {
         Some(path) => read_catalog(path.clone()).await?.tools,
         None => Vec::new(),
     };
-    tools.extend(state.options.tool_overrides.source_specs.clone());
+    tools.extend(options.tool_overrides.source_specs.clone());
     if !tools.iter().any(|tool| tool.name == "echo") {
         tools.push(ToolSpec {
             name: "echo".to_owned(),
@@ -347,7 +526,7 @@ async fn load_trace_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let path = Utf8PathBuf::from(path);
     let trace = read_trace(path.clone()).await?;
     state.set_trace(path.to_string(), trace);
-    state.push_log(format!("loaded trace {path}"));
+    state.push_event(format!("loaded trace {path}"));
     Ok(())
 }
 
@@ -364,11 +543,11 @@ async fn inspect_run_command(state: &mut TuiState, rest: &str) -> Result<()> {
         .await
         .into_diagnostic()?
         .ok_or_else(|| miette!("run '{run_id}' was not found"))?;
-    state.push_log(format!(
+    state.push_event(format!(
         "run {} {} {:?}",
         run_id, record.agent_id, record.status
     ));
-    state.push_log(pretty_json(&record));
+    state.push_system_message(pretty_json(&record));
     Ok(())
 }
 
@@ -411,9 +590,13 @@ fn parse_run_input(input: &str) -> Result<Value> {
 }
 
 async fn default_agent_id(state: &TuiState) -> Result<String> {
-    let agents = match &state.options.catalog_path {
+    default_agent_id_from_options(&state.options).await
+}
+
+async fn default_agent_id_from_options(options: &super::data::TuiOptions) -> Result<String> {
+    let agents = match &options.catalog_path {
         Some(path) => read_catalog(path.clone()).await?.agents,
-        None => load_registry(state.options.registry_path.clone())
+        None => load_registry(options.registry_path.clone())
             .await?
             .list_specs(),
     };
@@ -442,11 +625,11 @@ async fn load_active_registry(state: &TuiState) -> Result<Arc<dyn AgentRegistry>
 
 fn push_agent_output(state: &mut TuiState, output: &Value) {
     if let Some(message) = output.get("message").and_then(Value::as_str) {
-        state.push_log(format!("agent: {message}"));
+        state.push_assistant_message(message.to_owned());
     } else if let Some(content) = output.get("content").and_then(Value::as_str) {
-        state.push_log(format!("agent: {content}"));
+        state.push_assistant_message(content.to_owned());
     } else {
-        state.push_log(pretty_json(output));
+        state.push_assistant_message(pretty_json(output));
     }
 }
 
@@ -561,9 +744,9 @@ mod tests {
         assert_eq!(state.recent_runs[0].agent_id, "echo_agent");
         assert!(
             state
-                .log_lines
+                .transcript
                 .iter()
-                .any(|line| line.contains("from interactive tui"))
+                .any(|item| item.content.contains("from interactive tui"))
         );
     }
 
@@ -594,15 +777,64 @@ mod tests {
         assert_eq!(state.chat_messages.len(), 2);
         assert!(
             state
-                .log_lines
+                .transcript
                 .iter()
-                .any(|line| line.contains("you: Summarize my day"))
+                .any(|item| item.content.contains("Summarize my day"))
         );
         assert!(
             state
-                .log_lines
+                .transcript
                 .iter()
-                .any(|line| line.contains("agent: chat answer"))
+                .any(|item| item.content.contains("chat answer"))
+        );
+    }
+
+    #[tokio::test]
+    async fn natural_language_task_streams_updates_to_tui_state() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = TuiState::load(TuiOptions {
+            catalog_path: None,
+            trace_path: None,
+            store_path: temp_store_path(&dir),
+            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
+            tool_overrides: ToolOverrides::default(),
+            chat: test_chat_options("background answer"),
+            timeout_seconds: 60,
+            max_retries: 0,
+            retry_backoff_ms: 0,
+            once: false,
+        })
+        .await
+        .expect("state loads");
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        let task = start_natural_language_task(&mut state, "Hello async".to_owned(), sender);
+        assert!(state.busy);
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|item| item.content.contains("Hello async"))
+        );
+
+        loop {
+            let update = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+                .await
+                .expect("update arrives")
+                .expect("update exists");
+            state.apply_update(update);
+            if !state.busy {
+                break;
+            }
+        }
+        task.await.expect("task joins");
+
+        assert_eq!(state.chat_messages.len(), 2);
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|item| item.content.contains("background answer"))
         );
     }
 
@@ -623,7 +855,7 @@ mod tests {
         })
         .await
         .expect("state loads");
-        state.clear_log();
+        state.clear_output();
 
         let events: Vec<ChatTurnEvent> = serde_json::from_str(include_str!(
             "../../../../fixtures/docs/agent_chat_turn_events.json"
@@ -639,19 +871,19 @@ mod tests {
         assert!(final_response.is_some());
         assert!(
             state
-                .log_lines
+                .events
                 .iter()
                 .any(|line| line.contains("tool start: call_1 get_holdings"))
         );
         assert!(
             state
-                .log_lines
+                .events
                 .iter()
                 .any(|line| line.contains("usage: input=11 output=7 total=18"))
         );
         assert!(
             state
-                .log_lines
+                .events
                 .iter()
                 .any(|line| line.contains("round 1 finished"))
         );
@@ -674,7 +906,7 @@ mod tests {
         })
         .await
         .expect("state loads");
-        state.clear_log();
+        state.clear_output();
 
         let events: Vec<ChatTurnEvent> = serde_json::from_str(include_str!(
             "../../../../fixtures/docs/agent_chat_ask_user_turn_events.json"
@@ -688,27 +920,27 @@ mod tests {
 
         assert!(
             state
-                .log_lines
+                .transcript
                 .iter()
-                .any(|line| line.contains("decision: Implementation path"))
+                .any(|item| item.content.contains("decision: Implementation path"))
         );
         assert!(
             state
-                .log_lines
+                .transcript
                 .iter()
-                .any(|line| line.contains("1. Context transcript"))
+                .any(|item| item.content.contains("1. Context transcript"))
         );
         assert!(
             state
-                .log_lines
+                .transcript
                 .iter()
-                .any(|line| line.contains("[recommended]"))
+                .any(|item| item.content.contains("[recommended]"))
         );
         assert!(
             state
-                .log_lines
+                .transcript
                 .iter()
-                .any(|line| line.contains("reply with your choice to continue"))
+                .any(|item| item.content.contains("reply with your choice to continue"))
         );
     }
 
@@ -737,9 +969,9 @@ mod tests {
         assert!(state.trace.is_some());
         assert!(
             state
-                .log_lines
+                .transcript
                 .iter()
-                .any(|line| line.contains("agent: hello tui"))
+                .any(|item| item.content.contains("hello tui"))
         );
     }
 
@@ -767,9 +999,9 @@ mod tests {
 
         assert!(
             state
-                .log_lines
+                .transcript
                 .iter()
-                .any(|line| line.contains(r#""value": 42"#))
+                .any(|item| item.content.contains(r#""value": 42"#))
         );
     }
 }

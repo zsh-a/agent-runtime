@@ -1265,12 +1265,13 @@ fn tui_once_renders_catalog_and_trace_snapshot() {
         .clone();
     let output = String::from_utf8(output).expect("stdout is utf8");
     assert!(output.contains("Agent Runtime"));
+    assert!(output.contains("Chat"));
     assert!(output.contains("Context"));
-    assert!(output.contains("Output"));
+    assert!(output.contains("Activity"));
     assert!(output.contains("Input"));
-    assert!(output.contains("/help commands"));
-    assert!(output.contains("agent: echo_agent@0.1.0"));
-    assert!(output.contains("run_started"));
+    assert!(output.contains("Enter sends"));
+    assert!(output.contains("agent echo_agent@0.1.0"));
+    assert!(output.contains("Ready. Type a message"));
 }
 
 #[test]
