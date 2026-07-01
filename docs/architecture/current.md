@@ -2,8 +2,8 @@
 
 This is the current implementation map for agents working on the Rust agent
 runtime. Use this document for code navigation and maintenance decisions.
-`design.md` is the long-term design direction; this document
-describes what exists now.
+`design.md` is the long-term design direction; `roadmap.md` turns known gaps
+into phased work; this document describes what exists now.
 
 ## Scope
 
@@ -116,6 +116,10 @@ docs/integration/
   proposals, and trace adapters on top of the runtime. `flutter-frb-native-bridge.md`
   documents the NaviWealth-style Flutter FRB/native bridge pattern without
   making Flutter or product code part of this standalone runtime repository.
+
+docs/architecture/roadmap.md
+  Phased roadmap for turning the current runtime kernel into production-ready
+  business integration surfaces.
 ```
 
 ## Runtime Layers
