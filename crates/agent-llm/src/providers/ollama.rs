@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use futures::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracing::{debug, info, warn};
 
 use super::llm_content_as_text;
 use crate::types::{
@@ -99,6 +100,17 @@ impl LlmProvider for OllamaProvider {
                 "llm request requires at least one message",
             ));
         }
+        let started_at = std::time::Instant::now();
+        let url = self.chat_url();
+        info!(
+            provider = %self.provider,
+            model = %request.model,
+            endpoint = %url,
+            message_count = request.messages.len(),
+            temperature = ?request.temperature,
+            max_output_tokens = ?request.max_output_tokens,
+            "starting Ollama chat request",
+        );
         let options = (request.temperature.is_some() || request.max_output_tokens.is_some())
             .then_some(OllamaOptions {
                 temperature: request.temperature,
@@ -116,7 +128,7 @@ impl LlmProvider for OllamaProvider {
         };
         let response = self
             .client
-            .post(self.chat_url())
+            .post(&url)
             .json(&payload)
             .send()
             .await
@@ -132,6 +144,14 @@ impl LlmProvider for OllamaProvider {
                 json!({}),
             )
         })?;
+        debug!(
+            provider = %self.provider,
+            model = %request.model,
+            status = %status,
+            body_bytes = body.len(),
+            duration_ms = started_at.elapsed().as_millis(),
+            "Ollama chat response received",
+        );
         if !status.is_success() {
             let details = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!({}));
             let message = details
@@ -139,6 +159,15 @@ impl LlmProvider for OllamaProvider {
                 .and_then(Value::as_str)
                 .unwrap_or(&body)
                 .to_owned();
+            warn!(
+                provider = %self.provider,
+                model = %request.model,
+                status = %status,
+                retryable = status.is_server_error(),
+                body_preview = %truncate_for_log(&body),
+                duration_ms = started_at.elapsed().as_millis(),
+                "Ollama chat failed with non-success status",
+            );
             return Err(LlmError::provider(
                 format!("provider_http_{}", status.as_u16()),
                 message,
@@ -155,6 +184,12 @@ impl LlmProvider for OllamaProvider {
             )
         })?;
         if let Some(error) = decoded.error {
+            warn!(
+                provider = %self.provider,
+                model = %request.model,
+                duration_ms = started_at.elapsed().as_millis(),
+                "Ollama chat returned provider error",
+            );
             return Err(LlmError::provider(
                 "provider_error",
                 error,
@@ -164,15 +199,28 @@ impl LlmProvider for OllamaProvider {
         }
         let input_tokens = decoded.prompt_eval_count.unwrap_or(0);
         let output_tokens = decoded.eval_count.unwrap_or(0);
+        let content = decoded
+            .message
+            .map(|message| message.content)
+            .unwrap_or_default();
+        let finish_reason = ollama_finish_reason(decoded.done_reason.as_deref());
+        info!(
+            provider = %self.provider,
+            model = %request.model,
+            finish_reason = ?finish_reason,
+            input_tokens,
+            output_tokens,
+            total_tokens = input_tokens + output_tokens,
+            content_chars = content.chars().count(),
+            duration_ms = started_at.elapsed().as_millis(),
+            "Ollama chat completed",
+        );
         Ok(LlmResponse {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             provider: self.provider.clone(),
             model: request.model,
-            content: decoded
-                .message
-                .map(|message| message.content)
-                .unwrap_or_default(),
-            finish_reason: ollama_finish_reason(decoded.done_reason.as_deref()),
+            content,
+            finish_reason,
             usage: Some(LlmUsage {
                 input_tokens,
                 output_tokens,
@@ -183,6 +231,11 @@ impl LlmProvider for OllamaProvider {
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmEventStream, LlmError> {
+        debug!(
+            provider = %self.provider,
+            model = %request.model,
+            "starting Ollama synthetic stream",
+        );
         let response = self.complete(request).await?;
         let events = vec![
             Ok(LlmEvent {
@@ -217,6 +270,17 @@ impl LlmProvider for OllamaProvider {
             }),
         ];
         Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+fn truncate_for_log(value: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
     }
 }
 

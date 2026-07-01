@@ -48,6 +48,8 @@ use tools::tool_overrides;
 use trace_store::read_json;
 use tui::{TuiOptions, run_tui};
 
+const DEFAULT_LOG_FILTER: &str =
+    "warn,agent_cli=info,agent_runtime=info,agent_chat=info,agent_llm=info";
 const DEFAULT_REGISTRY: &str = "examples/agents.yaml";
 const DEFAULT_STORE: &str = ".agent-runtime/store";
 const DEFAULT_EVAL_STORE: &str = ".agent-runtime/eval-store";
@@ -467,11 +469,7 @@ enum LlmCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .without_time()
-        .try_init()
-        .ok();
+    init_logging();
 
     let cli = Cli::parse();
     let context =
@@ -853,6 +851,16 @@ async fn main() -> Result<()> {
         Command::DevScoreHook => run_dev_score_hook().await?,
     }
     Ok(())
+}
+
+fn init_logging() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok();
 }
 
 #[derive(Debug, Serialize)]

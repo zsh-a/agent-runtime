@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use agent_core::{PROTOCOL_VERSION, ToolError};
 use miette::{Result, miette};
 use serde_json::{Value, json};
+use tracing::{debug, info, warn};
 
 use super::error::tool_error;
 
@@ -22,6 +23,13 @@ impl HttpToolEndpoint {
         name: &str,
         input: Value,
     ) -> std::result::Result<Value, ToolError> {
+        let started_at = std::time::Instant::now();
+        info!(
+            tool_name = name,
+            endpoint = %self.endpoint,
+            header_count = self.headers.len(),
+            "starting HTTP tool call",
+        );
         let client = reqwest::Client::new();
         let payload = json!({
             "protocol_version": PROTOCOL_VERSION,
@@ -42,7 +50,23 @@ impl HttpToolEndpoint {
             .text()
             .await
             .map_err(|e| tool_error("http_tool_response_read_failed", e.to_string()))?;
+        debug!(
+            tool_name = name,
+            endpoint = %self.endpoint,
+            status = %status,
+            body_bytes = body.len(),
+            duration_ms = started_at.elapsed().as_millis(),
+            "HTTP tool response received",
+        );
         if !status.is_success() {
+            warn!(
+                tool_name = name,
+                endpoint = %self.endpoint,
+                status = %status,
+                body_preview = %truncate_for_log(&body),
+                duration_ms = started_at.elapsed().as_millis(),
+                "HTTP tool call failed with non-success status",
+            );
             return Err(tool_error(
                 "http_tool_status_failed",
                 format!("HTTP tool endpoint returned {status}: {body}"),
@@ -51,13 +75,29 @@ impl HttpToolEndpoint {
         let value: Value = serde_json::from_str(&body)
             .map_err(|e| tool_error("http_tool_response_decode_failed", e.to_string()))?;
         if let Some(error) = value.get("error") {
+            warn!(
+                tool_name = name,
+                endpoint = %self.endpoint,
+                error = %truncate_for_log(&error.to_string()),
+                duration_ms = started_at.elapsed().as_millis(),
+                "HTTP tool endpoint returned an error payload",
+            );
             return Err(tool_error("http_tool_error", error.to_string()));
         }
-        Ok(value
+        let output = value
             .get("output")
             .or_else(|| value.get("result"))
             .cloned()
-            .unwrap_or(value))
+            .unwrap_or(value);
+        info!(
+            tool_name = name,
+            endpoint = %self.endpoint,
+            status = %status,
+            output_bytes = serde_json::to_vec(&output).map(|bytes| bytes.len()).unwrap_or(0),
+            duration_ms = started_at.elapsed().as_millis(),
+            "HTTP tool call completed",
+        );
+        Ok(output)
     }
 }
 
@@ -74,5 +114,16 @@ pub(super) fn validate_http_tool_endpoint(source_id: &str, endpoint: &str) -> Re
         scheme => Err(miette!(
             "tool source '{source_id}' endpoint must use http or https, got '{scheme}'"
         )),
+    }
+}
+
+fn truncate_for_log(value: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
     }
 }

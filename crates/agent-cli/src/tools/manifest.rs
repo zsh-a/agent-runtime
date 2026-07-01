@@ -5,6 +5,7 @@ use camino::Utf8PathBuf;
 use miette::{Result, miette};
 use serde::Deserialize;
 use serde_json::Value;
+use tracing::{debug, info};
 
 use super::{
     error::tool_error,
@@ -150,6 +151,7 @@ pub(crate) async fn load_tool_sources(
 ) -> Result<Vec<ToolSourceDefinition>> {
     let mut sources = Vec::new();
     for path in paths {
+        debug!(path = %path, "loading tool source manifest");
         let manifest = read_tool_source_manifest(path).await?;
         if let Some(version) = &manifest.version
             && version != "tool_source.v1"
@@ -162,6 +164,12 @@ pub(crate) async fn load_tool_sources(
             if source.id.trim().is_empty() {
                 return Err(miette!("tool source id cannot be empty"));
             }
+            info!(
+                source_id = %source.id,
+                protocol = ?source.protocol,
+                tool_count = source.tools.len(),
+                "loaded tool source",
+            );
             sources.push(source);
         }
     }

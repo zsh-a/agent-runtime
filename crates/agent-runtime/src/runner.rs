@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
 
 use crate::{
     InMemoryLockStore, RUNTIME_VERSION,
@@ -74,12 +75,14 @@ impl AgentRunner {
         agent_id: &str,
         request: RunRequest,
     ) -> Result<RunOutcome, AgentError> {
+        let run_timer = std::time::Instant::now();
         let _permit = self
             .concurrency
             .clone()
             .acquire_owned()
             .await
             .map_err(|e| AgentError::internal(format!("run concurrency limiter closed: {e}")))?;
+        debug!(agent_id, "acquired run concurrency permit");
         let agent = self
             .registry
             .get_agent(agent_id)
@@ -95,6 +98,24 @@ impl AgentRunner {
             .unwrap_or(RunScope::Global);
         let idempotency_key = run_idempotency_key(&spec.id, &scope, &request);
         let lock_key = lock_key(&spec.id, &scope);
+        info!(
+            run_id = %run_id.0,
+            agent_id = %spec.id,
+            agent_version = %spec.version,
+            trigger = ?request.trigger,
+            scope = ?scope,
+            timeout_ms = self.policy.timeout.as_millis(),
+            max_retries = self.policy.max_retries,
+            retry_backoff_ms = self.policy.retry_backoff.as_millis(),
+            "starting agent run",
+        );
+        debug!(
+            run_id = %run_id.0,
+            agent_id = %spec.id,
+            lock_key,
+            lease_ttl_ms = self.policy.lease_ttl().as_millis(),
+            "acquiring run lease",
+        );
         let lease = self
             .lock_store
             .acquire(&lock_key, &run_id.0, self.policy.lease_ttl())
@@ -102,6 +123,12 @@ impl AgentRunner {
             .map_err(|e| AgentError::internal(e.to_string()))?;
         let Some(lease) = lease else {
             let reason = format!("run skipped because active lease exists for {lock_key}");
+            warn!(
+                run_id = %run_id.0,
+                agent_id = %spec.id,
+                lock_key,
+                "skipping agent run because active lease exists",
+            );
             let result = AgentRunResult::skipped(
                 run_id.clone(),
                 spec.id.clone(),
@@ -124,7 +151,21 @@ impl AgentRunner {
                     metadata: request.metadata.clone(),
                 })
                 .await
-                .map_err(|e| AgentError::internal(e.to_string()))?;
+                .map_err(|e| {
+                    error!(
+                        run_id = %run_id.0,
+                        agent_id = %spec.id,
+                        error = %e,
+                        "failed to create skipped run record",
+                    );
+                    AgentError::internal(e.to_string())
+                })?;
+            info!(
+                run_id = %run_id.0,
+                agent_id = %spec.id,
+                duration_ms = run_timer.elapsed().as_millis(),
+                "agent run skipped",
+            );
             let trace_doc = AgentTrace {
                 protocol_version: PROTOCOL_VERSION.to_owned(),
                 runtime_version: RUNTIME_VERSION.to_owned(),
@@ -145,6 +186,12 @@ impl AgentRunner {
                 trace: trace_doc,
             });
         };
+        debug!(
+            run_id = %run_id.0,
+            agent_id = %spec.id,
+            lock_key,
+            "run lease acquired",
+        );
         self.run_store
             .create_run(AgentRunRecord {
                 protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -161,7 +208,21 @@ impl AgentRunner {
                 metadata: request.metadata.clone(),
             })
             .await
-            .map_err(|e| AgentError::internal(e.to_string()))?;
+            .map_err(|e| {
+                error!(
+                    run_id = %run_id.0,
+                    agent_id = %spec.id,
+                    error = %e,
+                    "failed to create run record",
+                );
+                AgentError::internal(e.to_string())
+            })?;
+        debug!(
+            run_id = %run_id.0,
+            agent_id = %spec.id,
+            idempotency_key,
+            "run record created",
+        );
 
         let trace = Arc::new(MemoryTraceSink::default());
         trace
@@ -206,7 +267,25 @@ impl AgentRunner {
                 metadata: request.metadata.clone(),
             })
             .await
-            .map_err(|e| AgentError::internal(e.to_string()))?;
+            .map_err(|e| {
+                error!(
+                    run_id = %result.run_id.0,
+                    agent_id = %result.agent_id,
+                    error = %e,
+                    "failed to update run record",
+                );
+                AgentError::internal(e.to_string())
+            })?;
+
+        let error_code = result.error.as_ref().map(|error| error.code.as_str());
+        info!(
+            run_id = %result.run_id.0,
+            agent_id = %result.agent_id,
+            status = ?result.status,
+            error_code = error_code.unwrap_or("none"),
+            duration_ms = run_timer.elapsed().as_millis(),
+            "agent run finished",
+        );
 
         let trace_doc = AgentTrace {
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -221,10 +300,20 @@ impl AgentRunner {
             events: trace.events().await,
         };
 
-        self.lock_store
-            .release(lease)
-            .await
-            .map_err(|e| AgentError::internal(e.to_string()))?;
+        self.lock_store.release(lease).await.map_err(|e| {
+            error!(
+                run_id = %result.run_id.0,
+                agent_id = %result.agent_id,
+                error = %e,
+                "failed to release run lease",
+            );
+            AgentError::internal(e.to_string())
+        })?;
+        debug!(
+            run_id = %result.run_id.0,
+            agent_id = %result.agent_id,
+            "run lease released",
+        );
 
         Ok(RunOutcome {
             result,
@@ -259,6 +348,13 @@ impl AgentRunner {
                     ))
                     .await?;
             }
+            debug!(
+                run_id = %run_id.0,
+                agent_id = %spec.id,
+                attempt,
+                max_attempts,
+                "starting run attempt",
+            );
 
             let ctx = AgentContext {
                 run_id: run_id.clone(),
@@ -276,21 +372,58 @@ impl AgentRunner {
             };
 
             let run_future = agent.run(ctx);
+            let attempt_timer = std::time::Instant::now();
             let mut result = match tokio::time::timeout(self.policy.timeout, run_future).await {
                 Ok(Ok(mut result)) => {
                     result.run_id = run_id.clone();
                     result.agent_id = spec.id.clone();
                     result
                 }
-                Ok(Err(err)) => failure_result(run_id.clone(), &spec.id, started_at, err),
-                Err(_) => failure_result(
-                    run_id.clone(),
-                    &spec.id,
-                    started_at,
-                    AgentError::timeout(self.policy.timeout),
-                ),
+                Ok(Err(err)) => {
+                    warn!(
+                        run_id = %run_id.0,
+                        agent_id = %spec.id,
+                        attempt,
+                        error_code = %err.record.code,
+                        error_kind = ?err.record.kind,
+                        retryable = err.record.retryable,
+                        duration_ms = attempt_timer.elapsed().as_millis(),
+                        "run attempt returned an agent error",
+                    );
+                    failure_result(run_id.clone(), &spec.id, started_at, err)
+                }
+                Err(_) => {
+                    warn!(
+                        run_id = %run_id.0,
+                        agent_id = %spec.id,
+                        attempt,
+                        timeout_ms = self.policy.timeout.as_millis(),
+                        duration_ms = attempt_timer.elapsed().as_millis(),
+                        "run attempt timed out",
+                    );
+                    failure_result(
+                        run_id.clone(),
+                        &spec.id,
+                        started_at,
+                        AgentError::timeout(self.policy.timeout),
+                    )
+                }
             };
             let retryable = result_is_retryable(&result);
+            debug!(
+                run_id = %run_id.0,
+                agent_id = %spec.id,
+                attempt,
+                status = ?result.status,
+                retryable,
+                error_code = result
+                    .error
+                    .as_ref()
+                    .map(|error| error.code.as_str())
+                    .unwrap_or("none"),
+                duration_ms = attempt_timer.elapsed().as_millis(),
+                "run attempt finished",
+            );
             if trace_attempts {
                 trace
                     .emit(TraceEvent::new(
@@ -319,6 +452,14 @@ impl AgentRunner {
             }
 
             let next_attempt = attempt + 1;
+            warn!(
+                run_id = %run_id.0,
+                agent_id = %spec.id,
+                attempt,
+                next_attempt,
+                backoff_ms = self.policy.retry_backoff.as_millis(),
+                "scheduling run retry",
+            );
             trace
                 .emit(TraceEvent::new(
                     "run_retry_scheduled",
@@ -346,16 +487,41 @@ impl AgentRunner {
             .map(|u| RunScope::User(u.user_id.clone()))
             .unwrap_or(RunScope::Global);
         let mut outcomes = Vec::new();
-        for spec in self.registry.list_agents().await? {
+        let specs = self.registry.list_agents().await?;
+        info!(
+            agent_count = specs.len(),
+            scope = ?scope,
+            trigger = ?request.trigger,
+            "evaluating scheduled agents",
+        );
+        for spec in specs {
             let last = self
                 .run_store
                 .last_run(&spec.id, &scope)
                 .await
                 .map_err(|e| AgentError::internal(e.to_string()))?;
             if self.scheduler.should_fire(&spec, now, last.as_ref()) {
+                info!(
+                    agent_id = %spec.id,
+                    last_run_id = last
+                        .as_ref()
+                        .map(|run| run.run_id.0.as_str())
+                        .unwrap_or("none"),
+                    "scheduled agent is due",
+                );
                 outcomes.push(self.run_once(&spec.id, request.clone()).await?);
+            } else {
+                debug!(
+                    agent_id = %spec.id,
+                    last_run_id = last
+                        .as_ref()
+                        .map(|run| run.run_id.0.as_str())
+                        .unwrap_or("none"),
+                    "scheduled agent is not due",
+                );
             }
         }
+        info!(run_count = outcomes.len(), "scheduler tick finished");
         Ok(outcomes)
     }
 }

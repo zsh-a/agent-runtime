@@ -8,6 +8,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracing::{debug, info, warn};
 
 use crate::sse::{
     decode_json_value_or_null, sse_data, take_next_sse_frame, take_remaining_sse_frame,
@@ -263,6 +264,12 @@ impl OpenAiSseState {
                 }
                 Some(Err(err)) => {
                     self.finished = true;
+                    warn!(
+                        provider = %self.provider,
+                        model = %self.model,
+                        error = %err,
+                        "OpenAI-compatible stream read failed",
+                    );
                     return Some(Err(LlmError::provider(
                         "provider_stream_read_failed",
                         err.to_string(),
@@ -302,6 +309,13 @@ impl OpenAiSseState {
         let decoded = match serde_json::from_str::<OpenAiChatCompletionResponse>(&data) {
             Ok(decoded) => decoded,
             Err(err) => {
+                warn!(
+                    provider = %self.provider,
+                    model = %self.model,
+                    error = %err,
+                    frame_bytes = data.len(),
+                    "OpenAI-compatible stream frame decode failed",
+                );
                 self.pending.push_back(Err(LlmError::provider(
                     "provider_stream_decode_failed",
                     err.to_string(),
@@ -312,6 +326,12 @@ impl OpenAiSseState {
             }
         };
         if let Some(error) = decoded.error {
+            warn!(
+                provider = %self.provider,
+                model = %self.model,
+                error_type = error.r#type.as_deref().unwrap_or("provider_error"),
+                "OpenAI-compatible stream returned provider error",
+            );
             self.pending.push_back(Err(LlmError::provider(
                 error.r#type.unwrap_or_else(|| "provider_error".to_owned()),
                 error.message,
@@ -476,6 +496,16 @@ impl OpenAiSseState {
             usage: self.usage.clone(),
             metadata: json!({"api": "openai_chat_completions", "stream": true}),
         };
+        info!(
+            provider = %self.provider,
+            model = %self.model,
+            finish_reason = ?response.finish_reason,
+            input_tokens = response.usage.as_ref().map(|usage| usage.input_tokens).unwrap_or(0),
+            output_tokens = response.usage.as_ref().map(|usage| usage.output_tokens).unwrap_or(0),
+            total_tokens = response.usage.as_ref().map(|usage| usage.total_tokens).unwrap_or(0),
+            content_chars = response.content.chars().count(),
+            "OpenAI-compatible stream finished",
+        );
         self.pending.push_back(Ok(LlmEvent {
             kind: LlmEventKind::Finished,
             content: None,
@@ -497,6 +527,19 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 "llm request requires at least one message",
             ));
         }
+        let started_at = std::time::Instant::now();
+        let url = self.completions_url();
+        info!(
+            provider = %self.provider,
+            model = %request.model,
+            endpoint = %url,
+            message_count = request.messages.len(),
+            tool_count = request.tools.len(),
+            temperature = ?request.temperature,
+            max_output_tokens = ?request.max_output_tokens,
+            stream = false,
+            "starting OpenAI-compatible completion request",
+        );
         let payload = OpenAiChatCompletionRequest {
             model: request.model.clone(),
             messages: request
@@ -515,7 +558,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         };
         let response = self
             .client
-            .post(self.completions_url())
+            .post(&url)
             .bearer_auth(&self.api_key)
             .json(&payload)
             .send()
@@ -532,6 +575,14 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 json!({}),
             )
         })?;
+        debug!(
+            provider = %self.provider,
+            model = %request.model,
+            status = %status,
+            body_bytes = body.len(),
+            duration_ms = started_at.elapsed().as_millis(),
+            "OpenAI-compatible completion response received",
+        );
         if !status.is_success() {
             let details = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!({}));
             let message = details
@@ -539,6 +590,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 .and_then(Value::as_str)
                 .unwrap_or(&body)
                 .to_owned();
+            warn!(
+                provider = %self.provider,
+                model = %request.model,
+                status = %status,
+                retryable = status.is_server_error() || status.as_u16() == 429,
+                body_preview = %truncate_for_log(&body),
+                duration_ms = started_at.elapsed().as_millis(),
+                "OpenAI-compatible completion failed with non-success status",
+            );
             if status.as_u16() == 429 {
                 return Err(LlmError::rate_limited(message, details));
             }
@@ -559,6 +619,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 )
             })?;
         if let Some(error) = decoded.error {
+            warn!(
+                provider = %self.provider,
+                model = %request.model,
+                error_type = error.r#type.as_deref().unwrap_or("provider_error"),
+                duration_ms = started_at.elapsed().as_millis(),
+                "OpenAI-compatible completion returned provider error",
+            );
             return Err(LlmError::provider(
                 error.r#type.unwrap_or_else(|| "provider_error".to_owned()),
                 error.message,
@@ -578,17 +645,30 @@ impl LlmProvider for OpenAiCompatibleProvider {
             .message
             .and_then(|message| message.content)
             .unwrap_or_default();
+        let finish_reason = openai_finish_reason(choice.finish_reason.as_deref());
+        let usage = decoded.usage.map(|usage| LlmUsage {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+        });
+        info!(
+            provider = %self.provider,
+            model = %request.model,
+            finish_reason = ?finish_reason,
+            input_tokens = usage.as_ref().map(|usage| usage.input_tokens).unwrap_or(0),
+            output_tokens = usage.as_ref().map(|usage| usage.output_tokens).unwrap_or(0),
+            total_tokens = usage.as_ref().map(|usage| usage.total_tokens).unwrap_or(0),
+            content_chars = content.chars().count(),
+            duration_ms = started_at.elapsed().as_millis(),
+            "OpenAI-compatible completion completed",
+        );
         Ok(LlmResponse {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             provider: self.provider.clone(),
             model: request.model,
             content,
-            finish_reason: openai_finish_reason(choice.finish_reason.as_deref()),
-            usage: decoded.usage.map(|usage| LlmUsage {
-                input_tokens: usage.prompt_tokens,
-                output_tokens: usage.completion_tokens,
-                total_tokens: usage.total_tokens,
-            }),
+            finish_reason,
+            usage,
             metadata: json!({"api": "openai_chat_completions"}),
         })
     }
@@ -599,6 +679,19 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 "llm request requires at least one message",
             ));
         }
+        let started_at = std::time::Instant::now();
+        let url = self.completions_url();
+        info!(
+            provider = %self.provider,
+            model = %request.model,
+            endpoint = %url,
+            message_count = request.messages.len(),
+            tool_count = request.tools.len(),
+            temperature = ?request.temperature,
+            max_output_tokens = ?request.max_output_tokens,
+            stream = true,
+            "starting OpenAI-compatible stream request",
+        );
         let payload = OpenAiChatCompletionRequest {
             model: request.model.clone(),
             messages: request
@@ -619,7 +712,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         };
         let response = self
             .client
-            .post(self.completions_url())
+            .post(&url)
             .bearer_auth(&self.api_key)
             .json(&payload)
             .send()
@@ -628,6 +721,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 LlmError::provider("provider_request_failed", err.to_string(), true, json!({}))
             })?;
         let status = response.status();
+        debug!(
+            provider = %self.provider,
+            model = %request.model,
+            status = %status,
+            duration_ms = started_at.elapsed().as_millis(),
+            "OpenAI-compatible stream response headers received",
+        );
         if !status.is_success() {
             let body = response.text().await.map_err(|err| {
                 LlmError::provider(
@@ -643,6 +743,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 .and_then(Value::as_str)
                 .unwrap_or(&body)
                 .to_owned();
+            warn!(
+                provider = %self.provider,
+                model = %request.model,
+                status = %status,
+                retryable = status.is_server_error() || status.as_u16() == 429,
+                body_preview = %truncate_for_log(&body),
+                duration_ms = started_at.elapsed().as_millis(),
+                "OpenAI-compatible stream failed with non-success status",
+            );
             if status.as_u16() == 429 {
                 return Err(LlmError::rate_limited(message, details));
             }
@@ -661,6 +770,17 @@ impl LlmProvider for OpenAiCompatibleProvider {
         Ok(Box::pin(stream::unfold(state, |mut state| async move {
             state.next_event().await.map(|event| (event, state))
         })))
+    }
+}
+
+fn truncate_for_log(value: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
     }
 }
 

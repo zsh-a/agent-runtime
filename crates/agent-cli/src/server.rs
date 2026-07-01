@@ -17,6 +17,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+use tracing::{debug, info, warn};
 
 use crate::{
     catalog::CatalogSummary,
@@ -64,11 +65,13 @@ pub(crate) async fn serve_http(server: RuntimeServer, host: String, port: u16) -
         .route("/sessions/{session_id}/fork", post(http_session_fork))
         .with_state(server);
     let listener = TcpListener::bind(addr).await.into_diagnostic()?;
+    info!(addr = %addr, "HTTP server listening");
     eprintln!("agent serve listening on http://{addr}");
     axum::serve(listener, app).await.into_diagnostic()
 }
 
 pub(crate) async fn serve_stdio(server: RuntimeServer) -> Result<()> {
+    info!("stdio server listening");
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut stdout = tokio::io::stdout();
@@ -331,6 +334,12 @@ async fn http_session_fork(
 }
 
 fn http_error(status: StatusCode, code: &str, err: impl std::fmt::Display) -> Response {
+    warn!(
+        status = status.as_u16(),
+        code,
+        error = %err,
+        "HTTP request failed",
+    );
     (
         status,
         Json(HttpErrorBody {
@@ -345,11 +354,26 @@ async fn handle_stdio_line(server: &RuntimeServer, line: &str) -> StdioResponse 
     let request = match serde_json::from_str::<StdioRequest>(line) {
         Ok(request) => request,
         Err(err) => {
+            warn!(error = %err, "stdio request parse failed");
             return stdio_error(None, -32700, format!("parse error: {err}"));
         }
     };
+    debug!(
+        method = %request.method,
+        id = %request
+            .id
+            .as_ref()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "none".to_owned()),
+        "stdio request received",
+    );
 
     if request.jsonrpc.as_deref().is_some_and(|v| v != "2.0") {
+        warn!(
+            method = %request.method,
+            jsonrpc = request.jsonrpc.as_deref().unwrap_or("none"),
+            "stdio request has invalid jsonrpc version",
+        );
         return stdio_error(request.id, -32600, "invalid jsonrpc version");
     }
 
@@ -363,6 +387,7 @@ async fn handle_stdio_line(server: &RuntimeServer, line: &str) -> StdioResponse 
             let params = match serde_json::from_value::<AgentRunParams>(request.params) {
                 Ok(params) => params,
                 Err(err) => {
+                    warn!(method = %request.method, error = %err, "stdio params invalid");
                     return stdio_error(request.id, -32602, format!("invalid params: {err}"));
                 }
             };
@@ -382,9 +407,15 @@ async fn handle_stdio_line(server: &RuntimeServer, line: &str) -> StdioResponse 
                         "trace": outcome.trace,
                     }),
                 ),
-                Err(err) => stdio_error(request.id, -32000, err.to_string()),
+                Err(err) => {
+                    warn!(method = %request.method, error = %err, "stdio agent.run failed");
+                    stdio_error(request.id, -32000, err.to_string())
+                }
             }
         }
-        _ => stdio_error(request.id, -32601, "method not found"),
+        _ => {
+            warn!(method = %request.method, "stdio method not found");
+            stdio_error(request.id, -32601, "method not found")
+        }
     }
 }

@@ -2,6 +2,7 @@ use agent_core::PROTOCOL_VERSION;
 use async_trait::async_trait;
 use futures::stream;
 use serde_json::{Value, json};
+use tracing::{debug, info};
 
 use crate::types::{
     LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmProvider, LlmRequest,
@@ -70,10 +71,29 @@ impl MockLlmProvider {
 #[async_trait]
 impl LlmProvider for MockLlmProvider {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
-        self.response_for(&request)
+        debug!(
+            provider = %self.provider,
+            model = %request.model,
+            message_count = request.messages.len(),
+            "starting mock LLM completion",
+        );
+        let response = self.response_for(&request)?;
+        info!(
+            provider = %response.provider,
+            model = %response.model,
+            content_chars = response.content.chars().count(),
+            "mock LLM completion completed",
+        );
+        Ok(response)
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmEventStream, LlmError> {
+        debug!(
+            provider = %self.provider,
+            model = %request.model,
+            message_count = request.messages.len(),
+            "starting mock LLM stream",
+        );
         let response = self.response_for(&request)?;
         let events = vec![
             Ok(LlmEvent {

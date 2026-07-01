@@ -8,6 +8,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracing::{debug, info, warn};
 
 use super::llm_content_as_text;
 use crate::sse::{
@@ -225,6 +226,12 @@ impl AnthropicSseState {
                 }
                 Some(Err(err)) => {
                     self.finished = true;
+                    warn!(
+                        provider = %self.provider,
+                        model = %self.model,
+                        error = %err,
+                        "Anthropic stream read failed",
+                    );
                     return Some(Err(LlmError::provider(
                         "provider_stream_read_failed",
                         err.to_string(),
@@ -260,6 +267,13 @@ impl AnthropicSseState {
         let decoded = match serde_json::from_str::<AnthropicStreamEvent>(&data) {
             Ok(decoded) => decoded,
             Err(err) => {
+                warn!(
+                    provider = %self.provider,
+                    model = %self.model,
+                    error = %err,
+                    frame_bytes = data.len(),
+                    "Anthropic stream frame decode failed",
+                );
                 self.pending.push_back(Err(LlmError::provider(
                     "provider_stream_decode_failed",
                     err.to_string(),
@@ -427,6 +441,12 @@ impl AnthropicSseState {
                     r#type: Some("provider_error".to_owned()),
                     message: "provider stream error".to_owned(),
                 });
+                warn!(
+                    provider = %self.provider,
+                    model = %self.model,
+                    error_type = error.r#type.as_deref().unwrap_or("provider_error"),
+                    "Anthropic stream returned provider error",
+                );
                 self.pending.push_back(Err(LlmError::provider(
                     error.r#type.unwrap_or_else(|| "provider_error".to_owned()),
                     error.message,
@@ -503,6 +523,16 @@ impl AnthropicSseState {
                 "anthropic_content": self.raw_blocks,
             }),
         };
+        info!(
+            provider = %self.provider,
+            model = %self.model,
+            finish_reason = ?response.finish_reason,
+            input_tokens = response.usage.as_ref().map(|usage| usage.input_tokens).unwrap_or(0),
+            output_tokens = response.usage.as_ref().map(|usage| usage.output_tokens).unwrap_or(0),
+            total_tokens = response.usage.as_ref().map(|usage| usage.total_tokens).unwrap_or(0),
+            content_chars = response.content.chars().count(),
+            "Anthropic stream finished",
+        );
         self.pending.push_back(Ok(LlmEvent {
             kind: LlmEventKind::Finished,
             content: None,
@@ -524,6 +554,20 @@ impl LlmProvider for AnthropicProvider {
                 "llm request requires at least one message",
             ));
         }
+        let started_at = std::time::Instant::now();
+        let url = self.messages_url();
+        info!(
+            provider = %self.provider,
+            model = %request.model,
+            endpoint = %url,
+            message_count = request.messages.len(),
+            tool_count = request.tools.len(),
+            temperature = ?request.temperature,
+            max_output_tokens = ?request.max_output_tokens,
+            anthropic_version = %self.anthropic_version,
+            stream = false,
+            "starting Anthropic completion request",
+        );
         let (system, messages) = anthropic_messages_from_llm(&request.messages)?;
         if messages.is_empty() {
             return Err(LlmError::validation(
@@ -541,7 +585,7 @@ impl LlmProvider for AnthropicProvider {
         };
         let response = self
             .client
-            .post(self.messages_url())
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", &self.anthropic_version)
             .json(&payload)
@@ -559,6 +603,14 @@ impl LlmProvider for AnthropicProvider {
                 json!({}),
             )
         })?;
+        debug!(
+            provider = %self.provider,
+            model = %request.model,
+            status = %status,
+            body_bytes = body.len(),
+            duration_ms = started_at.elapsed().as_millis(),
+            "Anthropic completion response received",
+        );
         if !status.is_success() {
             let details = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!({}));
             let message = details
@@ -566,6 +618,15 @@ impl LlmProvider for AnthropicProvider {
                 .and_then(Value::as_str)
                 .unwrap_or(&body)
                 .to_owned();
+            warn!(
+                provider = %self.provider,
+                model = %request.model,
+                status = %status,
+                retryable = status.is_server_error() || status.as_u16() == 429,
+                body_preview = %truncate_for_log(&body),
+                duration_ms = started_at.elapsed().as_millis(),
+                "Anthropic completion failed with non-success status",
+            );
             if status.as_u16() == 429 {
                 return Err(LlmError::rate_limited(message, details));
             }
@@ -585,6 +646,13 @@ impl LlmProvider for AnthropicProvider {
             )
         })?;
         if let Some(error) = decoded.error {
+            warn!(
+                provider = %self.provider,
+                model = %request.model,
+                error_type = error.r#type.as_deref().unwrap_or("provider_error"),
+                duration_ms = started_at.elapsed().as_millis(),
+                "Anthropic completion returned provider error",
+            );
             return Err(LlmError::provider(
                 error.r#type.unwrap_or_else(|| "provider_error".to_owned()),
                 error.message,
@@ -596,17 +664,30 @@ impl LlmProvider for AnthropicProvider {
             LlmError::provider("provider_decode_failed", err.to_string(), false, json!({}))
         })?;
         let content = anthropic_text_from_blocks(&decoded.content);
+        let finish_reason = anthropic_finish_reason(decoded.stop_reason.as_deref());
+        let usage = decoded.usage.map(|usage| LlmUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.input_tokens + usage.output_tokens,
+        });
+        info!(
+            provider = %self.provider,
+            model = %request.model,
+            finish_reason = ?finish_reason,
+            input_tokens = usage.as_ref().map(|usage| usage.input_tokens).unwrap_or(0),
+            output_tokens = usage.as_ref().map(|usage| usage.output_tokens).unwrap_or(0),
+            total_tokens = usage.as_ref().map(|usage| usage.total_tokens).unwrap_or(0),
+            content_chars = content.chars().count(),
+            duration_ms = started_at.elapsed().as_millis(),
+            "Anthropic completion completed",
+        );
         Ok(LlmResponse {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             provider: self.provider.clone(),
             model: request.model,
             content,
-            finish_reason: anthropic_finish_reason(decoded.stop_reason.as_deref()),
-            usage: decoded.usage.map(|usage| LlmUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                total_tokens: usage.input_tokens + usage.output_tokens,
-            }),
+            finish_reason,
+            usage,
             metadata: json!({
                 "api": "anthropic_messages",
                 "anthropic_version": self.anthropic_version,
@@ -621,6 +702,20 @@ impl LlmProvider for AnthropicProvider {
                 "llm request requires at least one message",
             ));
         }
+        let started_at = std::time::Instant::now();
+        let url = self.messages_url();
+        info!(
+            provider = %self.provider,
+            model = %request.model,
+            endpoint = %url,
+            message_count = request.messages.len(),
+            tool_count = request.tools.len(),
+            temperature = ?request.temperature,
+            max_output_tokens = ?request.max_output_tokens,
+            anthropic_version = %self.anthropic_version,
+            stream = true,
+            "starting Anthropic stream request",
+        );
         let (system, messages) = anthropic_messages_from_llm(&request.messages)?;
         if messages.is_empty() {
             return Err(LlmError::validation(
@@ -638,7 +733,7 @@ impl LlmProvider for AnthropicProvider {
         };
         let response = self
             .client
-            .post(self.messages_url())
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", &self.anthropic_version)
             .json(&payload)
@@ -648,6 +743,13 @@ impl LlmProvider for AnthropicProvider {
                 LlmError::provider("provider_request_failed", err.to_string(), true, json!({}))
             })?;
         let status = response.status();
+        debug!(
+            provider = %self.provider,
+            model = %request.model,
+            status = %status,
+            duration_ms = started_at.elapsed().as_millis(),
+            "Anthropic stream response headers received",
+        );
         if !status.is_success() {
             let body = response.text().await.map_err(|err| {
                 LlmError::provider(
@@ -663,6 +765,15 @@ impl LlmProvider for AnthropicProvider {
                 .and_then(Value::as_str)
                 .unwrap_or(&body)
                 .to_owned();
+            warn!(
+                provider = %self.provider,
+                model = %request.model,
+                status = %status,
+                retryable = status.is_server_error() || status.as_u16() == 429,
+                body_preview = %truncate_for_log(&body),
+                duration_ms = started_at.elapsed().as_millis(),
+                "Anthropic stream failed with non-success status",
+            );
             if status.as_u16() == 429 {
                 return Err(LlmError::rate_limited(message, details));
             }
@@ -682,6 +793,17 @@ impl LlmProvider for AnthropicProvider {
         Ok(Box::pin(stream::unfold(state, |mut state| async move {
             state.next_event().await.map(|event| (event, state))
         })))
+    }
+}
+
+fn truncate_for_log(value: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
     }
 }
 

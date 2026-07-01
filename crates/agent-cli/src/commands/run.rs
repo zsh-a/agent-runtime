@@ -6,6 +6,7 @@ use agent_store::{FileProposalStore, FileRunStore};
 use camino::Utf8PathBuf;
 use miette::{IntoDiagnostic, Result};
 use serde_json::json;
+use tracing::info;
 
 use crate::{
     catalog::load_catalog_registry,
@@ -33,6 +34,18 @@ pub(crate) struct RunCliOptions {
 }
 
 pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
+    info!(
+        agent_id = %options.agent_id,
+        registry = %options.registry,
+        catalog = options.catalog.as_ref().map(|path| path.as_str()).unwrap_or("none"),
+        store = %options.store,
+        input = options.input.as_ref().map(|path| path.as_str()).unwrap_or("none"),
+        trace_out = options.trace_out.as_ref().map(|path| path.as_str()).unwrap_or("none"),
+        timeout_seconds = options.timeout_seconds,
+        max_retries = options.max_retries,
+        retry_backoff_ms = options.retry_backoff_ms,
+        "running agent once",
+    );
     let input = match options.input {
         Some(path) => read_json(path).await?,
         None => json!({}),
@@ -81,6 +94,13 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
     if let Some(path) = options.trace_out {
         write_json(path, &outcome.trace).await?;
     }
+    info!(
+        run_id = %outcome.result.run_id.0,
+        agent_id = %outcome.result.agent_id,
+        status = ?outcome.result.status,
+        store = %store_path,
+        "agent run artifacts written",
+    );
     print_json(&outcome.result)
 }
 
@@ -90,6 +110,11 @@ pub(crate) struct TickCliOptions {
 }
 
 pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
+    info!(
+        registry = %options.registry,
+        store = %options.store,
+        "starting scheduler tick",
+    );
     let registry = load_registry(options.registry).await?;
     let store_path = options.store;
     let store = Arc::new(
@@ -125,5 +150,9 @@ pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
         .into_iter()
         .map(|outcome| outcome.result)
         .collect::<Vec<_>>();
+    info!(
+        run_count = results.len(),
+        "scheduler tick artifacts written"
+    );
     print_json(&results)
 }

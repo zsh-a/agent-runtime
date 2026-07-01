@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use miette::{Result, miette};
 use serde_json::{Value, json};
+use tracing::{info, warn};
 
 use manifest::{ToolSourceRuntime, load_tool_sources as read_tool_sources};
 pub(crate) use manifest::{load_tool_source_specs, load_tool_sources, source_has_tool};
@@ -59,22 +60,54 @@ impl CliServices {
 #[async_trait]
 impl AgentServices for CliServices {
     async fn call_tool(&self, name: &str, input: Value) -> std::result::Result<Value, ToolError> {
-        if let Some(output) = self.tools.mock_tools.get(name) {
-            return Ok(output.clone());
+        let started_at = std::time::Instant::now();
+        let input_hash = value_hash(&input);
+        let input_bytes = serialized_value_len(&input);
+        let (source, result) = if let Some(output) = self.tools.mock_tools.get(name) {
+            ("mock", Ok(output.clone()))
+        } else if let Some(host) = self.tools.source_tools.get(name) {
+            ("tool_source", host.call(name, input).await)
+        } else if let Some(host) = &self.tools.tool_host {
+            ("tool_host", host.call(name, input).await)
+        } else if name == "echo" {
+            ("builtin", Ok(json!({"echo": input})))
+        } else {
+            (
+                "missing",
+                Err(error::tool_error(
+                    "unknown_tool",
+                    format!("unknown tool '{name}'"),
+                )),
+            )
+        };
+        match &result {
+            Ok(output) => {
+                info!(
+                    tool_name = name,
+                    source,
+                    input_hash,
+                    input_bytes,
+                    output_hash = %value_hash(output),
+                    output_bytes = serialized_value_len(output),
+                    duration_ms = started_at.elapsed().as_millis(),
+                    "tool dispatch completed",
+                );
+            }
+            Err(error) => {
+                warn!(
+                    tool_name = name,
+                    source,
+                    input_hash,
+                    input_bytes,
+                    error_code = %error.record.code,
+                    error_kind = ?error.record.kind,
+                    retryable = error.record.retryable,
+                    duration_ms = started_at.elapsed().as_millis(),
+                    "tool dispatch failed",
+                );
+            }
         }
-        if let Some(host) = self.tools.source_tools.get(name) {
-            return host.call(name, input).await;
-        }
-        if let Some(host) = &self.tools.tool_host {
-            return host.call(name, input).await;
-        }
-        match name {
-            "echo" => Ok(json!({"echo": input})),
-            _ => Err(error::tool_error(
-                "unknown_tool",
-                format!("unknown tool '{name}'"),
-            )),
-        }
+        result
     }
 
     async fn emit_event(
@@ -180,4 +213,15 @@ async fn read_json_file(path: Utf8PathBuf) -> Result<Value> {
         .await
         .map_err(|e| miette!("failed to read JSON at {path}: {e}"))?;
     serde_json::from_slice(&bytes).map_err(|e| miette!("failed to parse JSON at {path}: {e}"))
+}
+
+fn value_hash(value: &Value) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    format!("blake3:{}", blake3::hash(&bytes).to_hex())
+}
+
+fn serialized_value_len(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
 }

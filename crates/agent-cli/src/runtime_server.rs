@@ -12,6 +12,7 @@ use camino::Utf8PathBuf;
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracing::{debug, info, warn};
 
 use crate::{
     catalog::{read_catalog, registry_from_catalog},
@@ -118,9 +119,21 @@ impl RuntimeServer {
         store_path: Utf8PathBuf,
         tool_overrides: ToolOverrides,
     ) -> Result<Self> {
+        info!(
+            catalog = %catalog_path,
+            store = %store_path,
+            "initializing runtime server",
+        );
         let mut catalog = read_catalog(catalog_path).await?;
         catalog.tools.extend(tool_overrides.source_specs.clone());
         let catalog = Arc::new(catalog);
+        info!(
+            agent_count = catalog.agents.len(),
+            tool_count = catalog.tools.len(),
+            proposal_kind_count = catalog.proposal_kinds.len(),
+            active_domains = ?catalog.active_domains,
+            "runtime server catalog loaded",
+        );
         let registry = registry_from_catalog(&catalog);
         let store = Arc::new(
             FileRunStore::new(store_path.clone())
@@ -160,6 +173,14 @@ impl RuntimeServer {
         session_id: Option<String>,
         thread_id: Option<String>,
     ) -> Result<AgentRunResponse> {
+        let started_at = std::time::Instant::now();
+        info!(
+            agent_id = %agent_id,
+            session_id = session_id.as_deref().unwrap_or("none"),
+            thread_id = thread_id.as_deref().unwrap_or("none"),
+            input_bytes = serialized_value_len(&input),
+            "server run_agent requested",
+        );
         let outcome = self
             .runner
             .run_once(
@@ -177,6 +198,13 @@ impl RuntimeServer {
             .into_diagnostic()?;
         record_session_step(&self.store_path, thread_id.as_deref(), &outcome).await?;
         write_store_trace(&self.store_path, &outcome.trace).await?;
+        info!(
+            run_id = %outcome.result.run_id.0,
+            agent_id = %outcome.result.agent_id,
+            status = ?outcome.result.status,
+            duration_ms = started_at.elapsed().as_millis(),
+            "server run_agent completed",
+        );
         Ok(AgentRunResponse {
             result: outcome.result,
             trace: outcome.trace,
@@ -184,16 +212,32 @@ impl RuntimeServer {
     }
 
     pub(crate) async fn call_tool(&self, name: String, input: Value) -> Result<ToolCallResponse> {
-        ensure_catalog_has_tool(&self.catalog, &name)?;
+        let started_at = std::time::Instant::now();
+        info!(
+            tool_name = %name,
+            input_bytes = serialized_value_len(&input),
+            "server tool call requested",
+        );
+        if let Err(err) = ensure_catalog_has_tool(&self.catalog, &name) {
+            warn!(tool_name = %name, error = %err, "server rejected unknown tool");
+            return Err(err);
+        }
         let output = self
             .services
             .call_tool(&name, input)
             .await
             .map_err(|err| miette!(err.record.message))?;
+        info!(
+            tool_name = %name,
+            output_bytes = serialized_value_len(&output),
+            duration_ms = started_at.elapsed().as_millis(),
+            "server tool call completed",
+        );
         Ok(ToolCallResponse { tool: name, output })
     }
 
     pub(crate) async fn get_run(&self, run_id: RunId) -> Result<AgentRunRecord> {
+        debug!(run_id = %run_id.0, "server get_run requested");
         self.run_store
             .get_run(&run_id)
             .await
@@ -206,6 +250,11 @@ impl RuntimeServer {
         agent_id: Option<String>,
         limit: Option<usize>,
     ) -> Result<Vec<AgentRunRecord>> {
+        debug!(
+            agent_id = agent_id.as_deref().unwrap_or("all"),
+            limit = ?limit,
+            "server list_runs requested",
+        );
         self.run_store
             .list_runs(agent_id.as_deref(), limit)
             .await
@@ -213,12 +262,14 @@ impl RuntimeServer {
     }
 
     pub(crate) async fn get_run_trace(&self, run_id: RunId) -> Result<Value> {
+        debug!(run_id = %run_id.0, "server get_run_trace requested");
         read_store_trace(&self.store_path, &run_id)
             .await?
             .ok_or_else(|| miette!("trace for run '{}' was not found", run_id.0))
     }
 
     pub(crate) async fn replay_run(&self, run_id: RunId) -> Result<ReplayExecutionReport> {
+        info!(run_id = %run_id.0, "server replay_run requested");
         let trace_value = self.get_run_trace(run_id.clone()).await?;
         let source_trace: agent_core::AgentTrace = serde_json::from_value(trace_value)
             .map_err(|e| miette!("failed to parse trace for run '{}': {e}", run_id.0))?;
@@ -244,6 +295,12 @@ impl RuntimeServer {
         &self,
         params: HttpProposalCreateParams,
     ) -> Result<ProposalEnvelope> {
+        info!(
+            run_id = %params.run_id,
+            agent_id = %params.agent_id,
+            proposal_kind = %params.kind,
+            "server create_proposal requested",
+        );
         let proposal = ProposalEnvelope::new(
             RunId(params.run_id),
             params.agent_id,
@@ -274,6 +331,7 @@ impl RuntimeServer {
         &self,
         params: HttpSessionCreateParams,
     ) -> Result<HttpSessionCreateResponse> {
+        info!(title = %params.title, "server create_session requested");
         if params.title.trim().is_empty() {
             return Err(miette!("session title cannot be empty"));
         }
@@ -327,6 +385,11 @@ impl RuntimeServer {
         session_id: SessionId,
         params: HttpThreadForkParams,
     ) -> Result<ThreadForkReport> {
+        info!(
+            session_id = %session_id.0,
+            parent_thread_id = %params.parent_thread_id,
+            "server fork_thread requested",
+        );
         self.session_store
             .get_session(&session_id)
             .await
@@ -376,6 +439,11 @@ impl RuntimeServer {
         proposal_id: ProposalId,
         params: HttpProposalDecisionParams,
     ) -> Result<ProposalDecisionResponse> {
+        info!(
+            proposal_id = %proposal_id.0,
+            decision = %params.decision,
+            "server decide_proposal requested",
+        );
         let mut proposal = self.get_proposal(proposal_id.clone()).await?;
         let decision = parse_approval_decision(&params.decision)?;
         proposal.status = match decision {
@@ -421,6 +489,11 @@ impl RuntimeServer {
         proposal_id: ProposalId,
         action: ProposalAction,
     ) -> Result<ProposalActionResponse> {
+        info!(
+            proposal_id = %proposal_id.0,
+            action = ?action,
+            "server proposal action requested",
+        );
         let mut proposal = self.get_proposal(proposal_id).await?;
         let tool = proposal_action_tool(&self.catalog, &proposal.kind)?;
         let response = execute_proposal_action_with_store(
@@ -434,6 +507,12 @@ impl RuntimeServer {
         append_proposal_action_trace_event(&self.store_path, &response).await?;
         Ok(response)
     }
+}
+
+fn serialized_value_len(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
 }
 
 fn ensure_catalog_has_tool(catalog: &AgentRuntimeCatalog, name: &str) -> Result<()> {
