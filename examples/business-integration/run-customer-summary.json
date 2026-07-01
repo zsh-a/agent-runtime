@@ -1,0 +1,10 @@
+{
+  "customer_id": "cus_123",
+  "workflow": "customer_summary",
+  "tool_call": {
+    "name": "get_customer_profile",
+    "input": {
+      "customer_id": "cus_123"
+    }
+  }
+}

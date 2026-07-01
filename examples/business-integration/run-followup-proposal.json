@@ -1,0 +1,13 @@
+{
+  "customer_id": "cus_123",
+  "workflow": "followup_proposal",
+  "proposal": {
+    "kind": "followup_email",
+    "summary": "Send Acme Corp a follow-up email about onboarding risks before renewal.",
+    "payload": {
+      "customer_id": "cus_123",
+      "subject": "Checking in on onboarding progress",
+      "body": "Hi Acme team, I noticed onboarding usage has dipped and wanted to offer help before your renewal checkpoint."
+    }
+  }
+}

@@ -111,7 +111,9 @@ openapi/agent-runtime-api.yaml
   Minimal HTTP API contract for server-first clients.
 
 docs/integration/
-  Host-application integration guidance. `flutter-frb-native-bridge.md`
+  Host-application integration guidance. `business-agent-integration.md`
+  describes how other business domains build agents, catalogs, ToolHosts,
+  proposals, and trace adapters on top of the runtime. `flutter-frb-native-bridge.md`
   documents the NaviWealth-style Flutter FRB/native bridge pattern without
   making Flutter or product code part of this standalone runtime repository.
 ```

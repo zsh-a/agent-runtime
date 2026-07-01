@@ -1,0 +1,43 @@
+{
+  "protocol_version": "agent.v1",
+  "catalog_version": "agent_catalog.v1",
+  "generated_at": "2026-07-01T00:00:00Z",
+  "active_domains": ["customer_success"],
+  "agents": [
+    {
+      "protocol_version": "agent.v1",
+      "id": "customer_summary_agent",
+      "name": "Customer Summary Agent",
+      "version": "0.1.0",
+      "schedule": {
+        "type": "manual"
+      },
+      "capabilities": [
+        "customer.summary",
+        "customer.followup_proposal"
+      ],
+      "metadata": {
+        "domain": "customer_success",
+        "prompt_id": "customer_summary_prompt",
+        "prompt_version": "customer_summary.prompt.v1",
+        "model_family": "openai",
+        "provider": "openai_compatible",
+        "model": "gpt-5-mini",
+        "tool_schema_version": "customer_success.tools.v1"
+      }
+    }
+  ],
+  "tools": [],
+  "proposal_kinds": [
+    {
+      "kind": "followup_email",
+      "tool_name": "apply_followup_email"
+    }
+  ],
+  "prompt_blocks": [
+    {
+      "index": 0,
+      "text": "You are a customer success assistant. Use read-only customer tools for facts. Never send emails or mutate CRM state directly; create a followup_email proposal instead."
+    }
+  ]
+}

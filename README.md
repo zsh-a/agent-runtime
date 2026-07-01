@@ -23,7 +23,8 @@ this standalone repo. Host applications consume the JSON contracts, CLI/server
 surfaces, or Rust crates through their own adapters.
 
 Integration guidance for host applications lives under `docs/integration/`,
-including the NaviWealth-style Flutter FRB native bridge guide.
+including the business agent integration guide and the NaviWealth-style Flutter
+FRB native bridge guide.
 
 ## Common Commands
 
