@@ -739,6 +739,7 @@ mod tests {
             timeout_seconds: 60,
             max_retries: 0,
             retry_backoff_ms: 0,
+            mouse_capture: false,
             once: false,
         })
         .await
@@ -775,6 +776,7 @@ mod tests {
             timeout_seconds: 60,
             max_retries: 0,
             retry_backoff_ms: 0,
+            mouse_capture: false,
             once: false,
         })
         .await
@@ -821,6 +823,7 @@ mod tests {
             timeout_seconds: 60,
             max_retries: 0,
             retry_backoff_ms: 0,
+            mouse_capture: false,
             once: false,
         })
         .await
@@ -882,6 +885,7 @@ mod tests {
             timeout_seconds: 60,
             max_retries: 0,
             retry_backoff_ms: 0,
+            mouse_capture: false,
             once: false,
         })
         .await
@@ -933,6 +937,7 @@ mod tests {
             timeout_seconds: 60,
             max_retries: 0,
             retry_backoff_ms: 0,
+            mouse_capture: false,
             once: false,
         })
         .await
@@ -988,6 +993,7 @@ mod tests {
             timeout_seconds: 60,
             max_retries: 0,
             retry_backoff_ms: 0,
+            mouse_capture: false,
             once: false,
         })
         .await
@@ -1019,6 +1025,7 @@ mod tests {
             timeout_seconds: 60,
             max_retries: 0,
             retry_backoff_ms: 0,
+            mouse_capture: false,
             once: false,
         })
         .await

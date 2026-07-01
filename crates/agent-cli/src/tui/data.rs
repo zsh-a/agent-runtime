@@ -69,6 +69,7 @@ pub(crate) struct TuiOptions {
     pub(crate) timeout_seconds: u64,
     pub(crate) max_retries: u32,
     pub(crate) retry_backoff_ms: u64,
+    pub(crate) mouse_capture: bool,
     pub(crate) once: bool,
 }
 
@@ -655,6 +656,7 @@ mod tests {
                 timeout_seconds: 60,
                 max_retries: 0,
                 retry_backoff_ms: 0,
+                mouse_capture: false,
                 once: false,
             },
             catalog_summary: None,

@@ -339,6 +339,11 @@ enum Command {
         max_retries: u32,
         #[arg(long, default_value_t = 0)]
         retry_backoff_ms: u64,
+        #[arg(
+            long,
+            help = "Capture mouse wheel events; disables terminal-native text selection"
+        )]
+        mouse_capture: bool,
         #[arg(long)]
         once: bool,
     },
@@ -778,6 +783,7 @@ async fn main() -> Result<()> {
             timeout_seconds,
             max_retries,
             retry_backoff_ms,
+            mouse_capture,
             once,
         } => {
             let catalog = context.catalog(catalog);
@@ -805,6 +811,7 @@ async fn main() -> Result<()> {
                 timeout_seconds: execution.timeout_seconds,
                 max_retries: execution.max_retries,
                 retry_backoff_ms: execution.retry_backoff_ms,
+                mouse_capture,
                 once,
             })
             .await?;

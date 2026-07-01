@@ -19,33 +19,32 @@ use super::{
 };
 
 pub(super) async fn run_tui_terminal(mut state: TuiState) -> Result<()> {
+    let mouse_capture = state.options.mouse_capture;
     crossterm::terminal::enable_raw_mode().into_diagnostic()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(
-        stdout,
-        crossterm::terminal::EnterAlternateScreen,
-        EnableMouseCapture
-    )
-    .into_diagnostic()?;
+    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen).into_diagnostic()?;
+    if mouse_capture {
+        crossterm::execute!(stdout, EnableMouseCapture).into_diagnostic()?;
+    }
     let result = run_tui_event_loop(
         &mut Terminal::new(CrosstermBackend::new(stdout)).into_diagnostic()?,
         &mut state,
+        mouse_capture,
     )
     .await;
     crossterm::terminal::disable_raw_mode().into_diagnostic()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(
-        stdout,
-        DisableMouseCapture,
-        crossterm::terminal::LeaveAlternateScreen
-    )
-    .into_diagnostic()?;
+    if mouse_capture {
+        crossterm::execute!(stdout, DisableMouseCapture).into_diagnostic()?;
+    }
+    crossterm::execute!(stdout, crossterm::terminal::LeaveAlternateScreen).into_diagnostic()?;
     result
 }
 
 async fn run_tui_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &mut TuiState,
+    mouse_capture: bool,
 ) -> Result<()> {
     let (sender, mut receiver) = unbounded_channel();
     let mut active_task: Option<JoinHandle<()>> = None;
@@ -89,7 +88,7 @@ async fn run_tui_event_loop(
                         _ => {}
                     }
                 }
-                Event::Mouse(mouse) => {
+                Event::Mouse(mouse) if mouse_capture => {
                     let width = terminal.size().into_diagnostic()?.width;
                     handle_mouse_event(state, mouse, width);
                 }
