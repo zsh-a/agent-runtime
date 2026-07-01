@@ -81,6 +81,7 @@ pub(super) struct TuiState {
     pub(super) status: String,
     pub(super) input_mode: bool,
     pub(super) command_input: String,
+    pub(super) input_cursor: usize,
     pub(super) transcript: Vec<TranscriptItem>,
     pub(super) events: VecDeque<String>,
     pub(super) chat_messages: Vec<LlmMessage>,
@@ -88,6 +89,7 @@ pub(super) struct TuiState {
     pub(super) event_scroll: u16,
     pub(super) input_history: VecDeque<String>,
     pub(super) history_cursor: Option<usize>,
+    pub(super) history_draft: Option<String>,
     pub(super) busy: bool,
 }
 
@@ -107,6 +109,7 @@ impl TuiState {
             status,
             input_mode: true,
             command_input: String::new(),
+            input_cursor: 0,
             transcript: Vec::new(),
             events: VecDeque::new(),
             chat_messages: Vec::new(),
@@ -114,6 +117,7 @@ impl TuiState {
             event_scroll: 0,
             input_history: VecDeque::new(),
             history_cursor: None,
+            history_draft: None,
             busy: false,
         };
         state.push_system_message("Ready. Type a message and press Enter. Use /help for commands.");
@@ -147,7 +151,9 @@ impl TuiState {
         self.input_mode = true;
         self.command_input.clear();
         self.command_input.push_str(prefix);
+        self.input_cursor = self.command_input.len();
         self.history_cursor = None;
+        self.history_draft = None;
     }
 
     pub(super) fn push_event(&mut self, line: impl Into<String>) {
@@ -265,11 +271,133 @@ impl TuiState {
             self.input_history.pop_front();
         }
         self.history_cursor = None;
+        self.history_draft = None;
+    }
+
+    pub(super) fn replace_command_input(&mut self, input: impl Into<String>) {
+        self.command_input = input.into();
+        self.input_cursor = self.command_input.len();
+        self.history_cursor = None;
+        self.history_draft = None;
+    }
+
+    pub(super) fn clear_command_input(&mut self) {
+        self.command_input.clear();
+        self.input_cursor = 0;
+        self.history_cursor = None;
+        self.history_draft = None;
+    }
+
+    pub(super) fn take_submitted_input(&mut self) -> String {
+        let input = self.command_input.trim().to_owned();
+        self.clear_command_input();
+        input
+    }
+
+    pub(super) fn insert_char(&mut self, ch: char) {
+        self.break_history_navigation();
+        self.command_input.insert(self.input_cursor, ch);
+        self.input_cursor += ch.len_utf8();
+    }
+
+    pub(super) fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    pub(super) fn backspace(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        self.break_history_navigation();
+        let previous = self.previous_char_boundary(self.input_cursor);
+        self.command_input.drain(previous..self.input_cursor);
+        self.input_cursor = previous;
+    }
+
+    pub(super) fn delete(&mut self) {
+        if self.input_cursor >= self.command_input.len() {
+            return;
+        }
+        self.break_history_navigation();
+        let next = self.next_char_boundary(self.input_cursor);
+        self.command_input.drain(self.input_cursor..next);
+    }
+
+    pub(super) fn delete_before_cursor(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        self.break_history_navigation();
+        self.command_input.drain(..self.input_cursor);
+        self.input_cursor = 0;
+    }
+
+    pub(super) fn delete_after_cursor(&mut self) {
+        if self.input_cursor >= self.command_input.len() {
+            return;
+        }
+        self.break_history_navigation();
+        self.command_input.drain(self.input_cursor..);
+    }
+
+    pub(super) fn delete_previous_word(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        self.break_history_navigation();
+        let start = self.previous_word_boundary(self.input_cursor);
+        self.command_input.drain(start..self.input_cursor);
+        self.input_cursor = start;
+    }
+
+    pub(super) fn move_cursor_left(&mut self) {
+        if self.input_cursor > 0 {
+            self.input_cursor = self.previous_char_boundary(self.input_cursor);
+        }
+    }
+
+    pub(super) fn move_cursor_right(&mut self) {
+        if self.input_cursor < self.command_input.len() {
+            self.input_cursor = self.next_char_boundary(self.input_cursor);
+        }
+    }
+
+    pub(super) fn move_cursor_word_left(&mut self) {
+        self.input_cursor = self.previous_word_boundary(self.input_cursor);
+    }
+
+    pub(super) fn move_cursor_word_right(&mut self) {
+        self.input_cursor = self.next_word_boundary(self.input_cursor);
+    }
+
+    pub(super) fn move_cursor_to_start(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    pub(super) fn move_cursor_to_end(&mut self) {
+        self.input_cursor = self.command_input.len();
+    }
+
+    pub(super) fn move_cursor_to_line_start(&mut self) {
+        self.input_cursor = self.command_input[..self.input_cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+    }
+
+    pub(super) fn move_cursor_to_line_end(&mut self) {
+        self.input_cursor = self.command_input[self.input_cursor..]
+            .find('\n')
+            .map(|offset| self.input_cursor + offset)
+            .unwrap_or_else(|| self.command_input.len());
     }
 
     pub(super) fn history_previous(&mut self) {
         if self.input_history.is_empty() {
             return;
+        }
+        if self.history_cursor.is_none() {
+            self.history_draft = Some(self.command_input.clone());
         }
         let next = match self.history_cursor {
             Some(index) if index > 0 => index - 1,
@@ -279,6 +407,7 @@ impl TuiState {
         self.history_cursor = Some(next);
         if let Some(value) = self.input_history.get(next) {
             self.command_input = value.clone();
+            self.input_cursor = self.command_input.len();
         }
     }
 
@@ -288,38 +417,40 @@ impl TuiState {
         };
         if index + 1 >= self.input_history.len() {
             self.history_cursor = None;
-            self.command_input.clear();
+            self.command_input = self.history_draft.take().unwrap_or_default();
+            self.input_cursor = self.command_input.len();
         } else {
             let next = index + 1;
             self.history_cursor = Some(next);
             if let Some(value) = self.input_history.get(next) {
                 self.command_input = value.clone();
+                self.input_cursor = self.command_input.len();
             }
         }
     }
 
     pub(super) fn scroll_chat_up(&mut self) {
-        self.chat_scroll = self.chat_scroll.saturating_sub(SCROLL_LINES);
-    }
-
-    pub(super) fn scroll_chat_down(&mut self) {
         self.chat_scroll = self.chat_scroll.saturating_add(SCROLL_LINES);
     }
 
-    pub(super) fn scroll_activity_up(&mut self) {
-        self.event_scroll = self.event_scroll.saturating_sub(SCROLL_LINES);
+    pub(super) fn scroll_chat_down(&mut self) {
+        self.chat_scroll = self.chat_scroll.saturating_sub(SCROLL_LINES);
     }
 
-    pub(super) fn scroll_activity_down(&mut self) {
+    pub(super) fn scroll_activity_up(&mut self) {
         self.event_scroll = self.event_scroll.saturating_add(SCROLL_LINES);
     }
 
+    pub(super) fn scroll_activity_down(&mut self) {
+        self.event_scroll = self.event_scroll.saturating_sub(SCROLL_LINES);
+    }
+
     pub(super) fn scroll_chat_top(&mut self) {
-        self.chat_scroll = 0;
+        self.chat_scroll = u16::MAX / 2;
     }
 
     pub(super) fn scroll_chat_bottom(&mut self) {
-        self.chat_scroll = u16::MAX / 2;
+        self.chat_scroll = 0;
     }
 
     fn push_transcript(
@@ -336,6 +467,81 @@ impl TuiState {
             streaming,
         });
         self.chat_scroll = 0;
+    }
+
+    fn break_history_navigation(&mut self) {
+        self.history_cursor = None;
+        self.history_draft = None;
+    }
+
+    fn previous_char_boundary(&self, index: usize) -> usize {
+        self.command_input[..index]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
+    fn next_char_boundary(&self, index: usize) -> usize {
+        self.command_input[index..]
+            .chars()
+            .next()
+            .map(|ch| index + ch.len_utf8())
+            .unwrap_or_else(|| self.command_input.len())
+    }
+
+    fn previous_word_boundary(&self, index: usize) -> usize {
+        let mut cursor = index;
+        while cursor > 0 {
+            let previous = self.previous_char_boundary(cursor);
+            let ch = self.command_input[previous..cursor]
+                .chars()
+                .next()
+                .unwrap_or_default();
+            if !ch.is_whitespace() {
+                break;
+            }
+            cursor = previous;
+        }
+        while cursor > 0 {
+            let previous = self.previous_char_boundary(cursor);
+            let ch = self.command_input[previous..cursor]
+                .chars()
+                .next()
+                .unwrap_or_default();
+            if ch.is_whitespace() {
+                break;
+            }
+            cursor = previous;
+        }
+        cursor
+    }
+
+    fn next_word_boundary(&self, index: usize) -> usize {
+        let mut cursor = index;
+        while cursor < self.command_input.len() {
+            let next = self.next_char_boundary(cursor);
+            let ch = self.command_input[cursor..next]
+                .chars()
+                .next()
+                .unwrap_or_default();
+            if ch.is_whitespace() {
+                break;
+            }
+            cursor = next;
+        }
+        while cursor < self.command_input.len() {
+            let next = self.next_char_boundary(cursor);
+            let ch = self.command_input[cursor..next]
+                .chars()
+                .next()
+                .unwrap_or_default();
+            if !ch.is_whitespace() {
+                break;
+            }
+            cursor = next;
+        }
+        cursor
     }
 }
 
@@ -409,4 +615,90 @@ fn status_line(
             .unwrap_or_else(|| "not loaded".to_owned()),
         run_count
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> TuiState {
+        TuiState {
+            options: TuiOptions {
+                catalog_path: None,
+                trace_path: None,
+                store_path: Utf8PathBuf::from("store"),
+                registry_path: Utf8PathBuf::from("agents.yaml"),
+                tool_overrides: ToolOverrides::default(),
+                chat: ChatLlmOptions {
+                    provider: "mock".to_owned(),
+                    model: "mock-model".to_owned(),
+                    mock_response: "ok".to_owned(),
+                    api_base_url: None,
+                    api_key_env: "OPENAI_API_KEY".to_owned(),
+                    anthropic_version: "2023-06-01".to_owned(),
+                    temperature: None,
+                    max_output_tokens: None,
+                    max_tool_rounds: 4,
+                },
+                timeout_seconds: 60,
+                max_retries: 0,
+                retry_backoff_ms: 0,
+                once: false,
+            },
+            catalog_summary: None,
+            trace: None,
+            trace_label: None,
+            recent_runs: Vec::new(),
+            status: "ready".to_owned(),
+            input_mode: true,
+            command_input: String::new(),
+            input_cursor: 0,
+            transcript: Vec::new(),
+            events: VecDeque::new(),
+            chat_messages: Vec::new(),
+            chat_scroll: 0,
+            event_scroll: 0,
+            input_history: VecDeque::new(),
+            history_cursor: None,
+            history_draft: None,
+            busy: false,
+        }
+    }
+
+    #[test]
+    fn command_input_edits_at_cursor() {
+        let mut state = test_state();
+        state.replace_command_input("hello");
+
+        state.move_cursor_left();
+        state.move_cursor_left();
+        state.insert_char('X');
+        assert_eq!(state.command_input, "helXlo");
+
+        state.backspace();
+        assert_eq!(state.command_input, "hello");
+
+        state.move_cursor_to_start();
+        state.delete();
+        assert_eq!(state.command_input, "ello");
+        assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn command_history_restores_unsubmitted_draft() {
+        let mut state = test_state();
+        state.remember_input("first");
+        state.remember_input("second");
+        state.replace_command_input("draft");
+
+        state.history_previous();
+        assert_eq!(state.command_input, "second");
+        state.history_previous();
+        assert_eq!(state.command_input, "first");
+        state.history_next();
+        assert_eq!(state.command_input, "second");
+        state.history_next();
+        assert_eq!(state.command_input, "draft");
+        assert_eq!(state.history_cursor, None);
+    }
 }

@@ -86,7 +86,13 @@ fn show_help(state: &mut TuiState) {
         /replay <trace_path>         load a trace into the side panel\n\
         /inspect <run_id>            load a persisted run record summary\n\
         /refresh                     reload catalog, trace, and recent runs\n\
-        /clear                       clear chat and activity",
+        /clear                       clear chat and activity\n\n\
+        Keys:\n\
+        Enter sends, Shift+Enter inserts a newline, Esc/Ctrl-C cancels a running task\n\
+        Left/Right move the cursor, Ctrl/Alt+Left/Right move by word\n\
+        Ctrl+A/E jump to start/end, Ctrl+U/K delete before/after cursor\n\
+        Ctrl+W deletes the previous word, Up/Down browse input history\n\
+        PageUp/PageDown scroll chat, Tab completes slash commands",
     );
 }
 
