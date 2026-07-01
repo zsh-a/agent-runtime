@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fs, io, sync::Mutex, time::Duration};
 
 use agent_core::{AgentRunStore, RunId};
 use agent_runtime::{ExecutionPolicy, recover_stale_runs};
@@ -56,6 +56,7 @@ const DEFAULT_EVAL_STORE: &str = ".agent-runtime/eval-store";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8765;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+const TUI_LOG_FILE: &str = "tui.log";
 
 #[derive(Debug)]
 struct AppContext {
@@ -469,11 +470,10 @@ enum LlmCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_logging();
-
     let cli = Cli::parse();
     let context =
         AppContext::new(load_agent_config(cli.config.clone(), cli.profile.as_deref()).await?);
+    init_logging(log_mode_for_command(&cli.command, &context));
 
     match cli.command {
         Command::List { registry } => {
@@ -853,14 +853,67 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_logging() {
+enum LogMode {
+    Stderr,
+    File(Utf8PathBuf),
+}
+
+fn log_mode_for_command(command: &Command, context: &AppContext) -> LogMode {
+    match command {
+        Command::Tui { store, once, .. } if !once => {
+            LogMode::File(context.store(store.clone()).join(TUI_LOG_FILE))
+        }
+        _ => LogMode::Stderr,
+    }
+}
+
+fn init_logging(mode: LogMode) {
+    match mode {
+        LogMode::Stderr => {
+            let filter = log_filter();
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(io::stderr)
+                .try_init()
+                .ok();
+        }
+        LogMode::File(path) => {
+            if let Some(file) = open_log_file(&path) {
+                let filter = log_filter();
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_ansi(false)
+                    .with_writer(Mutex::new(file))
+                    .try_init()
+                    .ok();
+            } else {
+                let filter = log_filter();
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_ansi(false)
+                    .with_writer(io::sink)
+                    .try_init()
+                    .ok();
+            }
+        }
+    }
+}
+
+fn log_filter() -> tracing_subscriber::EnvFilter {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init()
-        .ok();
+    filter
+}
+
+fn open_log_file(path: &Utf8PathBuf) -> Option<fs::File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent.as_std_path()).ok()?;
+    }
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path.as_std_path())
+        .ok()
 }
 
 #[derive(Debug, Serialize)]
