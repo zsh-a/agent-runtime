@@ -235,13 +235,15 @@ async fn run_chat_turn(state: &mut TuiState, agent_id: &str, text: &str) -> Resu
         .filter(|content| !content.is_empty())
         .unwrap_or(assistant_text);
     if !assistant_content.is_empty() {
-        state.replace_streaming_assistant(assistant_content.clone());
+        state.replace_active_assistant(assistant_content.clone());
         state.chat_messages.push(LlmMessage {
             role: LlmRole::Assistant,
             content: Value::String(assistant_content),
             name: None,
             metadata: json!({}),
         });
+    } else {
+        state.finish_assistant_stream();
     }
     Ok(())
 }
@@ -700,7 +702,11 @@ fn compact_json(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{chat::ChatLlmOptions, tools::ToolOverrides, tui::data::TuiOptions};
+    use crate::{
+        chat::ChatLlmOptions,
+        tools::ToolOverrides,
+        tui::data::{TranscriptRole, TuiOptions},
+    };
 
     fn temp_store_path(dir: &tempfile::TempDir) -> Utf8PathBuf {
         Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("temp path should be utf8")
@@ -793,6 +799,13 @@ mod tests {
                 .iter()
                 .any(|item| item.content.contains("chat answer"))
         );
+        let assistant_items = state
+            .transcript
+            .iter()
+            .filter(|item| item.role == TranscriptRole::Assistant)
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_items.len(), 1);
+        assert_eq!(assistant_items[0].content, "chat answer");
     }
 
     #[tokio::test]
@@ -841,6 +854,18 @@ mod tests {
                 .transcript
                 .iter()
                 .any(|item| item.content.contains("background answer"))
+        );
+        let assistant_items = state
+            .transcript
+            .iter()
+            .filter(|item| item.role == TranscriptRole::Assistant)
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_items.len(), 1);
+        assert_eq!(assistant_items[0].content, "background answer");
+        assert!(
+            crate::tui::render::render_tui_once(&state)
+                .expect("tui renders")
+                .contains("background answer")
         );
     }
 

@@ -271,7 +271,7 @@ fn cancel_active_task(state: &mut TuiState, active_task: &mut Option<JoinHandle<
     if let Some(task) = active_task.take() {
         task.abort();
     }
-    state.replace_streaming_assistant("Cancelled.");
+    state.replace_active_assistant("Cancelled.");
     state.set_busy(false);
     state.push_event("cancelled current task");
 }

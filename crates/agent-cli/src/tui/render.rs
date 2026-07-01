@@ -522,6 +522,7 @@ mod tests {
             command_input: String::new(),
             input_cursor: 0,
             transcript: Vec::new(),
+            active_assistant_index: None,
             events: VecDeque::new(),
             chat_messages: Vec::new(),
             chat_scroll: 0,

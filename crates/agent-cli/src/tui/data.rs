@@ -83,6 +83,7 @@ pub(super) struct TuiState {
     pub(super) command_input: String,
     pub(super) input_cursor: usize,
     pub(super) transcript: Vec<TranscriptItem>,
+    pub(super) active_assistant_index: Option<usize>,
     pub(super) events: VecDeque<String>,
     pub(super) chat_messages: Vec<LlmMessage>,
     pub(super) chat_scroll: u16,
@@ -111,6 +112,7 @@ impl TuiState {
             command_input: String::new(),
             input_cursor: 0,
             transcript: Vec::new(),
+            active_assistant_index: None,
             events: VecDeque::new(),
             chat_messages: Vec::new(),
             chat_scroll: 0,
@@ -168,12 +170,15 @@ impl TuiState {
 
     pub(super) fn clear_output(&mut self) {
         self.transcript.clear();
+        self.active_assistant_index = None;
         self.events.clear();
         self.chat_scroll = 0;
         self.event_scroll = 0;
     }
 
     pub(super) fn push_user_message(&mut self, content: impl Into<String>) {
+        self.finish_assistant_stream();
+        self.active_assistant_index = None;
         self.push_transcript(TranscriptRole::User, None, content.into(), false);
     }
 
@@ -190,46 +195,53 @@ impl TuiState {
         title: impl Into<Option<String>>,
         content: impl Into<String>,
     ) {
+        self.finish_assistant_stream();
+        self.active_assistant_index = None;
         self.push_transcript(TranscriptRole::Tool, title.into(), content.into(), false);
     }
 
     pub(super) fn start_assistant_stream(&mut self) {
+        self.finish_assistant_stream();
         self.push_transcript(TranscriptRole::Assistant, None, String::new(), true);
+        self.active_assistant_index = self.transcript.len().checked_sub(1);
     }
 
     pub(super) fn append_assistant_delta(&mut self, content: &str) {
-        if !matches!(
-            self.transcript.last(),
-            Some(item) if item.role == TranscriptRole::Assistant && item.streaming
-        ) {
+        let active_streaming = self
+            .active_assistant_index
+            .and_then(|index| self.transcript.get(index))
+            .is_some_and(|item| item.role == TranscriptRole::Assistant && item.streaming);
+        if !active_streaming {
             self.start_assistant_stream();
         }
-        if let Some(item) = self.transcript.last_mut() {
+        if let Some(item) = self
+            .active_assistant_index
+            .and_then(|index| self.transcript.get_mut(index))
+        {
             item.content.push_str(content);
         }
     }
 
-    pub(super) fn replace_streaming_assistant(&mut self, content: impl Into<String>) {
+    pub(super) fn replace_active_assistant(&mut self, content: impl Into<String>) {
         let content = content.into();
         if let Some(item) = self
-            .transcript
-            .iter_mut()
-            .rev()
-            .find(|item| item.role == TranscriptRole::Assistant && item.streaming)
+            .active_assistant_index
+            .and_then(|index| self.transcript.get_mut(index))
+            .filter(|item| item.role == TranscriptRole::Assistant)
         {
             item.content = content;
             item.streaming = false;
         } else if !content.is_empty() {
             self.push_assistant_message(content);
+            self.active_assistant_index = self.transcript.len().checked_sub(1);
         }
     }
 
     pub(super) fn finish_assistant_stream(&mut self) {
         if let Some(item) = self
-            .transcript
-            .iter_mut()
-            .rev()
-            .find(|item| item.role == TranscriptRole::Assistant && item.streaming)
+            .active_assistant_index
+            .and_then(|index| self.transcript.get_mut(index))
+            .filter(|item| item.role == TranscriptRole::Assistant)
         {
             item.streaming = false;
         }
@@ -243,7 +255,7 @@ impl TuiState {
         match update {
             TuiUpdate::Event(line) => self.push_event(line),
             TuiUpdate::AssistantDelta(content) => self.append_assistant_delta(&content),
-            TuiUpdate::AssistantReplace(content) => self.replace_streaming_assistant(content),
+            TuiUpdate::AssistantReplace(content) => self.replace_active_assistant(content),
             TuiUpdate::AssistantFinish => self.finish_assistant_stream(),
             TuiUpdate::ToolMessage { title, content } => self.push_tool_message(title, content),
             TuiUpdate::ChatMessages(messages) => {
@@ -251,7 +263,7 @@ impl TuiState {
             }
             TuiUpdate::Busy(busy) => self.set_busy(busy),
             TuiUpdate::Error(message) => {
-                self.replace_streaming_assistant(format!("Error: {message}"));
+                self.replace_active_assistant(format!("Error: {message}"));
                 self.push_event(format!("command failed: {message}"));
             }
         }
@@ -654,6 +666,7 @@ mod tests {
             command_input: String::new(),
             input_cursor: 0,
             transcript: Vec::new(),
+            active_assistant_index: None,
             events: VecDeque::new(),
             chat_messages: Vec::new(),
             chat_scroll: 0,
@@ -700,5 +713,44 @@ mod tests {
         state.history_next();
         assert_eq!(state.command_input, "draft");
         assert_eq!(state.history_cursor, None);
+    }
+
+    #[test]
+    fn assistant_replace_updates_stream_after_done() {
+        let mut state = test_state();
+        state.start_assistant_stream();
+        state.apply_update(TuiUpdate::AssistantDelta("partial".to_owned()));
+        state.apply_update(TuiUpdate::AssistantFinish);
+        state.apply_update(TuiUpdate::AssistantReplace("final answer".to_owned()));
+
+        let assistant_items = state
+            .transcript
+            .iter()
+            .filter(|item| item.role == TranscriptRole::Assistant)
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_items.len(), 1);
+        assert_eq!(assistant_items[0].content, "final answer");
+        assert!(!assistant_items[0].streaming);
+    }
+
+    #[test]
+    fn assistant_replace_after_tool_result_keeps_final_answer_visible() {
+        let mut state = test_state();
+        state.start_assistant_stream();
+        state.apply_update(TuiUpdate::AssistantDelta("checking".to_owned()));
+        state.apply_update(TuiUpdate::ToolMessage {
+            title: Some("echo".to_owned()),
+            content: "tool result".to_owned(),
+        });
+        state.apply_update(TuiUpdate::AssistantReplace("final answer".to_owned()));
+
+        let assistant_items = state
+            .transcript
+            .iter()
+            .filter(|item| item.role == TranscriptRole::Assistant)
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_items.len(), 2);
+        assert_eq!(assistant_items[0].content, "checking");
+        assert_eq!(assistant_items[1].content, "final answer");
     }
 }
