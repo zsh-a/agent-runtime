@@ -17,6 +17,7 @@ async fn mock_provider_completes_and_streams() {
         temperature: None,
         max_output_tokens: Some(16),
         tools: vec![],
+        response_format: None,
         metadata: json!({}),
     };
 
@@ -38,6 +39,65 @@ async fn mock_provider_completes_and_streams() {
         events[2].as_ref().expect("event ok").kind,
         LlmEventKind::Finished
     ));
+}
+
+#[tokio::test]
+async fn mock_provider_validates_structured_json_schema_output() {
+    let provider = MockLlmProvider::new("mock", "mock-fast", "{}");
+    let response = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock-fast".to_owned(),
+            messages: vec![user_message("summary")],
+            temperature: None,
+            max_output_tokens: Some(64),
+            tools: vec![],
+            response_format: Some(LlmResponseFormat::JsonSchema {
+                name: "summary".to_owned(),
+                schema: json!({
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": {"title": {"type": "string"}},
+                    "additionalProperties": false
+                }),
+                strict: Some(true),
+            }),
+            metadata: json!({"mock_response": "{\"title\":\"Runtime\"}"}),
+        })
+        .await
+        .expect("mock validates structured output");
+
+    assert_eq!(response.object, Some(json!({"title": "Runtime"})));
+
+    let error = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock-fast".to_owned(),
+            messages: vec![user_message("summary")],
+            temperature: None,
+            max_output_tokens: Some(64),
+            tools: vec![],
+            response_format: Some(LlmResponseFormat::JsonSchema {
+                name: "summary".to_owned(),
+                schema: json!({
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": {"title": {"type": "string"}},
+                    "additionalProperties": false
+                }),
+                strict: Some(true),
+            }),
+            metadata: json!({"mock_response": "{\"status\":\"missing title\"}"}),
+        })
+        .await
+        .expect_err("schema mismatch fails");
+
+    assert_eq!(
+        error.record.code,
+        "structured_output_schema_validation_failed"
+    );
 }
 
 #[tokio::test]
@@ -80,6 +140,7 @@ async fn openai_compatible_provider_completes_against_chat_api() {
             temperature: Some(0.2),
             max_output_tokens: Some(32),
             tools: vec![],
+            response_format: None,
             metadata: json!({}),
         })
         .await
@@ -93,6 +154,73 @@ async fn openai_compatible_provider_completes_against_chat_api() {
         response.usage.expect("usage").total_tokens,
         5,
         "usage maps from provider response"
+    );
+}
+
+#[tokio::test]
+async fn openai_compatible_provider_sends_json_schema_response_format() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            assert_eq!(body["response_format"]["type"], "json_schema");
+            assert_eq!(
+                body["response_format"]["json_schema"]["name"],
+                "project_summary"
+            );
+            assert_eq!(
+                body["response_format"]["json_schema"]["schema"]["required"][0],
+                "title"
+            );
+            assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+            Json(json!({
+                "choices": [{
+                    "message": {"content": "{\"title\":\"Runtime\",\"status\":\"ok\"}"},
+                    "finish_reason": "stop"
+                }]
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let response = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "gpt-test".to_owned(),
+            messages: vec![user_message("summarize")],
+            temperature: None,
+            max_output_tokens: Some(64),
+            tools: vec![],
+            response_format: Some(LlmResponseFormat::JsonSchema {
+                name: "project_summary".to_owned(),
+                schema: json!({
+                    "type": "object",
+                    "required": ["title", "status"],
+                    "properties": {
+                        "title": {"type": "string"},
+                        "status": {"type": "string"}
+                    },
+                    "additionalProperties": false
+                }),
+                strict: Some(true),
+            }),
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider completes");
+
+    assert_eq!(
+        response.object,
+        Some(json!({"title": "Runtime", "status": "ok"}))
     );
 }
 
@@ -136,6 +264,7 @@ async fn openai_compatible_provider_streams_sse_text_and_usage() {
             temperature: None,
             max_output_tokens: Some(32),
             tools: vec![],
+            response_format: None,
             metadata: json!({}),
         })
         .await
@@ -196,6 +325,7 @@ async fn openai_compatible_provider_streams_reasoning_and_tool_calls() {
             temperature: None,
             max_output_tokens: Some(32),
             tools: vec![],
+            response_format: None,
             metadata: json!({}),
         })
         .await
@@ -308,6 +438,7 @@ async fn openai_compatible_provider_sends_tools_and_tool_results() {
                 risk: agent_core::ToolRisk::ReadOnly,
                 metadata: json!({}),
             }],
+            response_format: None,
             metadata: json!({}),
         })
         .await
@@ -367,6 +498,7 @@ async fn anthropic_provider_completes_against_messages_api() {
             temperature: Some(0.1),
             max_output_tokens: Some(64),
             tools: vec![],
+            response_format: None,
             metadata: json!({}),
         })
         .await
@@ -381,6 +513,62 @@ async fn anthropic_provider_completes_against_messages_api() {
         8,
         "Anthropic usage totals input plus output tokens"
     );
+}
+
+#[tokio::test]
+async fn anthropic_provider_injects_structured_output_instruction() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/messages",
+        post(|Json(body): Json<Value>| async move {
+            let system = body["system"].as_str().expect("system text");
+            assert!(system.contains("JSON Schema"));
+            assert!(system.contains("summary"));
+            Json(json!({
+                "content": [{"type": "text", "text": "{\"title\":\"Runtime\"}"}],
+                "stop_reason": "end_turn"
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider = AnthropicProvider::new(
+        "anthropic",
+        format!("http://{addr}"),
+        "test-key",
+        "2023-06-01",
+    )
+    .expect("provider builds");
+    let response = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "anthropic".to_owned(),
+            model: "claude-test".to_owned(),
+            messages: vec![user_message("summarize")],
+            temperature: None,
+            max_output_tokens: Some(64),
+            tools: vec![],
+            response_format: Some(LlmResponseFormat::JsonSchema {
+                name: "summary".to_owned(),
+                schema: json!({
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": {"title": {"type": "string"}},
+                    "additionalProperties": false
+                }),
+                strict: Some(true),
+            }),
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider completes");
+
+    assert_eq!(response.object, Some(json!({"title": "Runtime"})));
 }
 
 #[tokio::test]
@@ -434,6 +622,7 @@ async fn anthropic_provider_streams_sse_text_and_usage() {
             temperature: None,
             max_output_tokens: Some(64),
             tools: vec![],
+            response_format: None,
             metadata: json!({}),
         })
         .await
@@ -516,6 +705,7 @@ async fn anthropic_provider_streams_reasoning_signature_and_tool_calls() {
             temperature: None,
             max_output_tokens: Some(64),
             tools: vec![],
+            response_format: None,
             metadata: json!({}),
         })
         .await
@@ -649,6 +839,7 @@ async fn anthropic_provider_preserves_multimodal_content_tools_and_raw_blocks() 
                 risk: agent_core::ToolRisk::ReadOnly,
                 metadata: json!({}),
             }],
+            response_format: None,
             metadata: json!({}),
         })
         .await
@@ -702,6 +893,7 @@ async fn ollama_provider_completes_against_chat_api() {
             temperature: Some(0.3),
             max_output_tokens: Some(32),
             tools: vec![],
+            response_format: None,
             metadata: json!({}),
         })
         .await
@@ -712,4 +904,54 @@ async fn ollama_provider_completes_against_chat_api() {
     assert_eq!(response.content, "local answer");
     assert_eq!(response.finish_reason, LlmFinishReason::Stop);
     assert_eq!(response.usage.expect("usage").total_tokens, 10);
+}
+
+#[tokio::test]
+async fn ollama_provider_sends_schema_format() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/api/chat",
+        post(|Json(body): Json<Value>| async move {
+            assert_eq!(body["format"]["type"], "object");
+            assert_eq!(body["format"]["required"][0], "title");
+            Json(json!({
+                "message": {"role": "assistant", "content": "{\"title\":\"Runtime\"}"},
+                "done_reason": "stop"
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OllamaProvider::new("ollama", format!("http://{addr}")).expect("provider builds");
+    let response = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "ollama".to_owned(),
+            model: "llama-test".to_owned(),
+            messages: vec![user_message("summarize")],
+            temperature: None,
+            max_output_tokens: Some(64),
+            tools: vec![],
+            response_format: Some(LlmResponseFormat::JsonSchema {
+                name: "summary".to_owned(),
+                schema: json!({
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": {"title": {"type": "string"}},
+                    "additionalProperties": false
+                }),
+                strict: Some(true),
+            }),
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider completes");
+
+    assert_eq!(response.object, Some(json!({"title": "Runtime"})));
 }

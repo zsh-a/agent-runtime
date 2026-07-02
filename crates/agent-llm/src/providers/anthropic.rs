@@ -14,9 +14,10 @@ use super::llm_content_as_text;
 use crate::sse::{
     decode_json_value_or_null, sse_data, take_next_sse_frame, take_remaining_sse_frame,
 };
+use crate::structured::{structured_output_from_content, structured_output_instruction};
 use crate::types::{
     LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmMessage, LlmProvider,
-    LlmRequest, LlmResponse, LlmRole, LlmUsage,
+    LlmRequest, LlmResponse, LlmResponseFormat, LlmRole, LlmUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -164,6 +165,7 @@ struct AnthropicSseState {
     output_tokens: u32,
     raw_blocks: Vec<Value>,
     blocks: BTreeMap<i64, AnthropicBlockState>,
+    response_format: Option<LlmResponseFormat>,
     finished: bool,
 }
 
@@ -181,6 +183,7 @@ impl AnthropicSseState {
         provider: String,
         model: String,
         anthropic_version: String,
+        response_format: Option<LlmResponseFormat>,
         chunks: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     ) -> Self {
         let mut pending = VecDeque::new();
@@ -207,6 +210,7 @@ impl AnthropicSseState {
             output_tokens: 0,
             raw_blocks: Vec::new(),
             blocks: BTreeMap::new(),
+            response_format,
             finished: false,
         }
     }
@@ -509,12 +513,20 @@ impl AnthropicSseState {
             output_tokens: self.output_tokens,
             total_tokens: self.input_tokens + self.output_tokens,
         });
+        let object = match structured_output_from_content(&self.response_format, &self.content) {
+            Ok(object) => object,
+            Err(error) => {
+                self.pending.push_back(Err(error));
+                return;
+            }
+        };
         let response = LlmResponse {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             provider: self.provider.clone(),
             model: self.model.clone(),
             content: self.content.clone(),
             finish_reason: self.finish_reason.clone().unwrap_or(LlmFinishReason::Stop),
+            object,
             usage,
             metadata: json!({
                 "api": "anthropic_messages",
@@ -569,6 +581,7 @@ impl LlmProvider for AnthropicProvider {
             "starting Anthropic completion request",
         );
         let (system, messages) = anthropic_messages_from_llm(&request.messages)?;
+        let system = append_structured_instruction(system, &request.response_format);
         if messages.is_empty() {
             return Err(LlmError::validation(
                 "Anthropic request requires at least one user or assistant message",
@@ -670,6 +683,7 @@ impl LlmProvider for AnthropicProvider {
             output_tokens: usage.output_tokens,
             total_tokens: usage.input_tokens + usage.output_tokens,
         });
+        let object = structured_output_from_content(&request.response_format, &content)?;
         info!(
             provider = %self.provider,
             model = %request.model,
@@ -687,6 +701,7 @@ impl LlmProvider for AnthropicProvider {
             model: request.model,
             content,
             finish_reason,
+            object,
             usage,
             metadata: json!({
                 "api": "anthropic_messages",
@@ -717,6 +732,7 @@ impl LlmProvider for AnthropicProvider {
             "starting Anthropic stream request",
         );
         let (system, messages) = anthropic_messages_from_llm(&request.messages)?;
+        let system = append_structured_instruction(system, &request.response_format);
         if messages.is_empty() {
             return Err(LlmError::validation(
                 "Anthropic request requires at least one user or assistant message",
@@ -788,6 +804,7 @@ impl LlmProvider for AnthropicProvider {
             self.provider.clone(),
             request.model,
             self.anthropic_version.clone(),
+            request.response_format,
             Box::pin(response.bytes_stream()),
         );
         Ok(Box::pin(stream::unfold(state, |mut state| async move {
@@ -845,6 +862,19 @@ fn anthropic_tool_from_spec(tool: &ToolSpec) -> AnthropicTool {
         name: tool.name.clone(),
         description: tool.description.clone(),
         input_schema: tool.input_schema.clone(),
+    }
+}
+
+fn append_structured_instruction(
+    system: Option<String>,
+    format: &Option<LlmResponseFormat>,
+) -> Option<String> {
+    let Some(instruction) = structured_output_instruction(format) else {
+        return system;
+    };
+    match system {
+        Some(system) if !system.is_empty() => Some(format!("{system}\n\n{instruction}")),
+        _ => Some(instruction),
     }
 }
 

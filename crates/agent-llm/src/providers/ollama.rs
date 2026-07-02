@@ -8,9 +8,10 @@ use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
 use super::llm_content_as_text;
+use crate::structured::structured_output_from_content;
 use crate::types::{
     LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmMessage, LlmProvider,
-    LlmRequest, LlmResponse, LlmRole, LlmUsage,
+    LlmRequest, LlmResponse, LlmResponseFormat, LlmRole, LlmUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -56,6 +57,8 @@ struct OllamaChatRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<OllamaOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +128,7 @@ impl LlmProvider for OllamaProvider {
                 .collect::<Result<Vec<_>, _>>()?,
             stream: false,
             options,
+            format: ollama_response_format(request.response_format.as_ref()),
         };
         let response = self
             .client
@@ -204,6 +208,7 @@ impl LlmProvider for OllamaProvider {
             .map(|message| message.content)
             .unwrap_or_default();
         let finish_reason = ollama_finish_reason(decoded.done_reason.as_deref());
+        let object = structured_output_from_content(&request.response_format, &content)?;
         info!(
             provider = %self.provider,
             model = %request.model,
@@ -221,6 +226,7 @@ impl LlmProvider for OllamaProvider {
             model: request.model,
             content,
             finish_reason,
+            object,
             usage: Some(LlmUsage {
                 input_tokens,
                 output_tokens,
@@ -295,6 +301,14 @@ fn ollama_message_from_llm(message: &LlmMessage) -> Result<OllamaMessage, LlmErr
         role: role.to_owned(),
         content: llm_content_as_text(&message.content, "Ollama")?.to_owned(),
     })
+}
+
+fn ollama_response_format(format: Option<&LlmResponseFormat>) -> Option<Value> {
+    match format {
+        None => None,
+        Some(LlmResponseFormat::JsonObject) => Some(Value::String("json".to_owned())),
+        Some(LlmResponseFormat::JsonSchema { schema, .. }) => Some(schema.clone()),
+    }
 }
 
 fn ollama_finish_reason(value: Option<&str>) -> LlmFinishReason {

@@ -1,0 +1,19 @@
+{
+  "protocol_version": "agent.v1",
+  "provider": "openai-compatible",
+  "model": "gpt-5-mini",
+  "content": "{\"title\":\"Runtime bridge\",\"status\":\"ok\"}",
+  "finish_reason": "stop",
+  "object": {
+    "title": "Runtime bridge",
+    "status": "ok"
+  },
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 8,
+    "total_tokens": 18
+  },
+  "metadata": {
+    "api": "openai_chat_completions"
+  }
+}

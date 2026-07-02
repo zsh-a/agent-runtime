@@ -11,6 +11,7 @@ and CLI/server development.
 - `crates/agent-llm`: provider-neutral LLM DTOs and mock/OpenAI/Anthropic/Ollama providers.
 - `crates/agent-chat`: shared ChatTurn request/event contract and tool-round loop.
 - `crates/agent-cli`: local CLI, HTTP/stdio server, replay, eval, debug bundle, TUI.
+- `bindings/ts`: dependency-light TypeScript wire types, HTTP client, and structured output helpers.
 - `schemas`: JSON Schema wire contracts.
 - `fixtures/contracts`: valid and invalid contract fixtures.
 - `fixtures/docs`: documentation and UI event examples.

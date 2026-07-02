@@ -29,6 +29,7 @@ pub(crate) async fn run_llm_complete(options: LlmCompleteOptions) -> Result<()> 
         temperature: options.temperature,
         max_output_tokens: options.max_output_tokens,
         tools: vec![],
+        response_format: None,
         metadata: json!({"mock_response": options.mock_response}),
     };
     let response = match options.provider.as_str() {

@@ -91,6 +91,7 @@ dependencies = [
  "axum",
  "bytes",
  "futures",
+ "jsonschema",
  "reqwest",
  "schemars",
  "serde",

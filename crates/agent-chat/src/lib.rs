@@ -203,6 +203,7 @@ mod tests {
             model: "mock-model".to_owned(),
             content: String::new(),
             finish_reason: LlmFinishReason::ToolCall,
+            object: None,
             usage: None,
             metadata: json!({}),
         };
@@ -328,6 +329,7 @@ mod tests {
                     model: request.model,
                     content: String::new(),
                     finish_reason: LlmFinishReason::ToolCall,
+                    object: None,
                     usage: Some(LlmUsage {
                         input_tokens: 1,
                         output_tokens: 1,
@@ -342,6 +344,7 @@ mod tests {
                     model: request.model,
                     content: "done".to_owned(),
                     finish_reason: LlmFinishReason::Stop,
+                    object: None,
                     usage: None,
                     metadata: json!({}),
                 }
@@ -445,6 +448,7 @@ mod tests {
                 model: request.model,
                 content: "done".to_owned(),
                 finish_reason: LlmFinishReason::Stop,
+                object: None,
                 usage: None,
                 metadata: json!({}),
             };

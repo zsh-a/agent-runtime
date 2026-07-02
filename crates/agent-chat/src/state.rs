@@ -50,6 +50,7 @@ pub fn chat_turn_llm_request(state: &ChatTurnState) -> LlmRequest {
         temperature: state.temperature,
         max_output_tokens: state.max_output_tokens,
         tools: state.tools.clone(),
+        response_format: None,
         metadata: llm_metadata(state),
     }
 }

@@ -19,6 +19,7 @@
       "type": "string",
       "enum": ["stop", "length", "tool_call", "content_filter", "error"]
     },
+    "object": { "type": ["object", "null"] },
     "usage": {
       "type": ["object", "null"],
       "required": ["input_tokens", "output_tokens", "total_tokens"],

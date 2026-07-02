@@ -4,6 +4,7 @@ use futures::stream;
 use serde_json::{Value, json};
 use tracing::{debug, info};
 
+use crate::structured::structured_output_from_content;
 use crate::types::{
     LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmProvider, LlmRequest,
     LlmResponse,
@@ -52,6 +53,7 @@ impl MockLlmProvider {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| self.response_text.clone());
+        let object = structured_output_from_content(&request.response_format, &content)?;
         Ok(LlmResponse {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             provider: self.provider.clone(),
@@ -63,6 +65,7 @@ impl MockLlmProvider {
             usage: Some(estimate_usage(request, &content)),
             content,
             finish_reason: LlmFinishReason::Stop,
+            object,
             metadata: json!({"mock": true}),
         })
     }

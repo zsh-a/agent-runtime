@@ -1,0 +1,91 @@
+import {describe, expect, test} from 'bun:test'
+
+import {AgentRuntimeHttpClient, generateObject, type LlmRequest} from '../src/index.js'
+
+describe('generateObject', () => {
+  test('builds a JSON Schema LLM request and returns the typed object', async () => {
+    let captured: LlmRequest | undefined
+    const result = await generateObject<{title: string}>({
+      async complete(request) {
+        captured = request
+        return {
+          content: '{"title":"Runtime"}',
+          finish_reason: 'stop',
+          model: request.model,
+          object: {title: 'Runtime'},
+          protocol_version: 'agent.v1',
+          provider: request.provider,
+        }
+      },
+    }, {
+      messages: [{content: 'summarize', role: 'user'}],
+      model: 'gpt-test',
+      provider: 'openai-compatible',
+      schema: {
+        additionalProperties: false,
+        properties: {title: {type: 'string'}},
+        required: ['title'],
+        type: 'object',
+      },
+      schemaName: 'summary',
+    })
+
+    expect(result.object.title).toBe('Runtime')
+    expect(captured?.response_format).toEqual({
+      name: 'summary',
+      schema: {
+        additionalProperties: false,
+        properties: {title: {type: 'string'}},
+        required: ['title'],
+        type: 'object',
+      },
+      strict: true,
+      type: 'json_schema',
+    })
+  })
+})
+
+describe('AgentRuntimeHttpClient', () => {
+  test('wraps runAgent requests with the runtime HTTP shape', async () => {
+    const calls: Array<{body?: string; method?: string; url: string}> = []
+    const client = new AgentRuntimeHttpClient({
+      baseUrl: 'http://runtime.local/',
+      fetch: async (url, init) => {
+        calls.push({body: init?.body?.toString(), method: init?.method, url: url.toString()})
+        return new Response(JSON.stringify({
+          result: {
+            agent_id: 'demo',
+            finished_at: '2026-07-01T00:00:00Z',
+            protocol_version: 'agent.v1',
+            run_id: 'run_1',
+            started_at: '2026-07-01T00:00:00Z',
+            status: 'completed',
+          },
+          trace: {
+            agent_id: 'demo',
+            agent_version: '1',
+            events: [],
+            finished_at: '2026-07-01T00:00:00Z',
+            protocol_version: 'agent.v1',
+            run_id: 'run_1',
+            runtime_version: 'test',
+            started_at: '2026-07-01T00:00:00Z',
+          },
+        }), {status: 200})
+      },
+    })
+
+    const response = await client.runAgent('demo', {
+      input: {project_id: 'p1'},
+      sessionId: 'session_1',
+      threadId: 'thread_1',
+    })
+
+    expect(response.result.run_id).toBe('run_1')
+    expect(calls).toEqual([{
+      body: JSON.stringify({input: {project_id: 'p1'}, session_id: 'session_1', thread_id: 'thread_1'}),
+      method: 'POST',
+      url: 'http://runtime.local/agents/demo/run',
+    }])
+  })
+})

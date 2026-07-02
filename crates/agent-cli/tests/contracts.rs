@@ -120,8 +120,16 @@ fn committed_fixtures_match_json_schemas() {
         "fixtures/contracts/llm-request.valid.json",
     );
     assert_valid(
+        "schemas/llm-request.schema.json",
+        "fixtures/contracts/llm-request.structured.valid.json",
+    );
+    assert_valid(
         "schemas/llm-response.schema.json",
         "fixtures/contracts/llm-response.valid.json",
+    );
+    assert_valid(
+        "schemas/llm-response.schema.json",
+        "fixtures/contracts/llm-response.structured.valid.json",
     );
     assert_valid(
         "schemas/chat-turn-request.schema.json",
@@ -170,7 +178,9 @@ fn committed_valid_fixtures_deserialize_to_runtime_types() {
     assert_deserializes::<ProposalEnvelope>("fixtures/contracts/proposal-envelope.valid.json");
     assert_deserializes::<ApprovalDecision>("fixtures/contracts/approval-decision.valid.json");
     assert_deserializes::<LlmRequest>("fixtures/contracts/llm-request.valid.json");
+    assert_deserializes::<LlmRequest>("fixtures/contracts/llm-request.structured.valid.json");
     assert_deserializes::<LlmResponse>("fixtures/contracts/llm-response.valid.json");
+    assert_deserializes::<LlmResponse>("fixtures/contracts/llm-response.structured.valid.json");
     assert_deserializes::<ChatTurnRequest>("fixtures/contracts/chat-turn-request.valid.json");
     assert_deserializes::<ChatTurnState>(
         "fixtures/contracts/chat-turn-state.requires-tool-results.valid.json",

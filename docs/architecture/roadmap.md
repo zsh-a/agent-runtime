@@ -15,12 +15,14 @@ The runtime currently works well as a schema-first agent execution kernel for:
 - proposal envelope creation and approval/application flows
 - provider-neutral chat turn state and event contracts
 - CLI, HTTP, stdio, TUI, replay, eval, and debug-bundle development workflows
+- initial dependency-light TypeScript bindings for HTTP runtime calls and
+  structured LLM object generation
 - file-backed local stores and in-memory test stores
 
-It is not yet a full production agent platform. The main gaps are SDKs and
-bindings, real-time HTTP chat, external run control, production stores,
-distributed scheduling, stronger risk policy, artifact handling, and richer
-observability.
+It is not yet a full production agent platform. The main gaps are generated or
+broader SDK coverage, real-time HTTP chat, external run control, production
+stores, distributed scheduling, stronger risk policy, artifact handling, and
+richer observability.
 
 ## Roadmap Principles
 
@@ -100,7 +102,7 @@ transport glue for common workflows.
   - structured runtime errors with stable codes
   - request metadata for user/session/thread correlation
 - Add server-side request validation against committed JSON Schemas.
-- Add a small TypeScript client reference implementation or generated OpenAPI
+- Extend the TypeScript client reference implementation or add generated OpenAPI
   client configuration.
 
 ### Acceptance Criteria
@@ -201,7 +203,8 @@ Goal: reduce duplicated adapter work across host applications.
 ### Deliverables
 
 - Add `bindings/dart` or a generated Dart contract package.
-- Add `bindings/ts` or a generated TypeScript contract package.
+- Extend `bindings/ts` or add a generated TypeScript contract package for
+  broader protocol coverage.
 - Provide client helpers for:
   - catalog validation
   - chat event mapping
@@ -280,5 +283,5 @@ Goal: handle complex agent products that need more than single-run execution.
 3. Add cancellation protocol for runs and chat turns.
 4. Add DB-backed store conformance tests before implementing a concrete backend.
 5. Promote proposal risk metadata into stable schema fields.
-6. Start generated TypeScript or Dart bindings after the above protocol surfaces
-   settle.
+6. Extend generated TypeScript or Dart bindings after the above protocol
+   surfaces settle.

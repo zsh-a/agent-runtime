@@ -23,8 +23,22 @@ pub struct LlmRequest {
     pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub tools: Vec<ToolSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<LlmResponseFormat>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LlmResponseFormat {
+    JsonObject,
+    JsonSchema {
+        name: String,
+        schema: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strict: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -54,6 +68,8 @@ pub struct LlmResponse {
     pub model: String,
     pub content: String,
     pub finish_reason: LlmFinishReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<LlmUsage>,
     #[serde(default)]

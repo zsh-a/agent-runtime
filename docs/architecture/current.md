@@ -10,6 +10,7 @@ into phased work; this document describes what exists now.
 The runtime is a standalone Rust workspace. It provides:
 
 - reusable Rust contracts and runner crates
+- dependency-light TypeScript bindings under `bindings/ts`
 - schema / fixture / OpenAPI wire contracts
 - local CLI, HTTP, stdio, eval, replay, debug bundle, and TUI surfaces
 
@@ -110,6 +111,12 @@ fixtures/contracts/
 openapi/agent-runtime-api.yaml
   Minimal HTTP API contract for server-first clients.
 
+bindings/ts/
+  Dependency-light TypeScript package for stable `agent.v1` wire types, a small
+  HTTP client, and `generateObject<T>()` helpers over JSON Schema structured LLM
+  requests. It intentionally does not depend on Zod or AI SDK; host apps convert
+  their schema system into JSON Schema before calling it.
+
 docs/integration/
   Host-application integration guidance. `business-agent-integration.md`
   describes how other business domains build agents, catalogs, ToolHosts,
@@ -196,7 +203,7 @@ These are intentional or pending differences from the long-term design:
 - No standalone `agent-tools` crate exists yet. Tool traits live in
   `agent-core`; concrete process/MCP/HTTP adapters are isolated under
   `crates/agent-cli/src/tools/` pending a future crate extraction.
-- There is no standalone `bindings/dart` or `bindings/ts` SDK package.
+- There is no standalone `bindings/dart` SDK package.
 - Flutter FRB/native bridge guidance exists as documentation only; this
   standalone repository does not contain a generated Flutter package or FRB
   bindings.

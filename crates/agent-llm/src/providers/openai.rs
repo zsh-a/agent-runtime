@@ -13,9 +13,10 @@ use tracing::{debug, info, warn};
 use crate::sse::{
     decode_json_value_or_null, sse_data, take_next_sse_frame, take_remaining_sse_frame,
 };
+use crate::structured::structured_output_from_content;
 use crate::types::{
     LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmMessage, LlmProvider,
-    LlmRequest, LlmResponse, LlmRole, LlmUsage,
+    LlmRequest, LlmResponse, LlmResponseFormat, LlmRole, LlmUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -81,11 +82,28 @@ struct OpenAiChatCompletionRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<OpenAiStreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<OpenAiResponseFormat>,
 }
 
 #[derive(Debug, Serialize)]
 struct OpenAiStreamOptions {
     include_usage: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAiResponseFormat {
+    JsonObject,
+    JsonSchema { json_schema: OpenAiJsonSchema },
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiJsonSchema {
+    name: String,
+    schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,6 +224,7 @@ struct OpenAiSseState {
     finish_reason: Option<LlmFinishReason>,
     usage: Option<LlmUsage>,
     tools: BTreeMap<i64, OpenAiToolCallState>,
+    response_format: Option<LlmResponseFormat>,
     finished: bool,
 }
 
@@ -222,6 +241,7 @@ impl OpenAiSseState {
     fn new(
         provider: String,
         model: String,
+        response_format: Option<LlmResponseFormat>,
         chunks: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     ) -> Self {
         let mut pending = VecDeque::new();
@@ -245,6 +265,7 @@ impl OpenAiSseState {
             finish_reason: None,
             usage: None,
             tools: BTreeMap::new(),
+            response_format,
             finished: false,
         }
     }
@@ -487,12 +508,20 @@ impl OpenAiSseState {
             return;
         }
         self.finished = true;
+        let object = match structured_output_from_content(&self.response_format, &self.content) {
+            Ok(object) => object,
+            Err(error) => {
+                self.pending.push_back(Err(error));
+                return;
+            }
+        };
         let response = LlmResponse {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             provider: self.provider.clone(),
             model: self.model.clone(),
             content: self.content.clone(),
             finish_reason: self.finish_reason.clone().unwrap_or(LlmFinishReason::Stop),
+            object,
             usage: self.usage.clone(),
             metadata: json!({"api": "openai_chat_completions", "stream": true}),
         };
@@ -555,6 +584,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             tools: request.tools.iter().map(openai_tool_from_spec).collect(),
             stream: false,
             stream_options: None,
+            response_format: openai_response_format(request.response_format.as_ref()),
         };
         let response = self
             .client
@@ -651,6 +681,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             output_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
         });
+        let object = structured_output_from_content(&request.response_format, &content)?;
         info!(
             provider = %self.provider,
             model = %request.model,
@@ -668,6 +699,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             model: request.model,
             content,
             finish_reason,
+            object,
             usage,
             metadata: json!({"api": "openai_chat_completions"}),
         })
@@ -709,6 +741,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             stream_options: Some(OpenAiStreamOptions {
                 include_usage: true,
             }),
+            response_format: openai_response_format(request.response_format.as_ref()),
         };
         let response = self
             .client
@@ -765,6 +798,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let state = OpenAiSseState::new(
             self.provider.clone(),
             request.model,
+            request.response_format,
             Box::pin(response.bytes_stream()),
         );
         Ok(Box::pin(stream::unfold(state, |mut state| async move {
@@ -952,6 +986,24 @@ fn openai_tool_from_spec(tool: &ToolSpec) -> OpenAiTool {
             description: tool.description.clone(),
             parameters: tool.input_schema.clone(),
         },
+    }
+}
+
+fn openai_response_format(format: Option<&LlmResponseFormat>) -> Option<OpenAiResponseFormat> {
+    match format {
+        None => None,
+        Some(LlmResponseFormat::JsonObject) => Some(OpenAiResponseFormat::JsonObject),
+        Some(LlmResponseFormat::JsonSchema {
+            name,
+            schema,
+            strict,
+        }) => Some(OpenAiResponseFormat::JsonSchema {
+            json_schema: OpenAiJsonSchema {
+                name: name.clone(),
+                schema: schema.clone(),
+                strict: Some(strict.unwrap_or(true)),
+            },
+        }),
     }
 }
 

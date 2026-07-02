@@ -48,6 +48,32 @@
       },
       "default": []
     },
+    "response_format": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "json_object" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "name", "schema"],
+          "properties": {
+            "type": { "const": "json_schema" },
+            "name": { "type": "string", "minLength": 1 },
+            "schema": { "type": "object" },
+            "strict": { "type": ["boolean", "null"], "default": true }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "metadata": { "type": "object", "default": {} }
   },
   "additionalProperties": false
