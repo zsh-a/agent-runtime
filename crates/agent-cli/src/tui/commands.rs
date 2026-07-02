@@ -227,6 +227,7 @@ async fn run_chat_turn(state: &mut TuiState, agent_id: &str, text: &str) -> Resu
             "surface": "agent_tui",
             "mode": "natural_language",
         }),
+        context_policy: Default::default(),
         max_tool_rounds: state.options.chat.max_tool_rounds,
         tool_execution: ChatToolExecution::Runtime,
     };
@@ -294,6 +295,7 @@ async fn run_natural_language_stream(
             "surface": "agent_tui",
             "mode": "natural_language",
         }),
+        context_policy: Default::default(),
         max_tool_rounds: options.chat.max_tool_rounds,
         tool_execution: ChatToolExecution::Runtime,
     };

@@ -1,5 +1,7 @@
 pub mod catalog;
+pub mod context;
 pub mod errors;
+pub mod hooks;
 pub mod ids;
 pub mod proposal;
 pub mod run;
@@ -11,7 +13,11 @@ pub mod trace;
 pub use catalog::{
     AgentRuntimeCatalog, PromptBlockSpec, PromptManifest, PromptManifestBlock, ToolRisk, ToolSpec,
 };
+pub use context::{
+    CompactionRecord, ContextBlock, ContextBlockKind, ContextPolicy, ContextSnapshot,
+};
 pub use errors::{AgentError, AgentErrorKind, AgentErrorRecord, StoreError, ToolError};
+pub use hooks::{HookEffect, HookSpec, PolicyDecision, PolicyDecisionKind};
 pub use ids::{ProposalId, RunId, SessionId, StepId, ThreadId, ToolCallId};
 pub use proposal::{
     ApprovalDecision, ApprovalDecisionKind, ProposalApprovalPolicy, ProposalEnvelope,

@@ -1,3 +1,4 @@
+mod context;
 mod error;
 mod events;
 mod runner;
@@ -8,7 +9,7 @@ pub use error::{ChatError, ChatErrorRecord};
 pub use runner::ChatTurnRunner;
 pub use state::{
     chat_turn_apply_response, chat_turn_apply_tool_results, chat_turn_initial_state,
-    chat_turn_llm_request, chat_turn_next_round,
+    chat_turn_llm_request, chat_turn_next_round, chat_turn_prepare_llm_request,
 };
 pub use types::{
     ChatEventStream, ChatResumeRequest, ChatToolCall, ChatToolExecution, ChatToolResult,
@@ -28,11 +29,12 @@ mod tests {
     };
 
     use agent_core::{
-        AgentError, AgentEvent, AgentServices, PROTOCOL_VERSION, ToolError, TraceEvent,
+        AgentError, AgentEvent, AgentServices, ContextPolicy, PROTOCOL_VERSION, ToolError,
+        TraceEvent,
     };
     use agent_llm::{
         LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmProvider, LlmRequest,
-        LlmResponse, LlmRole, LlmUsage, MockLlmProvider, user_message,
+        LlmMessage, LlmResponse, LlmRole, LlmUsage, MockLlmProvider, user_message,
     };
     use async_trait::async_trait;
     use futures::{StreamExt, stream};
@@ -62,6 +64,7 @@ mod tests {
                 max_output_tokens: None,
                 tools: vec![],
                 metadata: json!({}),
+                context_policy: Default::default(),
                 max_tool_rounds: 4,
                 tool_execution: ChatToolExecution::Runtime,
             })
@@ -112,6 +115,7 @@ mod tests {
                 max_output_tokens: None,
                 tools: vec![],
                 metadata: json!({}),
+                context_policy: Default::default(),
                 max_tool_rounds: 4,
                 tool_execution: ChatToolExecution::Runtime,
             })
@@ -155,6 +159,7 @@ mod tests {
                 max_output_tokens: None,
                 tools: vec![],
                 metadata: json!({"source": "test"}),
+                context_policy: Default::default(),
                 max_tool_rounds: 4,
                 tool_execution: ChatToolExecution::Runtime,
             })
@@ -197,6 +202,7 @@ mod tests {
             max_output_tokens: None,
             tools: vec![],
             metadata: json!({}),
+            context_policy: Default::default(),
             max_tool_rounds: 4,
             tool_execution: ChatToolExecution::Runtime,
         })
@@ -281,6 +287,7 @@ mod tests {
             max_output_tokens: None,
             tools: vec![],
             metadata: json!({}),
+            context_policy: Default::default(),
             max_tool_rounds: 4,
             tool_execution: ChatToolExecution::Runtime,
         })
@@ -333,6 +340,61 @@ mod tests {
         assert_eq!(
             resumed.messages[2].content[0]["tool_use_id"],
             Value::String("call_1".to_owned())
+        );
+    }
+
+    #[test]
+    fn chat_turn_prepare_llm_request_compacts_over_budget_context() {
+        let mut messages = vec![LlmMessage {
+            role: LlmRole::System,
+            content: Value::String("system instructions stay pinned".to_owned()),
+            name: None,
+            metadata: json!({}),
+        }];
+        for index in 0..8 {
+            messages.push(user_message(&format!(
+                "older message {index} with enough text to exceed the tiny context budget"
+            )));
+        }
+        let mut state = chat_turn_initial_state(&ChatTurnRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            turn_id: Some("turn_context".to_owned()),
+            surface: None,
+            mode: None,
+            session_id: None,
+            thread_id: None,
+            agent_id: Some("chat".to_owned()),
+            provider: "mock".to_owned(),
+            model: "mock-model".to_owned(),
+            messages,
+            temperature: None,
+            max_output_tokens: None,
+            tools: vec![],
+            metadata: json!({}),
+            context_policy: ContextPolicy {
+                max_input_tokens: 24,
+                reserve_output_tokens: 0,
+                preserve_recent_messages: 2,
+                compact_when_over_budget: true,
+            },
+            max_tool_rounds: 4,
+            tool_execution: ChatToolExecution::Runtime,
+        })
+        .expect("initial state");
+
+        let request = chat_turn_prepare_llm_request(&mut state).expect("context prepares");
+
+        assert!(state.context_snapshot.as_ref().is_some_and(|snapshot| snapshot.compacted));
+        assert!(state.compaction.is_some());
+        assert_eq!(request.messages[0].role, LlmRole::System);
+        assert_eq!(
+            request.messages[1].name.as_deref(),
+            Some("context_compaction")
+        );
+        assert_eq!(request.messages.len(), 4);
+        assert_eq!(
+            request.metadata["context_snapshot"]["compacted"],
+            Value::Bool(true)
         );
     }
 

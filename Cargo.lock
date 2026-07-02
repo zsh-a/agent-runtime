@@ -24,6 +24,7 @@ dependencies = [
  "agent-core",
  "agent-llm",
  "async-trait",
+ "blake3",
  "futures",
  "schemars",
  "serde",

@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 agent-core.workspace = true
 agent-llm.workspace = true
+blake3.workspace = true
 futures.workspace = true
 schemars.workspace = true
 serde.workspace = true

@@ -100,6 +100,21 @@
           "default": []
         },
         "metadata": { "type": "object", "default": {} },
+        "context_policy": {
+          "$ref": "#/$defs/context_policy",
+          "default": {
+            "max_input_tokens": 128000,
+            "reserve_output_tokens": 4096,
+            "preserve_recent_messages": 12,
+            "compact_when_over_budget": true
+          }
+        },
+        "context_snapshot": {
+          "anyOf": [{ "$ref": "#/$defs/context_snapshot" }, { "type": "null" }]
+        },
+        "compaction": {
+          "anyOf": [{ "$ref": "#/$defs/compaction_record" }, { "type": "null" }]
+        },
         "max_tool_rounds": { "type": "integer", "minimum": 1 },
         "round": { "type": "integer", "minimum": 0 },
         "pending_tool_calls": {
@@ -112,6 +127,95 @@
           "enum": ["runtime", "client"],
           "default": "runtime"
         }
+      },
+      "additionalProperties": false
+    },
+    "context_policy": {
+      "type": "object",
+      "required": [
+        "max_input_tokens",
+        "reserve_output_tokens",
+        "preserve_recent_messages",
+        "compact_when_over_budget"
+      ],
+      "properties": {
+        "max_input_tokens": { "type": "integer", "minimum": 1 },
+        "reserve_output_tokens": { "type": "integer", "minimum": 0 },
+        "preserve_recent_messages": { "type": "integer", "minimum": 0 },
+        "compact_when_over_budget": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "context_block": {
+      "type": "object",
+      "required": ["block_id", "kind", "source", "content_hash"],
+      "properties": {
+        "block_id": { "type": "string", "minLength": 1 },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "runtime_instructions",
+            "agent_instructions",
+            "command_instructions",
+            "memory",
+            "compaction_summary",
+            "message",
+            "tool_schema",
+            "resource",
+            "metadata"
+          ]
+        },
+        "source": { "type": "string", "minLength": 1 },
+        "priority": { "type": "integer", "default": 0 },
+        "token_estimate": { "type": "integer", "minimum": 0, "default": 0 },
+        "content_hash": { "type": "string", "minLength": 1 },
+        "content": true,
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "context_snapshot": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "snapshot_id",
+        "content_hash",
+        "created_at"
+      ],
+      "properties": {
+        "protocol_version": { "const": "agent.v1" },
+        "snapshot_id": { "type": "string", "minLength": 1 },
+        "content_hash": { "type": "string", "minLength": 1 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "token_estimate": { "type": "integer", "minimum": 0, "default": 0 },
+        "max_input_tokens": { "type": "integer", "minimum": 0, "default": 0 },
+        "omitted_block_count": { "type": "integer", "minimum": 0, "default": 0 },
+        "compacted": { "type": "boolean", "default": false },
+        "blocks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/context_block" },
+          "default": []
+        },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "compaction_record": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "before_snapshot_hash",
+        "after_snapshot_hash",
+        "omitted_block_count"
+      ],
+      "properties": {
+        "protocol_version": { "const": "agent.v1" },
+        "before_snapshot_hash": { "type": "string", "minLength": 1 },
+        "after_snapshot_hash": { "type": "string", "minLength": 1 },
+        "omitted_block_count": { "type": "integer", "minimum": 0 },
+        "strategy": { "type": "string", "default": "" },
+        "summary": { "type": "string", "default": "" },
+        "metadata": { "type": "object", "default": {} }
       },
       "additionalProperties": false
     }

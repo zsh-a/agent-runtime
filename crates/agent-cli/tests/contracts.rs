@@ -4,8 +4,8 @@ use agent_chat::{
     ChatResumeRequest, ChatToolResult, ChatTurnEvent, ChatTurnRequest, ChatTurnState,
 };
 use agent_core::{
-    AgentRunResult, AgentRuntimeCatalog, AgentTrace, ApprovalDecision, HookEvent, PromptManifest,
-    ProposalEnvelope, RunRequest, SessionRecord, StepRecord, ThreadRecord,
+    AgentRunResult, AgentRuntimeCatalog, AgentTrace, ApprovalDecision, HookEvent, HookSpec,
+    PromptManifest, ProposalEnvelope, RunRequest, SessionRecord, StepRecord, ThreadRecord,
 };
 use agent_llm::{LlmRequest, LlmResponse};
 use agent_runtime::RecoveryReport;
@@ -114,6 +114,10 @@ fn committed_fixtures_match_json_schemas() {
         "fixtures/contracts/hook-event.valid.json",
     );
     assert_valid(
+        "schemas/hook-spec.schema.json",
+        "fixtures/contracts/hook-spec.valid.json",
+    );
+    assert_valid(
         "schemas/proposal-envelope.schema.json",
         "fixtures/contracts/proposal-envelope.valid.json",
     );
@@ -185,6 +189,7 @@ fn committed_valid_fixtures_deserialize_to_runtime_types() {
     assert_deserializes::<RecoveryReport>("fixtures/contracts/recovery-report.valid.json");
     assert_deserializes::<PromptManifest>("fixtures/contracts/prompt-manifest.valid.json");
     assert_deserializes::<HookEvent>("fixtures/contracts/hook-event.valid.json");
+    assert_deserializes::<HookSpec>("fixtures/contracts/hook-spec.valid.json");
     assert_deserializes::<ProposalEnvelope>("fixtures/contracts/proposal-envelope.valid.json");
     assert_deserializes::<ApprovalDecision>("fixtures/contracts/approval-decision.valid.json");
     assert_deserializes::<LlmRequest>("fixtures/contracts/llm-request.valid.json");

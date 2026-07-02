@@ -11,8 +11,8 @@ use crate::{
     ChatError, ChatEventStream, ChatResumeRequest, ChatToolCall, ChatToolExecution, ChatToolResult,
     ChatTurnAdvance, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnState, ToolOutput,
     chat_event_from_llm_event, chat_turn_apply_response, chat_turn_apply_tool_results,
-    chat_turn_initial_state, chat_turn_llm_request, chat_turn_next_round, send_done, send_error,
-    send_event, turn_metadata,
+    chat_turn_initial_state, chat_turn_next_round, chat_turn_prepare_llm_request, send_done,
+    send_error, send_event, turn_metadata,
 };
 
 #[derive(Clone)]
@@ -191,7 +191,20 @@ async fn run_chat_state(
 ) {
     loop {
         let round = chat_turn_next_round(&state);
-        let llm_request = chat_turn_llm_request(&state);
+        let llm_request = match chat_turn_prepare_llm_request(&mut state) {
+            Ok(request) => request,
+            Err(error) => {
+                warn!(
+                    turn_id = state.turn_id.as_deref().unwrap_or("none"),
+                    round,
+                    error_code = %error.record.code,
+                    retryable = error.record.retryable,
+                    "chat context preparation failed",
+                );
+                send_error(&sender, round, error).await;
+                return;
+            }
+        };
         info!(
             turn_id = state.turn_id.as_deref().unwrap_or("none"),
             round,
@@ -516,6 +529,8 @@ async fn send_round_finished(
                 "chat_state": state,
                 "tool_calls": tool_calls,
                 "finish_reason": response.finish_reason,
+                "context_snapshot": state.context_snapshot.clone(),
+                "compaction": state.compaction.clone(),
             }),
         },
     )

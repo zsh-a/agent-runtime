@@ -1,6 +1,7 @@
 use agent_core::{AgentRunRecord, AgentSpec, ScheduleSpec};
 use time::OffsetDateTime;
 
+#[derive(Clone, Copy)]
 pub struct AgentScheduler;
 
 impl AgentScheduler {

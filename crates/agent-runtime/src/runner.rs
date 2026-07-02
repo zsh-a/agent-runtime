@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use agent_core::{
     Agent, AgentContext, AgentError, AgentRegistry, AgentRunRecord, AgentRunResult, AgentRunStatus,
-    AgentRunStore, AgentServices, AgentSpec, AgentTrace, PROTOCOL_VERSION, RunId, RunRequest,
-    RunScope, TraceEvent, TraceSink,
+    AgentRunStore, AgentServices, AgentSpec, AgentTrace, HookEventName, PROTOCOL_VERSION, RunId,
+    RunRequest, RunScope, TraceEvent, TraceSink,
 };
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -13,6 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     InMemoryLockStore, RUNTIME_VERSION,
+    hooks::HookManager,
     lock::lock_key,
     policy::ExecutionPolicy,
     recovery::{RecoveryReport, recover_stale_runs},
@@ -49,6 +50,7 @@ pub struct AgentRunner {
     policy: ExecutionPolicy,
     concurrency: Arc<Semaphore>,
     lock_store: Arc<dyn agent_core::AgentLockStore>,
+    hooks: HookManager,
 }
 
 impl AgentRunner {
@@ -67,6 +69,7 @@ impl AgentRunner {
                 ExecutionPolicy::default().max_concurrent_runs,
             )),
             lock_store: Arc::new(InMemoryLockStore::default()),
+            hooks: HookManager::default(),
         }
     }
 
@@ -79,6 +82,24 @@ impl AgentRunner {
     pub fn with_lock_store(mut self, lock_store: Arc<dyn agent_core::AgentLockStore>) -> Self {
         self.lock_store = lock_store;
         self
+    }
+
+    pub fn with_hooks(mut self, hooks: HookManager) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    pub(crate) fn nested_runner(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            run_store: self.run_store.clone(),
+            services: self.services.clone(),
+            scheduler: self.scheduler,
+            policy: self.policy.clone(),
+            concurrency: Arc::new(Semaphore::new(self.policy.max_concurrent_runs.max(1))),
+            lock_store: self.lock_store.clone(),
+            hooks: self.hooks.clone(),
+        }
     }
 
     pub async fn recover_stale_runs(&self) -> Result<RecoveryReport, AgentError> {
@@ -260,8 +281,23 @@ impl AgentRunner {
         trace
             .emit(TraceEvent::new(
                 "run_started",
-                json!({"run_id": run_id.0, "agent_id": spec.id, "trigger": request.trigger}),
+                json!({"run_id": run_id.0.clone(), "agent_id": spec.id.clone(), "trigger": request.trigger}),
             ))
+            .await?;
+        self.hooks
+            .observe(
+                HookEventName::RunStart,
+                Some(run_id.clone()),
+                Some(spec.id.clone()),
+                json!({
+                    "run_id": run_id.0.clone(),
+                    "agent_id": spec.id.clone(),
+                    "trigger": request.trigger,
+                    "input": request.input,
+                    "metadata": request.metadata,
+                }),
+                trace.as_ref(),
+            )
             .await?;
 
         let mut result = self
@@ -280,8 +316,23 @@ impl AgentRunner {
         trace
             .emit(TraceEvent::new(
                 "run_finished",
-                json!({"run_id": result.run_id.0, "status": result.status}),
+                json!({"run_id": result.run_id.0.clone(), "status": result.status.clone()}),
             ))
+            .await?;
+        self.hooks
+            .observe(
+                HookEventName::RunStop,
+                Some(result.run_id.clone()),
+                Some(result.agent_id.clone()),
+                json!({
+                    "run_id": result.run_id.0.clone(),
+                    "agent_id": result.agent_id.clone(),
+                    "status": result.status.clone(),
+                    "output": result.output.clone(),
+                    "error": result.error.clone(),
+                }),
+                trace.as_ref(),
+            )
             .await?;
 
         self.run_store
@@ -424,6 +475,10 @@ impl AgentRunner {
                     trace: trace.clone(),
                     run_id: run_id.clone(),
                     agent_id: spec.id.clone(),
+                    user: request.user.clone(),
+                    hooks: self.hooks.clone(),
+                    subagent_runner: Some(self.nested_runner()),
+                    cancellation: cancellation.clone(),
                 }),
                 cancellation: cancellation.clone(),
                 trace: trace.clone(),

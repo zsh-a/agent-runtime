@@ -82,6 +82,18 @@ impl AgentError {
             },
         }
     }
+
+    pub fn policy_denied(message: impl Into<String>, details: Value) -> Self {
+        Self {
+            record: AgentErrorRecord {
+                kind: AgentErrorKind::ApprovalRequired,
+                code: "policy_denied".to_owned(),
+                message: message.into(),
+                retryable: false,
+                details,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -102,4 +114,18 @@ impl StoreError {
 #[error("{record:?}")]
 pub struct ToolError {
     pub record: AgentErrorRecord,
+}
+
+impl ToolError {
+    pub fn from_agent_error(error: AgentError) -> Self {
+        Self {
+            record: error.record,
+        }
+    }
+
+    pub fn policy_denied(message: impl Into<String>, details: Value) -> Self {
+        Self {
+            record: AgentError::policy_denied(message, details).record,
+        }
+    }
 }

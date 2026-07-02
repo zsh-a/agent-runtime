@@ -1,12 +1,18 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentError, AgentEvent, AgentServices, AgentStateStore, ProposalEnvelope, RunId, ToolContext,
-    ToolError, ToolRegistry, TraceEvent, TraceSink, UserContext,
+    AgentError, AgentEvent, AgentServices, AgentStateStore, HookEventName, PROTOCOL_VERSION,
+    ProposalEnvelope, RunId, RunRequest, ToolContext, ToolError, ToolRegistry, TraceEvent,
+    TraceSink, TriggerKind, UserContext,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+use crate::{RunControl, hooks::HookManager, runner::AgentRunner};
+
+const SUBAGENT_TOOL_NAME: &str = "agent.run";
 
 pub struct BasicAgentServices {
     agent_id: String,
@@ -21,6 +27,10 @@ pub(crate) struct TracedAgentServices {
     pub(crate) trace: Arc<dyn TraceSink>,
     pub(crate) run_id: RunId,
     pub(crate) agent_id: String,
+    pub(crate) user: Option<UserContext>,
+    pub(crate) hooks: HookManager,
+    pub(crate) subagent_runner: Option<AgentRunner>,
+    pub(crate) cancellation: CancellationToken,
 }
 
 impl BasicAgentServices {
@@ -79,9 +89,52 @@ impl AgentServices for BasicAgentServices {
 #[async_trait]
 impl AgentServices for TracedAgentServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
+        if name == SUBAGENT_TOOL_NAME {
+            return self.call_subagent(input).await;
+        }
         let started_at = std::time::Instant::now();
         let input_hash = state_value_hash(&input);
         let input_bytes = serialized_value_len(&input);
+        let policy_input = json!({
+            "run_id": self.run_id.0.clone(),
+            "agent_id": self.agent_id.clone(),
+            "tool_name": name,
+            "input": input.clone(),
+        });
+        let decision = self
+            .hooks
+            .authorize(
+                HookEventName::BeforeToolCall,
+                Some(self.run_id.clone()),
+                Some(self.agent_id.clone()),
+                policy_input.clone(),
+                self.trace.as_ref(),
+            )
+            .await
+            .map_err(ToolError::from_agent_error)?;
+        if decision.is_denied() {
+            return Err(ToolError::policy_denied(
+                decision
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| format!("tool call '{name}' denied by policy hook")),
+                json!({
+                    "decision": decision,
+                    "event": "BeforeToolCall",
+                    "tool_name": name,
+                }),
+            ));
+        }
+        self.hooks
+            .observe(
+                HookEventName::BeforeToolCall,
+                Some(self.run_id.clone()),
+                Some(self.agent_id.clone()),
+                policy_input,
+                self.trace.as_ref(),
+            )
+            .await
+            .map_err(ToolError::from_agent_error)?;
         info!(
             run_id = %self.run_id.0,
             agent_id = %self.agent_id,
@@ -123,6 +176,23 @@ impl AgentServices for TracedAgentServices {
                     duration_ms,
                     "tool call completed",
                 );
+                self.hooks
+                    .observe(
+                        HookEventName::AfterToolCall,
+                        Some(self.run_id.clone()),
+                        Some(self.agent_id.clone()),
+                        json!({
+                            "run_id": self.run_id.0.clone(),
+                            "agent_id": self.agent_id.clone(),
+                            "tool_name": name,
+                            "status": "completed",
+                            "output": output.clone(),
+                            "duration_ms": duration_ms,
+                        }),
+                        self.trace.as_ref(),
+                    )
+                    .await
+                    .map_err(ToolError::from_agent_error)?;
                 Ok(output)
             }
             Err(error) => {
@@ -155,6 +225,23 @@ impl AgentServices for TracedAgentServices {
                     duration_ms,
                     "tool call failed",
                 );
+                self.hooks
+                    .observe(
+                        HookEventName::AfterToolCall,
+                        Some(self.run_id.clone()),
+                        Some(self.agent_id.clone()),
+                        json!({
+                            "run_id": self.run_id.0.clone(),
+                            "agent_id": self.agent_id.clone(),
+                            "tool_name": name,
+                            "status": "failed",
+                            "error": error.record.clone(),
+                            "duration_ms": duration_ms,
+                        }),
+                        self.trace.as_ref(),
+                    )
+                    .await
+                    .map_err(ToolError::from_agent_error)?;
                 Err(error)
             }
         }
@@ -213,6 +300,45 @@ impl AgentServices for TracedAgentServices {
     async fn save_state(&self, key: &str, value: Value) -> Result<(), AgentError> {
         let started_at = std::time::Instant::now();
         let value_hash = state_value_hash(&value);
+        let policy_input = json!({
+            "run_id": self.run_id.0.clone(),
+            "agent_id": self.agent_id.clone(),
+            "key": key,
+            "value": value.clone(),
+            "value_hash": value_hash,
+        });
+        let decision = self
+            .hooks
+            .authorize(
+                HookEventName::BeforeStateSave,
+                Some(self.run_id.clone()),
+                Some(self.agent_id.clone()),
+                policy_input.clone(),
+                self.trace.as_ref(),
+            )
+            .await?;
+        if decision.is_denied() {
+            return Err(AgentError::policy_denied(
+                decision
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| format!("state save '{key}' denied by policy hook")),
+                json!({
+                    "decision": decision,
+                    "event": "BeforeStateSave",
+                    "key": key,
+                }),
+            ));
+        }
+        self.hooks
+            .observe(
+                HookEventName::BeforeStateSave,
+                Some(self.run_id.clone()),
+                Some(self.agent_id.clone()),
+                policy_input,
+                self.trace.as_ref(),
+            )
+            .await?;
         match self.inner.save_state(key, value.clone()).await {
             Ok(()) => {
                 self.trace
@@ -228,6 +354,22 @@ impl AgentServices for TracedAgentServices {
                             "value": value,
                         }),
                     ))
+                    .await?;
+                self.hooks
+                    .observe(
+                        HookEventName::AfterStateSave,
+                        Some(self.run_id.clone()),
+                        Some(self.agent_id.clone()),
+                        json!({
+                            "run_id": self.run_id.0.clone(),
+                            "agent_id": self.agent_id.clone(),
+                            "key": key,
+                            "status": "completed",
+                            "value_hash": value_hash,
+                            "duration_ms": started_at.elapsed().as_millis(),
+                        }),
+                        self.trace.as_ref(),
+                    )
                     .await?;
                 Ok(())
             }
@@ -246,6 +388,23 @@ impl AgentServices for TracedAgentServices {
                         }),
                     ))
                     .await?;
+                self.hooks
+                    .observe(
+                        HookEventName::AfterStateSave,
+                        Some(self.run_id.clone()),
+                        Some(self.agent_id.clone()),
+                        json!({
+                            "run_id": self.run_id.0.clone(),
+                            "agent_id": self.agent_id.clone(),
+                            "key": key,
+                            "status": "failed",
+                            "value_hash": value_hash,
+                            "error": error.record.clone(),
+                            "duration_ms": started_at.elapsed().as_millis(),
+                        }),
+                        self.trace.as_ref(),
+                    )
+                    .await?;
                 Err(error)
             }
         }
@@ -253,6 +412,43 @@ impl AgentServices for TracedAgentServices {
 
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), AgentError> {
         let started_at = std::time::Instant::now();
+        let policy_input = json!({
+            "run_id": self.run_id.0.clone(),
+            "agent_id": self.agent_id.clone(),
+            "proposal": proposal.clone(),
+        });
+        let decision = self
+            .hooks
+            .authorize(
+                HookEventName::BeforeProposalCreate,
+                Some(self.run_id.clone()),
+                Some(self.agent_id.clone()),
+                policy_input.clone(),
+                self.trace.as_ref(),
+            )
+            .await?;
+        if decision.is_denied() {
+            return Err(AgentError::policy_denied(
+                decision
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "proposal creation denied by policy hook".to_owned()),
+                json!({
+                    "decision": decision,
+                    "event": "BeforeProposalCreate",
+                    "proposal_id": proposal.proposal_id.0,
+                }),
+            ));
+        }
+        self.hooks
+            .observe(
+                HookEventName::BeforeProposalCreate,
+                Some(self.run_id.clone()),
+                Some(self.agent_id.clone()),
+                policy_input,
+                self.trace.as_ref(),
+            )
+            .await?;
         match self.inner.create_proposal(proposal.clone()).await {
             Ok(()) => {
                 self.trace
@@ -268,6 +464,21 @@ impl AgentServices for TracedAgentServices {
                             "duration_ms": started_at.elapsed().as_millis(),
                         }),
                     ))
+                    .await?;
+                self.hooks
+                    .observe(
+                        HookEventName::AfterProposalDecision,
+                        Some(self.run_id.clone()),
+                        Some(self.agent_id.clone()),
+                        json!({
+                            "run_id": self.run_id.0.clone(),
+                            "agent_id": self.agent_id.clone(),
+                            "proposal_id": proposal.proposal_id.0,
+                            "status": "completed",
+                            "duration_ms": started_at.elapsed().as_millis(),
+                        }),
+                        self.trace.as_ref(),
+                    )
                     .await?;
                 Ok(())
             }
@@ -285,9 +496,166 @@ impl AgentServices for TracedAgentServices {
                         }),
                     ))
                     .await?;
+                self.hooks
+                    .observe(
+                        HookEventName::AfterProposalDecision,
+                        Some(self.run_id.clone()),
+                        Some(self.agent_id.clone()),
+                        json!({
+                            "run_id": self.run_id.0.clone(),
+                            "agent_id": self.agent_id.clone(),
+                            "proposal_id": proposal.proposal_id.0,
+                            "status": "failed",
+                            "error": error.record.clone(),
+                            "duration_ms": started_at.elapsed().as_millis(),
+                        }),
+                        self.trace.as_ref(),
+                    )
+                    .await?;
                 Err(error)
             }
         }
+    }
+}
+
+impl TracedAgentServices {
+    async fn call_subagent(&self, input: Value) -> Result<Value, ToolError> {
+        let Some(runner) = &self.subagent_runner else {
+            return Err(ToolError::policy_denied(
+                "agent.run is not available outside an AgentRunner",
+                json!({"tool_name": SUBAGENT_TOOL_NAME}),
+            ));
+        };
+        let agent_id = input
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                ToolError::policy_denied(
+                    "agent.run requires a non-empty agent_id",
+                    json!({"tool_name": SUBAGENT_TOOL_NAME}),
+                )
+            })?;
+        let run_id = input
+            .get("run_id")
+            .and_then(Value::as_str)
+            .map(|value| RunId(value.to_owned()));
+        let child_input = input.get("input").cloned().unwrap_or_else(|| json!({}));
+        let mut metadata = json!({
+            "subagent": true,
+            "parent_run_id": self.run_id.0.clone(),
+            "parent_agent_id": self.agent_id.clone(),
+        });
+        if let Some(extra) = input.get("metadata").and_then(Value::as_object)
+            && let Some(object) = metadata.as_object_mut()
+        {
+            for (key, value) in extra {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+        let hook_input = json!({
+            "run_id": self.run_id.0.clone(),
+            "agent_id": self.agent_id.clone(),
+            "subagent_id": agent_id,
+            "input": child_input,
+            "metadata": metadata,
+        });
+        let decision = self
+            .hooks
+            .authorize(
+                HookEventName::SubagentStart,
+                Some(self.run_id.clone()),
+                Some(self.agent_id.clone()),
+                hook_input.clone(),
+                self.trace.as_ref(),
+            )
+            .await
+            .map_err(ToolError::from_agent_error)?;
+        if decision.is_denied() {
+            return Err(ToolError::policy_denied(
+                decision
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| format!("subagent '{agent_id}' denied by policy hook")),
+                json!({
+                    "decision": decision,
+                    "event": "SubagentStart",
+                    "subagent_id": agent_id,
+                }),
+            ));
+        }
+        self.hooks
+            .observe(
+                HookEventName::SubagentStart,
+                Some(self.run_id.clone()),
+                Some(self.agent_id.clone()),
+                hook_input.clone(),
+                self.trace.as_ref(),
+            )
+            .await
+            .map_err(ToolError::from_agent_error)?;
+        self.trace
+            .emit(TraceEvent::new(
+                "subagent_started",
+                json!({
+                    "run_id": self.run_id.0.clone(),
+                    "agent_id": self.agent_id.clone(),
+                    "subagent_id": agent_id,
+                }),
+            ))
+            .await
+            .map_err(ToolError::from_agent_error)?;
+        let outcome = runner
+            .run_once_with_control(
+                &agent_id,
+                RunRequest {
+                    protocol_version: PROTOCOL_VERSION.to_owned(),
+                    run_id,
+                    input: child_input.clone(),
+                    user: self.user.clone(),
+                    trigger: TriggerKind::Manual,
+                    metadata: metadata.clone(),
+                },
+                RunControl {
+                    cancellation: self.cancellation.clone(),
+                    trace_events: None,
+                },
+            )
+            .await
+            .map_err(ToolError::from_agent_error)?;
+        self.trace
+            .emit(TraceEvent::new(
+                "subagent_finished",
+                json!({
+                    "run_id": self.run_id.0.clone(),
+                    "agent_id": self.agent_id.clone(),
+                    "subagent_id": agent_id,
+                    "subagent_run_id": outcome.result.run_id.0.clone(),
+                    "status": outcome.result.status.clone(),
+                }),
+            ))
+            .await
+            .map_err(ToolError::from_agent_error)?;
+        self.hooks
+            .observe(
+                HookEventName::SubagentStop,
+                Some(self.run_id.clone()),
+                Some(self.agent_id.clone()),
+                json!({
+                    "run_id": self.run_id.0.clone(),
+                    "agent_id": self.agent_id.clone(),
+                    "subagent_id": agent_id,
+                    "result": outcome.result.clone(),
+                }),
+                self.trace.as_ref(),
+            )
+            .await
+            .map_err(ToolError::from_agent_error)?;
+        Ok(json!({
+            "result": outcome.result,
+            "trace": outcome.trace,
+        }))
     }
 }
 

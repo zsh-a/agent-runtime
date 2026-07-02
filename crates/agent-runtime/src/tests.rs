@@ -8,8 +8,9 @@ use std::{
 
 use agent_core::{
     Agent, AgentContext, AgentError, AgentErrorKind, AgentErrorRecord, AgentEvent, AgentRunRecord,
-    AgentRunResult, AgentRunStatus, AgentRunStore, AgentServices, AgentSpec, PROTOCOL_VERSION,
-    RunId, RunRequest, RunScope, ScheduleSpec, ToolError,
+    AgentRunResult, AgentRunStatus, AgentRunStore, AgentServices, AgentSpec, HookEffect,
+    HookEventName, HookKind, HookSpec, PROTOCOL_VERSION, PolicyDecision, RunId, RunRequest,
+    RunScope, ScheduleSpec, ToolError,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -44,6 +45,47 @@ impl Agent for EchoAgent {
             ctx.now,
             ctx.input,
             Some("echoed input".to_owned()),
+        ))
+    }
+}
+
+struct ParentAgent;
+
+#[async_trait]
+impl Agent for ParentAgent {
+    fn spec(&self) -> AgentSpec {
+        AgentSpec {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            id: "parent".to_owned(),
+            name: "Parent".to_owned(),
+            description: None,
+            version: "0.1.0".to_owned(),
+            schedule: ScheduleSpec::Manual,
+            capabilities: vec!["debug.subagent".to_owned()],
+            metadata: json!({}),
+        }
+    }
+
+    async fn run(&self, ctx: AgentContext) -> Result<AgentRunResult, AgentError> {
+        let output = ctx
+            .services
+            .call_tool(
+                "agent.run",
+                json!({
+                    "agent_id": "echo",
+                    "input": {"from": "parent"}
+                }),
+            )
+            .await
+            .map_err(|error| AgentError {
+                record: error.record,
+            })?;
+        Ok(AgentRunResult::completed(
+            ctx.run_id,
+            "parent",
+            ctx.now,
+            output,
+            Some("parent delegated".to_owned()),
         ))
     }
 }
@@ -137,6 +179,108 @@ async fn runner_traces_state_reads_and_writes() {
     assert_eq!(read.payload["found"], true);
     assert_eq!(read.payload["value"]["counter"], 7);
     assert_eq!(outcome.result.output["loaded"]["counter"], 7);
+}
+
+#[tokio::test]
+async fn runner_observe_hooks_record_invocations() {
+    let registry = InMemoryAgentRegistry::shared(vec![Arc::new(EchoAgent)]);
+    let run_store = agent_store::InMemoryRunStore::shared();
+    let state_store = agent_store::InMemoryStateStore::shared();
+    let services = Arc::new(NoopServices { state_store });
+    let hooks = HookManager::new(vec![HookRegistration::native(
+        hook_spec("record_run_start", HookEventName::RunStart, HookEffect::Observe),
+        Arc::new(AllowHook),
+    )]);
+    let runner = AgentRunner::new(registry, run_store, services).with_hooks(hooks);
+
+    let outcome = runner
+        .run_once("echo", run_request())
+        .await
+        .expect("run succeeds");
+
+    let hook = outcome
+        .trace
+        .events
+        .iter()
+        .find(|event| event.kind == "hook_invocation")
+        .expect("hook invocation traced");
+    assert_eq!(hook.payload["hook_name"], "record_run_start");
+    assert_eq!(hook.payload["status"], "completed");
+    assert_eq!(hook.payload["hook_event"], "RunStart");
+}
+
+#[tokio::test]
+async fn policy_hook_can_deny_state_save() {
+    let registry = InMemoryAgentRegistry::shared(vec![Arc::new(StateAgent)]);
+    let run_store = agent_store::InMemoryRunStore::shared();
+    let state_store = agent_store::InMemoryStateStore::shared();
+    let services = Arc::new(NoopServices { state_store });
+    let hooks = HookManager::new(vec![HookRegistration::native(
+        hook_spec("deny_state_save", HookEventName::BeforeStateSave, HookEffect::Policy),
+        Arc::new(DenyHook),
+    )]);
+    let runner = AgentRunner::new(registry, run_store, services).with_hooks(hooks);
+
+    let outcome = runner
+        .run_once("stateful", run_request())
+        .await
+        .expect("denied run returns outcome");
+
+    assert_eq!(outcome.result.status, AgentRunStatus::Failed);
+    assert_eq!(
+        outcome.result.error.as_ref().expect("run error").code,
+        "policy_denied"
+    );
+    assert!(
+        outcome
+            .trace
+            .events
+            .iter()
+            .any(|event| event.kind == "hook_invocation"
+                && event.payload["hook_name"] == "deny_state_save")
+    );
+    assert!(
+        !outcome
+            .trace
+            .events
+            .iter()
+            .any(|event| event.kind == "state_write")
+    );
+}
+
+#[tokio::test]
+async fn agent_run_tool_executes_subagent() {
+    let registry = InMemoryAgentRegistry::shared(vec![Arc::new(ParentAgent), Arc::new(EchoAgent)]);
+    let run_store = agent_store::InMemoryRunStore::shared();
+    let state_store = agent_store::InMemoryStateStore::shared();
+    let services = Arc::new(NoopServices { state_store });
+    let runner = AgentRunner::new(registry, run_store.clone(), services);
+
+    let outcome = runner
+        .run_once("parent", run_request())
+        .await
+        .expect("parent run succeeds");
+
+    assert_eq!(outcome.result.status, AgentRunStatus::Completed);
+    assert_eq!(outcome.result.output["result"]["agent_id"], "echo");
+    assert_eq!(outcome.result.output["result"]["output"]["from"], "parent");
+    let event_kinds = outcome
+        .trace
+        .events
+        .iter()
+        .map(|event| event.kind.as_str())
+        .collect::<Vec<_>>();
+    assert!(event_kinds.contains(&"subagent_started"));
+    assert!(event_kinds.contains(&"subagent_finished"));
+    let child_run_id = outcome.result.output["result"]["run_id"]
+        .as_str()
+        .expect("child run id");
+    let child = run_store
+        .get_run(&RunId(child_run_id.to_owned()))
+        .await
+        .expect("run store reads")
+        .expect("child run exists");
+    assert_eq!(child.agent_id, "echo");
 }
 
 #[test]
@@ -600,6 +744,42 @@ fn run_request() -> RunRequest {
         user: None,
         trigger: agent_core::TriggerKind::Manual,
         metadata: json!({}),
+    }
+}
+
+fn hook_spec(name: &str, event: HookEventName, effect: HookEffect) -> HookSpec {
+    HookSpec {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        name: name.to_owned(),
+        event,
+        kind: HookKind::NativeRust,
+        effect,
+        command: None,
+        timeout_ms: None,
+        enabled: true,
+        metadata: json!({}),
+    }
+}
+
+struct AllowHook;
+
+#[async_trait]
+impl crate::hooks::HookHandler for AllowHook {
+    async fn handle(&self, invocation: crate::hooks::HookInvocation) -> Result<Value, AgentError> {
+        Ok(json!({
+            "event": invocation.event,
+            "input": invocation.input,
+        }))
+    }
+}
+
+struct DenyHook;
+
+#[async_trait]
+impl crate::hooks::HookHandler for DenyHook {
+    async fn handle(&self, _invocation: crate::hooks::HookInvocation) -> Result<Value, AgentError> {
+        serde_json::to_value(PolicyDecision::deny("state writes disabled for test"))
+            .map_err(|error| AgentError::internal(error.to_string()))
     }
 }
 

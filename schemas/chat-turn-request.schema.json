@@ -27,6 +27,15 @@
       "default": []
     },
     "metadata": { "type": "object", "default": {} },
+    "context_policy": {
+      "$ref": "#/$defs/context_policy",
+      "default": {
+        "max_input_tokens": 128000,
+        "reserve_output_tokens": 4096,
+        "preserve_recent_messages": 12,
+        "compact_when_over_budget": true
+      }
+    },
     "max_tool_rounds": { "type": "integer", "minimum": 1, "default": 4 },
     "tool_execution": {
       "type": "string",
@@ -63,6 +72,22 @@
           "enum": ["read_only", "low", "medium", "high"]
         },
         "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "context_policy": {
+      "type": "object",
+      "required": [
+        "max_input_tokens",
+        "reserve_output_tokens",
+        "preserve_recent_messages",
+        "compact_when_over_budget"
+      ],
+      "properties": {
+        "max_input_tokens": { "type": "integer", "minimum": 1 },
+        "reserve_output_tokens": { "type": "integer", "minimum": 0 },
+        "preserve_recent_messages": { "type": "integer", "minimum": 0 },
+        "compact_when_over_budget": { "type": "boolean" }
       },
       "additionalProperties": false
     }

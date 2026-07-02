@@ -1,0 +1,13 @@
+{
+  "protocol_version": "agent.v1",
+  "name": "audit_tool_calls",
+  "event": "BeforeToolCall",
+  "kind": "process",
+  "effect": "observe",
+  "command": ["agent", "audit-hook"],
+  "timeout_ms": 5000,
+  "enabled": true,
+  "metadata": {
+    "surface": "contract"
+  }
+}

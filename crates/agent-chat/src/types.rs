@@ -1,6 +1,6 @@
 use std::pin::Pin;
 
-use agent_core::{PROTOCOL_VERSION, ToolSpec};
+use agent_core::{CompactionRecord, ContextPolicy, ContextSnapshot, PROTOCOL_VERSION, ToolSpec};
 use agent_llm::{LlmMessage, LlmResponse, LlmUsage};
 use futures::Stream;
 use schemars::JsonSchema;
@@ -38,6 +38,8 @@ pub struct ChatTurnRequest {
     pub tools: Vec<ToolSpec>,
     #[serde(default)]
     pub metadata: Value,
+    #[serde(default)]
+    pub context_policy: ContextPolicy,
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
     #[serde(default)]
@@ -71,6 +73,12 @@ pub struct ChatTurnState {
     pub tools: Vec<ToolSpec>,
     #[serde(default)]
     pub metadata: Value,
+    #[serde(default)]
+    pub context_policy: ContextPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_snapshot: Option<ContextSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<CompactionRecord>,
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
     #[serde(default)]

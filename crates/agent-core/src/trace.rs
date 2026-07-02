@@ -49,7 +49,7 @@ pub struct ArtifactRef {
     pub metadata: Value,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "PascalCase")]
 pub enum HookEventName {
     SessionStart,

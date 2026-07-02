@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-runtime.local/schemas/hook-spec.schema.json",
+  "title": "HookSpec",
+  "type": "object",
+  "required": ["protocol_version", "name", "event", "kind"],
+  "properties": {
+    "protocol_version": { "const": "agent.v1" },
+    "name": { "type": "string", "minLength": 1 },
+    "event": {
+      "type": "string",
+      "enum": [
+        "SessionStart",
+        "SessionStop",
+        "RunStart",
+        "RunStop",
+        "BeforeAgentStep",
+        "AfterAgentStep",
+        "SubagentStart",
+        "SubagentStop",
+        "BeforeToolCall",
+        "AfterToolCall",
+        "BeforeProposalCreate",
+        "AfterProposalDecision",
+        "BeforeStateSave",
+        "AfterStateSave",
+        "BeforeCompact",
+        "AfterCompact"
+      ]
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["native_rust", "process", "server"]
+    },
+    "effect": {
+      "type": "string",
+      "enum": ["observe", "policy"],
+      "default": "observe"
+    },
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "timeout_ms": { "type": "integer", "minimum": 1 },
+    "enabled": { "type": "boolean", "default": true },
+    "metadata": { "type": "object", "default": {} }
+  },
+  "additionalProperties": false
+}

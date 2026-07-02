@@ -1,4 +1,5 @@
 mod lock;
+mod hooks;
 mod policy;
 mod recovery;
 mod registry;
@@ -8,6 +9,7 @@ mod services;
 mod trace;
 
 pub use lock::InMemoryLockStore;
+pub use hooks::{FnHook, HookInvocation, HookManager, HookRegistration};
 pub use policy::ExecutionPolicy;
 pub use recovery::{RecoveredRun, RecoveryReport, recover_stale_runs};
 pub use registry::InMemoryAgentRegistry;

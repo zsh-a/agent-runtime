@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 
 use crate::{
     ChatError, ChatToolCall, ChatToolResult, ChatTurnAdvance, ChatTurnRequest, ChatTurnState,
+    context::{build_llm_request_without_state_update, prepare_llm_request},
 };
 
 pub fn chat_turn_initial_state(request: &ChatTurnRequest) -> Result<ChatTurnState, ChatError> {
@@ -35,6 +36,9 @@ pub fn chat_turn_initial_state(request: &ChatTurnRequest) -> Result<ChatTurnStat
         } else {
             request.metadata.clone()
         },
+        context_policy: request.context_policy.clone(),
+        context_snapshot: None,
+        compaction: None,
         max_tool_rounds: request.max_tool_rounds.max(1),
         round: 0,
         pending_tool_calls: Vec::new(),
@@ -43,17 +47,11 @@ pub fn chat_turn_initial_state(request: &ChatTurnRequest) -> Result<ChatTurnStat
 }
 
 pub fn chat_turn_llm_request(state: &ChatTurnState) -> LlmRequest {
-    LlmRequest {
-        protocol_version: state.protocol_version.clone(),
-        provider: state.provider.clone(),
-        model: state.model.clone(),
-        messages: state.messages.clone(),
-        temperature: state.temperature,
-        max_output_tokens: state.max_output_tokens,
-        tools: state.tools.clone(),
-        response_format: None,
-        metadata: llm_metadata(state),
-    }
+    build_llm_request_without_state_update(state)
+}
+
+pub fn chat_turn_prepare_llm_request(state: &mut ChatTurnState) -> Result<LlmRequest, ChatError> {
+    prepare_llm_request(state).map(|prepared| prepared.request)
 }
 
 pub fn chat_turn_next_round(state: &ChatTurnState) -> u32 {
