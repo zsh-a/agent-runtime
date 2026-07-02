@@ -7,7 +7,7 @@ use agent_core::{
 };
 use serde_json::{Value, json};
 use time::OffsetDateTime;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -24,6 +24,21 @@ use crate::{
 pub struct RunOutcome {
     pub result: AgentRunResult,
     pub trace: AgentTrace,
+}
+
+#[derive(Clone)]
+pub struct RunControl {
+    pub cancellation: CancellationToken,
+    pub trace_events: Option<broadcast::Sender<TraceEvent>>,
+}
+
+impl Default for RunControl {
+    fn default() -> Self {
+        Self {
+            cancellation: CancellationToken::new(),
+            trace_events: None,
+        }
+    }
 }
 
 pub struct AgentRunner {
@@ -75,6 +90,16 @@ impl AgentRunner {
         agent_id: &str,
         request: RunRequest,
     ) -> Result<RunOutcome, AgentError> {
+        self.run_once_with_control(agent_id, request, RunControl::default())
+            .await
+    }
+
+    pub async fn run_once_with_control(
+        &self,
+        agent_id: &str,
+        request: RunRequest,
+        control: RunControl,
+    ) -> Result<RunOutcome, AgentError> {
         let run_timer = std::time::Instant::now();
         let _permit = self
             .concurrency
@@ -98,6 +123,10 @@ impl AgentRunner {
             .unwrap_or(RunScope::Global);
         let idempotency_key = run_idempotency_key(&spec.id, &scope, &request);
         let lock_key = lock_key(&spec.id, &scope);
+        let trace = Arc::new(match control.trace_events {
+            Some(sender) => MemoryTraceSink::with_event_sender(sender),
+            None => MemoryTraceSink::default(),
+        });
         info!(
             run_id = %run_id.0,
             agent_id = %spec.id,
@@ -166,6 +195,12 @@ impl AgentRunner {
                 duration_ms = run_timer.elapsed().as_millis(),
                 "agent run skipped",
             );
+            trace
+                .emit(TraceEvent::new(
+                    "run_skipped",
+                    json!({"reason": reason, "lock_key": lock_key}),
+                ))
+                .await?;
             let trace_doc = AgentTrace {
                 protocol_version: PROTOCOL_VERSION.to_owned(),
                 runtime_version: RUNTIME_VERSION.to_owned(),
@@ -176,10 +211,8 @@ impl AgentRunner {
                 finished_at: result.finished_at,
                 input: request.input,
                 output: result.output.clone(),
-                events: vec![TraceEvent::new(
-                    "run_skipped",
-                    json!({"reason": reason, "lock_key": lock_key}),
-                )],
+                events: trace.events().await,
+                artifact_refs: Vec::new(),
             };
             return Ok(RunOutcome {
                 result,
@@ -224,7 +257,6 @@ impl AgentRunner {
             "run record created",
         );
 
-        let trace = Arc::new(MemoryTraceSink::default());
         trace
             .emit(TraceEvent::new(
                 "run_started",
@@ -240,6 +272,7 @@ impl AgentRunner {
                 started_at,
                 request.clone(),
                 trace.clone(),
+                control.cancellation.clone(),
             )
             .await?;
         result.finished_at = OffsetDateTime::now_utc();
@@ -298,6 +331,7 @@ impl AgentRunner {
             input: request.input,
             output: result.output.clone(),
             events: trace.events().await,
+            artifact_refs: Vec::new(),
         };
 
         self.lock_store.release(lease).await.map_err(|e| {
@@ -329,12 +363,36 @@ impl AgentRunner {
         started_at: OffsetDateTime,
         request: RunRequest,
         trace: Arc<MemoryTraceSink>,
+        cancellation: CancellationToken,
     ) -> Result<AgentRunResult, AgentError> {
         let max_attempts = self.policy.max_retries.saturating_add(1);
         let trace_attempts = self.policy.max_retries > 0;
         let mut attempt = 1_u32;
 
         loop {
+            if cancellation.is_cancelled() {
+                warn!(
+                    run_id = %run_id.0,
+                    agent_id = %spec.id,
+                    attempt,
+                    "agent run cancelled before attempt started",
+                );
+                emit_cancellation_events(
+                    trace.as_ref(),
+                    &run_id,
+                    &spec.id,
+                    attempt,
+                    "before_attempt",
+                    true,
+                )
+                .await?;
+                return Ok(failure_result(
+                    run_id,
+                    &spec.id,
+                    started_at,
+                    AgentError::cancelled("agent run cancelled before attempt started"),
+                ));
+            }
             if trace_attempts {
                 trace
                     .emit(TraceEvent::new(
@@ -367,46 +425,83 @@ impl AgentRunner {
                     run_id: run_id.clone(),
                     agent_id: spec.id.clone(),
                 }),
-                cancellation: CancellationToken::new(),
+                cancellation: cancellation.clone(),
                 trace: trace.clone(),
             };
 
             let run_future = agent.run(ctx);
             let attempt_timer = std::time::Instant::now();
-            let mut result = match tokio::time::timeout(self.policy.timeout, run_future).await {
-                Ok(Ok(mut result)) => {
-                    result.run_id = run_id.clone();
-                    result.agent_id = spec.id.clone();
-                    result
-                }
-                Ok(Err(err)) => {
+            let mut result = tokio::select! {
+                _ = cancellation.cancelled() => {
                     warn!(
                         run_id = %run_id.0,
                         agent_id = %spec.id,
                         attempt,
-                        error_code = %err.record.code,
-                        error_kind = ?err.record.kind,
-                        retryable = err.record.retryable,
                         duration_ms = attempt_timer.elapsed().as_millis(),
-                        "run attempt returned an agent error",
+                        "run attempt cancelled",
                     );
-                    failure_result(run_id.clone(), &spec.id, started_at, err)
-                }
-                Err(_) => {
-                    warn!(
-                        run_id = %run_id.0,
-                        agent_id = %spec.id,
+                    emit_cancellation_events(
+                        trace.as_ref(),
+                        &run_id,
+                        &spec.id,
                         attempt,
-                        timeout_ms = self.policy.timeout.as_millis(),
-                        duration_ms = attempt_timer.elapsed().as_millis(),
-                        "run attempt timed out",
-                    );
+                        "during_attempt",
+                        true,
+                    )
+                    .await?;
                     failure_result(
                         run_id.clone(),
                         &spec.id,
                         started_at,
-                        AgentError::timeout(self.policy.timeout),
+                        AgentError::cancelled("agent run cancelled"),
                     )
+                }
+                outcome = tokio::time::timeout(self.policy.timeout, run_future) => match outcome {
+                    Ok(Ok(mut result)) => {
+                        result.run_id = run_id.clone();
+                        result.agent_id = spec.id.clone();
+                        result
+                    }
+                    Ok(Err(err)) => {
+                        warn!(
+                            run_id = %run_id.0,
+                            agent_id = %spec.id,
+                            attempt,
+                            error_code = %err.record.code,
+                            error_kind = ?err.record.kind,
+                            retryable = err.record.retryable,
+                            duration_ms = attempt_timer.elapsed().as_millis(),
+                            "run attempt returned an agent error",
+                        );
+                        if matches!(err.record.kind, agent_core::AgentErrorKind::Cancelled) {
+                            emit_cancellation_events(
+                                trace.as_ref(),
+                                &run_id,
+                                &spec.id,
+                                attempt,
+                                "agent_returned_cancelled",
+                                cancellation.is_cancelled(),
+                            )
+                            .await?;
+                        }
+                        failure_result(run_id.clone(), &spec.id, started_at, err)
+                    }
+                    Err(_) => {
+                        warn!(
+                            run_id = %run_id.0,
+                            agent_id = %spec.id,
+                            attempt,
+                            timeout_ms = self.policy.timeout.as_millis(),
+                            duration_ms = attempt_timer.elapsed().as_millis(),
+                            "run attempt timed out",
+                        );
+                        failure_result(
+                            run_id.clone(),
+                            &spec.id,
+                            started_at,
+                            AgentError::timeout(self.policy.timeout),
+                        )
+                    }
                 }
             };
             let retryable = result_is_retryable(&result);
@@ -473,7 +568,26 @@ impl AgentRunner {
                 ))
                 .await?;
             if !self.policy.retry_backoff.is_zero() {
-                tokio::time::sleep(self.policy.retry_backoff).await;
+                tokio::select! {
+                    _ = cancellation.cancelled() => {
+                        emit_cancellation_events(
+                            trace.as_ref(),
+                            &run_id,
+                            &spec.id,
+                            attempt,
+                            "retry_backoff",
+                            true,
+                        )
+                        .await?;
+                        return Ok(failure_result(
+                            run_id,
+                            &spec.id,
+                            started_at,
+                            AgentError::cancelled("agent run cancelled during retry backoff"),
+                        ));
+                    }
+                    _ = tokio::time::sleep(self.policy.retry_backoff) => {}
+                }
             }
             attempt = next_attempt;
         }
@@ -550,6 +664,28 @@ fn result_is_retryable(result: &AgentRunResult) -> bool {
         return false;
     }
     result.error.as_ref().is_some_and(|error| error.retryable)
+}
+
+async fn emit_cancellation_events(
+    trace: &MemoryTraceSink,
+    run_id: &RunId,
+    agent_id: &str,
+    attempt: u32,
+    reason: &str,
+    include_request: bool,
+) -> Result<(), AgentError> {
+    let payload = json!({
+        "run_id": run_id.0.clone(),
+        "agent_id": agent_id,
+        "attempt": attempt,
+        "reason": reason,
+    });
+    if include_request {
+        trace
+            .emit(TraceEvent::new("run_cancel_requested", payload.clone()))
+            .await?;
+    }
+    trace.emit(TraceEvent::new("run_cancelled", payload)).await
 }
 
 fn failure_result(

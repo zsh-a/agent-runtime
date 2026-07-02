@@ -40,6 +40,8 @@ pub struct ChatTurnRequest {
     pub metadata: Value,
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
+    #[serde(default)]
+    pub tool_execution: ChatToolExecution,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -75,6 +77,8 @@ pub struct ChatTurnState {
     pub round: u32,
     #[serde(default)]
     pub pending_tool_calls: Vec<ChatToolCall>,
+    #[serde(default)]
+    pub tool_execution: ChatToolExecution,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -93,6 +97,23 @@ pub struct ChatToolResult {
     pub output: Value,
     #[serde(default)]
     pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatToolExecution {
+    #[default]
+    Runtime,
+    Client,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChatResumeRequest {
+    #[serde(default = "protocol_version")]
+    pub protocol_version: String,
+    pub state: ChatTurnState,
+    #[serde(default)]
+    pub tool_results: Vec<ChatToolResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

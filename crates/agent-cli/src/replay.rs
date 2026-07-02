@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use agent_core::{AgentRunResult, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind};
 use agent_runtime::AgentRunner;
-use agent_store::{FileProposalStore, FileRunStore};
+use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ValueEnum;
 use miette::{IntoDiagnostic, Result};
@@ -70,6 +70,11 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
             .await
             .into_diagnostic()?,
     );
+    let lock_store = Arc::new(
+        FileLockStore::new(options.store.clone())
+            .await
+            .into_diagnostic()?,
+    );
     let proposal_store = Arc::new(
         FileProposalStore::new(options.store.clone())
             .await
@@ -79,11 +84,13 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
         tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?,
         proposal_store,
     ));
-    let runner = AgentRunner::new(registry, store, services).with_policy(execution_policy(
-        options.timeout_seconds,
-        options.max_retries,
-        options.retry_backoff_ms,
-    ));
+    let runner = AgentRunner::new(registry, store, services)
+        .with_lock_store(lock_store)
+        .with_policy(execution_policy(
+            options.timeout_seconds,
+            options.max_retries,
+            options.retry_backoff_ms,
+        ));
     let report = replay_source_trace(&runner, &options.store, source_trace, options.mode).await?;
     if let Some(path) = options.trace_out {
         write_json(path, &report.trace).await?;

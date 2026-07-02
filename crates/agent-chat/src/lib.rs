@@ -11,8 +11,8 @@ pub use state::{
     chat_turn_llm_request, chat_turn_next_round,
 };
 pub use types::{
-    ChatEventStream, ChatToolCall, ChatToolResult, ChatTurnAdvance, ChatTurnEvent,
-    ChatTurnEventKind, ChatTurnRequest, ChatTurnState,
+    ChatEventStream, ChatResumeRequest, ChatToolCall, ChatToolExecution, ChatToolResult,
+    ChatTurnAdvance, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnState,
 };
 
 pub(crate) use events::{
@@ -63,6 +63,7 @@ mod tests {
                 tools: vec![],
                 metadata: json!({}),
                 max_tool_rounds: 4,
+                tool_execution: ChatToolExecution::Runtime,
             })
             .collect::<Vec<_>>()
             .await
@@ -112,6 +113,7 @@ mod tests {
                 tools: vec![],
                 metadata: json!({}),
                 max_tool_rounds: 4,
+                tool_execution: ChatToolExecution::Runtime,
             })
             .collect::<Vec<_>>()
             .await
@@ -154,6 +156,7 @@ mod tests {
                 tools: vec![],
                 metadata: json!({"source": "test"}),
                 max_tool_rounds: 4,
+                tool_execution: ChatToolExecution::Runtime,
             })
             .collect::<Vec<_>>()
             .await
@@ -177,6 +180,90 @@ mod tests {
         assert_eq!(metadata["agent_id"], "chat");
     }
 
+    #[tokio::test]
+    async fn chat_turn_resumes_from_state_and_tool_results() {
+        let initial = chat_turn_initial_state(&ChatTurnRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            turn_id: Some("turn_resume".to_owned()),
+            surface: Some("agent_tui".to_owned()),
+            mode: Some("natural_language".to_owned()),
+            session_id: Some("session_1".to_owned()),
+            thread_id: Some("thread_1".to_owned()),
+            agent_id: Some("chat".to_owned()),
+            provider: "mock".to_owned(),
+            model: "mock-model".to_owned(),
+            messages: vec![user_message("use a tool")],
+            temperature: None,
+            max_output_tokens: None,
+            tools: vec![],
+            metadata: json!({}),
+            max_tool_rounds: 4,
+            tool_execution: ChatToolExecution::Runtime,
+        })
+        .expect("initial state");
+        let response = LlmResponse {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock-model".to_owned(),
+            content: String::new(),
+            finish_reason: LlmFinishReason::ToolCall,
+            object: None,
+            usage: None,
+            metadata: json!({}),
+        };
+        let pending = match chat_turn_apply_response(
+            initial,
+            "",
+            vec![ChatToolCall {
+                id: "call_1".to_owned(),
+                name: "echo".to_owned(),
+                input: json!({"value": "ok"}),
+            }],
+            &response,
+        )
+        .expect("requires tools")
+        {
+            ChatTurnAdvance::RequiresToolResults { state, .. } => state,
+            ChatTurnAdvance::Completed { .. } => panic!("expected tool results"),
+        };
+
+        let runner = ChatTurnRunner::new(
+            Arc::new(MockLlmProvider::new("mock", "mock-model", "resumed")),
+            Arc::new(TestServices),
+        );
+        let events = runner
+            .resume(ChatResumeRequest {
+                protocol_version: PROTOCOL_VERSION.to_owned(),
+                state: pending,
+                tool_results: vec![ChatToolResult {
+                    tool_call_id: "call_1".to_owned(),
+                    tool_name: "echo".to_owned(),
+                    output: json!({"value": "ok"}),
+                    is_error: false,
+                }],
+            })
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("events ok");
+
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == ChatTurnEventKind::ToolResult)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.content.as_deref() == Some("resumed"))
+        );
+        assert!(events.iter().any(|event| {
+            event.kind == ChatTurnEventKind::RoundFinished
+                && event.metadata["status"] == Value::String("completed".to_owned())
+        }));
+    }
+
     #[test]
     fn chat_turn_state_applies_tool_results_for_resume() {
         let state = chat_turn_initial_state(&ChatTurnRequest {
@@ -195,6 +282,7 @@ mod tests {
             tools: vec![],
             metadata: json!({}),
             max_tool_rounds: 4,
+            tool_execution: ChatToolExecution::Runtime,
         })
         .expect("initial state");
         let response = LlmResponse {

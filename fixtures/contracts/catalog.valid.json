@@ -46,7 +46,9 @@
   "proposal_kinds": [
     {
       "kind": "fake",
-      "tool_name": "propose_fake"
+      "tool_name": "propose_fake",
+      "risk": "medium",
+      "approval_policy": "manual"
     }
   ],
   "prompt_blocks": [

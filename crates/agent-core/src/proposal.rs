@@ -3,12 +3,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::{PROTOCOL_VERSION, ProposalId, RunId, protocol_version};
+use crate::{PROTOCOL_VERSION, ProposalId, RunId, ToolRisk, protocol_version};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProposalKindSpec {
     pub kind: String,
     pub tool_name: String,
+    #[serde(default = "default_proposal_risk")]
+    pub risk: ToolRisk,
+    #[serde(default)]
+    pub approval_policy: ProposalApprovalPolicy,
+}
+
+impl ProposalKindSpec {
+    pub fn approval_required(&self) -> bool {
+        matches!(self.approval_policy, ProposalApprovalPolicy::Manual)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalApprovalPolicy {
+    #[default]
+    Manual,
+    AutoApprove,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -38,6 +56,12 @@ pub struct ProposalEnvelope {
     pub summary: String,
     #[serde(default)]
     pub payload: Value,
+    #[serde(default = "default_proposal_risk")]
+    pub risk: ToolRisk,
+    #[serde(default)]
+    pub approval_policy: ProposalApprovalPolicy,
+    #[serde(default = "default_approval_required")]
+    pub approval_required: bool,
     pub status: ProposalStatus,
     #[schemars(with = "String")]
     #[serde(with = "time::serde::rfc3339")]
@@ -63,10 +87,23 @@ impl ProposalEnvelope {
             kind: kind.into(),
             summary: summary.into(),
             payload,
+            risk: default_proposal_risk(),
+            approval_policy: ProposalApprovalPolicy::Manual,
+            approval_required: true,
             status: ProposalStatus::PendingApproval,
             created_at: OffsetDateTime::now_utc(),
             expires_at: None,
         }
+    }
+
+    pub fn with_kind_policy(mut self, kind: &ProposalKindSpec) -> Self {
+        self.risk = kind.risk.clone();
+        self.approval_policy = kind.approval_policy;
+        self.approval_required = kind.approval_required();
+        if !self.approval_required && self.status == ProposalStatus::PendingApproval {
+            self.status = ProposalStatus::Approved;
+        }
+        self
     }
 }
 
@@ -88,4 +125,12 @@ pub struct ApprovalDecision {
 pub enum ApprovalDecisionKind {
     Approve,
     Deny,
+}
+
+fn default_proposal_risk() -> ToolRisk {
+    ToolRisk::Medium
+}
+
+fn default_approval_required() -> bool {
+    true
 }

@@ -17,7 +17,7 @@ pub struct ToolSpec {
     pub metadata: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRisk {
     ReadOnly,

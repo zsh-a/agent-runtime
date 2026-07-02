@@ -1,0 +1,8 @@
+{
+  "run_id": "run_http_agent_1",
+  "input": {
+    "message": "hello"
+  },
+  "session_id": "session_http_1",
+  "thread_id": "thread_http_1"
+}

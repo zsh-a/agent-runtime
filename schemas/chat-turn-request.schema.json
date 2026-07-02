@@ -27,7 +27,12 @@
       "default": []
     },
     "metadata": { "type": "object", "default": {} },
-    "max_tool_rounds": { "type": "integer", "minimum": 1, "default": 4 }
+    "max_tool_rounds": { "type": "integer", "minimum": 1, "default": 4 },
+    "tool_execution": {
+      "type": "string",
+      "enum": ["runtime", "client"],
+      "default": "runtime"
+    }
   },
   "additionalProperties": false,
   "$defs": {

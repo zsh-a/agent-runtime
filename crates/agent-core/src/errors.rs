@@ -70,6 +70,18 @@ impl AgentError {
             },
         }
     }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            record: AgentErrorRecord {
+                kind: AgentErrorKind::Cancelled,
+                code: "cancelled".to_owned(),
+                message: message.into(),
+                retryable: false,
+                details: json!({}),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Error)]

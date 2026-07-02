@@ -63,8 +63,43 @@ paths:
               schema:
                 type: string
                 description: Each SSE data frame is a ChatTurnEvent JSON object from chat-turn-event.schema.json.
+        "400":
+          description: Request body failed JSON or schema validation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Chat turn failed before streaming started.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /chat/resume:
+    post:
+      operationId: streamChatResume
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/chat-resume-request.schema.json"
+      responses:
+        "200":
+          description: Server-sent event stream of resumed chat turn events.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Each SSE data frame is a ChatTurnEvent JSON object from chat-turn-event.schema.json.
+        "400":
+          description: Request body failed JSON or schema validation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Chat resume failed before streaming started.
           content:
             application/json:
               schema:
@@ -170,14 +205,37 @@ paths:
             pattern: "^run_"
       responses:
         "200":
-          description: Server-sent event stream of persisted trace events.
+          description: Server-sent event stream of active run events when the run is live, otherwise persisted trace events.
           content:
             text/event-stream:
               schema:
                 type: string
-                description: Each SSE data frame is a TraceEvent JSON object from trace.schema.json; agent_runtime_step frames include payload.run_state.
+                description: Each SSE data frame is a TraceEvent JSON object from trace.schema.json.
         "404":
           description: Trace was not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /runs/{run_id}/cancel:
+    post:
+      operationId: cancelRun
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^run_"
+      responses:
+        "200":
+          description: Cancellation request result. Active runs receive cancellation; terminal runs report their current status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelRunResponse"
+        "404":
+          description: Run was not found.
           content:
             application/json:
               schema:
@@ -477,18 +535,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                input:
-                  type: object
-                  default: {}
-                session_id:
-                  type: string
-                  pattern: "^session_"
-                thread_id:
-                  type: string
-                  pattern: "^thread_"
-              additionalProperties: false
+              $ref: "../schemas/http-agent-run-request.schema.json"
       responses:
         "200":
           description: Completed runtime invocation envelope.
@@ -496,6 +543,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AgentRunResponse"
+        "400":
+          description: Request body failed JSON or schema validation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Runtime invocation failed.
           content:
@@ -548,6 +601,28 @@ components:
           $ref: "../schemas/run-result.schema.json"
         trace:
           $ref: "../schemas/trace.schema.json"
+      additionalProperties: false
+    CancelRunResponse:
+      type: object
+      required: [cancellation_requested, message, run_id]
+      properties:
+        cancellation_requested:
+          type: boolean
+        message:
+          type: string
+        run_id:
+          type: string
+          pattern: "^run_"
+        status:
+          type: string
+          enum:
+            - running
+            - completed
+            - skipped
+            - failed
+            - cancelled
+            - timed_out
+            - abandoned
       additionalProperties: false
     AgentRunRecord:
       type: object
@@ -673,6 +748,7 @@ components:
         - proposal_approved_count
         - proposal_denied_count
         - proposal_applied_count
+        - artifact_ref_count
         - llm_total_tokens
       properties:
         protocol_version:
@@ -743,6 +819,9 @@ components:
           type: integer
           minimum: 0
         proposal_applied_count:
+          type: integer
+          minimum: 0
+        artifact_ref_count:
           type: integer
           minimum: 0
         llm_total_tokens:

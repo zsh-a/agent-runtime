@@ -6,12 +6,12 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, info, warn};
 
-use super::{
+use crate::{
     error::{tool_error, tool_error_from_json},
     process::ProcessToolHost,
 };
 
-pub(super) async fn call_tool(
+pub(crate) async fn call_tool(
     host: &ProcessToolHost,
     name: &str,
     input: Value,

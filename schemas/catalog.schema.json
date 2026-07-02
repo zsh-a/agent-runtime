@@ -115,7 +115,17 @@
       "required": ["kind", "tool_name"],
       "properties": {
         "kind": { "type": "string", "minLength": 1 },
-        "tool_name": { "type": "string", "minLength": 1 }
+        "tool_name": { "type": "string", "minLength": 1 },
+        "risk": {
+          "type": "string",
+          "enum": ["read_only", "low", "medium", "high"],
+          "default": "medium"
+        },
+        "approval_policy": {
+          "type": "string",
+          "enum": ["manual", "auto_approve"],
+          "default": "manual"
+        }
       },
       "additionalProperties": false
     },

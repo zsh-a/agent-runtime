@@ -14,7 +14,9 @@ use agent_core::{
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
+use tokio::sync::broadcast;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 
@@ -296,6 +298,80 @@ async fn runner_retries_retryable_agent_errors() {
 }
 
 #[tokio::test]
+async fn runner_can_cancel_active_run_and_broadcast_events() {
+    let registry = InMemoryAgentRegistry::shared(vec![Arc::new(BlockingAgent)]);
+    let run_store = agent_store::InMemoryRunStore::shared();
+    let state_store = agent_store::InMemoryStateStore::shared();
+    let services = Arc::new(NoopServices { state_store });
+    let runner =
+        AgentRunner::new(registry, run_store.clone(), services).with_policy(ExecutionPolicy {
+            timeout: Duration::from_secs(30),
+            max_retries: 0,
+            retry_backoff: Duration::ZERO,
+            max_concurrent_runs: 1,
+        });
+    let cancellation = CancellationToken::new();
+    let (events, mut receiver) = broadcast::channel(16);
+    let request = RunRequest {
+        run_id: Some(RunId("run_cancel_test".to_owned())),
+        ..run_request()
+    };
+    let run = tokio::spawn({
+        let cancellation = cancellation.clone();
+        async move {
+            runner
+                .run_once_with_control(
+                    "blocking",
+                    request,
+                    RunControl {
+                        cancellation,
+                        trace_events: Some(events),
+                    },
+                )
+                .await
+        }
+    });
+
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("run_started event arrives")
+            .expect("event channel stays open");
+        if event.kind == "run_started" {
+            break;
+        }
+    }
+    cancellation.cancel();
+
+    let outcome = run
+        .await
+        .expect("run task joins")
+        .expect("cancelled run returns outcome");
+
+    assert_eq!(outcome.result.status, AgentRunStatus::Cancelled);
+    assert_eq!(
+        outcome.result.error.as_ref().expect("cancel error").code,
+        "cancelled"
+    );
+    let event_kinds = outcome
+        .trace
+        .events
+        .iter()
+        .map(|event| event.kind.as_str())
+        .collect::<Vec<_>>();
+    assert!(event_kinds.contains(&"run_started"));
+    assert!(event_kinds.contains(&"run_cancel_requested"));
+    assert!(event_kinds.contains(&"run_cancelled"));
+    assert!(event_kinds.contains(&"run_finished"));
+    let stored = run_store
+        .get_run(&outcome.result.run_id)
+        .await
+        .expect("run store reads")
+        .expect("run record exists");
+    assert_eq!(stored.status, AgentRunStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn recovery_abandons_only_stale_running_runs() {
     let store = agent_store::InMemoryRunStore::shared();
     let now = OffsetDateTime::now_utc();
@@ -438,6 +514,38 @@ impl Agent for FlakyAgent {
             ctx.now,
             json!({"attempt": attempt}),
             Some("flaky run completed".to_owned()),
+        ))
+    }
+}
+
+struct BlockingAgent;
+
+#[async_trait]
+impl Agent for BlockingAgent {
+    fn spec(&self) -> AgentSpec {
+        AgentSpec {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            id: "blocking".to_owned(),
+            name: "Blocking".to_owned(),
+            description: None,
+            version: "0.1.0".to_owned(),
+            schedule: ScheduleSpec::Manual,
+            capabilities: vec!["debug.blocking".to_owned()],
+            metadata: json!({}),
+        }
+    }
+
+    async fn run(&self, ctx: AgentContext) -> Result<AgentRunResult, AgentError> {
+        ctx.trace
+            .emit(agent_core::TraceEvent::new("blocking.started", json!({})))
+            .await?;
+        sleep(Duration::from_secs(60)).await;
+        Ok(AgentRunResult::completed(
+            ctx.run_id,
+            "blocking",
+            ctx.now,
+            json!({}),
+            Some("blocking completed".to_owned()),
         ))
     }
 }

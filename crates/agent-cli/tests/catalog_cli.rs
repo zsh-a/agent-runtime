@@ -926,6 +926,7 @@ fn metrics_summary_counts_runs_tools_and_proposals() {
     assert_eq!(metrics["proposal_count"], 1);
     assert_eq!(metrics["proposal_created_count"], 1);
     assert_eq!(metrics["proposals_by_status"]["pending_approval"], 1);
+    assert_eq!(metrics["artifact_ref_count"], 0);
     assert_eq!(metrics["replay_count"], 0);
     assert_eq!(metrics["llm_total_tokens"], 0);
 }
@@ -1425,6 +1426,135 @@ fn http_server_handles_catalog_summary_and_agent_run() {
 }
 
 #[test]
+fn http_server_can_cancel_active_run_and_stream_live_events() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("http-cancel-store");
+    let port = reserve_local_port();
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let child = std::process::Command::new(agent_bin)
+        .args([
+            "serve",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("HTTP server starts");
+    let _server = ChildGuard(child);
+    wait_for_http_server(port);
+
+    let run_id = "run_http_cancel";
+    let run_body = format!(r#"{{"run_id":"{run_id}","input":{{"sleep_ms":3000}}}}"#);
+    let run_path = "/agents/execution_review/run".to_owned();
+    let run_handle = std::thread::spawn({
+        let run_body = run_body.clone();
+        move || http_json_request(port, "POST", &run_path, Some(&run_body))
+    });
+
+    let inspected = http_json_request(port, "GET", &format!("/runs/{run_id}"), None);
+    assert_eq!(inspected["run_id"], run_id);
+    assert_eq!(inspected["status"], "running");
+
+    let events_handle = std::thread::spawn({
+        let path = format!("/runs/{run_id}/events");
+        move || http_text_request(port, "GET", &path, None)
+    });
+    std::thread::sleep(Duration::from_millis(100));
+
+    let cancelled = http_json_request(port, "POST", &format!("/runs/{run_id}/cancel"), Some("{}"));
+    assert_eq!(cancelled["run_id"], run_id);
+    assert_eq!(cancelled["cancellation_requested"], true);
+
+    let run = run_handle.join().expect("run request joins");
+    assert_eq!(run["result"]["run_id"], run_id);
+    assert_eq!(run["result"]["status"], "cancelled");
+    assert_eq!(run["result"]["error"]["code"], "cancelled");
+
+    let events = events_handle.join().expect("events request joins");
+    assert!(events.contains("content-type: text/event-stream"));
+    assert!(events.contains("event: run_cancel_requested"));
+    assert!(events.contains("event: run_cancelled"));
+    assert!(events.contains("event: run_finished"));
+    assert!(events.contains(r#""status":"cancelled""#));
+
+    let inspected = http_json_request(port, "GET", &format!("/runs/{run_id}"), None);
+    assert_eq!(inspected["status"], "cancelled");
+    let trace = http_json_request(port, "GET", &format!("/runs/{run_id}/trace"), None);
+    let event_kinds = trace["events"]
+        .as_array()
+        .expect("trace events")
+        .iter()
+        .filter_map(|event| event["kind"].as_str())
+        .collect::<Vec<_>>();
+    assert!(event_kinds.contains(&"run_cancel_requested"));
+    assert!(event_kinds.contains(&"run_cancelled"));
+    assert!(event_kinds.contains(&"run_finished"));
+}
+
+#[test]
+fn http_server_validates_json_request_schemas() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("http-schema-store");
+    let port = reserve_local_port();
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let child = std::process::Command::new(agent_bin)
+        .args([
+            "serve",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("HTTP server starts");
+    let _server = ChildGuard(child);
+    wait_for_http_server(port);
+
+    let run_error = try_http_text_request(
+        port,
+        "POST",
+        "/agents/execution_review/run",
+        Some(r#"{"input":{},"unexpected":true}"#),
+    )
+    .expect_err("extra run field is rejected");
+    assert!(run_error.contains("HTTP/1.1 400"));
+    assert!(run_error.contains("schema_validation_failed"));
+
+    let chat_error = try_http_text_request(
+        port,
+        "POST",
+        "/chat/turn",
+        Some(r#"{"protocol_version":"agent.v1","provider":"mock","model":"mock-model"}"#),
+    )
+    .expect_err("chat without messages is rejected");
+    assert!(chat_error.contains("HTTP/1.1 400"));
+    assert!(chat_error.contains("schema_validation_failed"));
+
+    let resume_error = try_http_text_request(
+        port,
+        "POST",
+        "/chat/resume",
+        Some(r#"{"protocol_version":"agent.v1","tool_results":[]}"#),
+    )
+    .expect_err("chat resume without state is rejected");
+    assert!(resume_error.contains("HTTP/1.1 400"));
+    assert!(resume_error.contains("schema_validation_failed"));
+}
+
+#[test]
 fn http_server_streams_chat_turn_events() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = dir.path().join("http-chat-store");
@@ -1456,7 +1586,7 @@ fn http_server_streams_chat_turn_events() {
         "POST",
         "/chat/turn",
         Some(
-            r#"{"turn_id":"turn_http_1","agent_id":"execution_review","provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}],"metadata":{"source":"http_test"}}"#,
+            r#"{"protocol_version":"agent.v1","turn_id":"turn_http_1","agent_id":"execution_review","provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}],"metadata":{"source":"http_test"}}"#,
         ),
     );
 
@@ -1468,6 +1598,116 @@ fn http_server_streams_chat_turn_events() {
     assert!(response.contains(r#""content":"hello over sse""#));
     assert!(response.contains(r#""kind":"round_finished""#));
     assert!(response.contains(r#""kind":"done""#));
+}
+
+#[test]
+fn http_server_resumes_chat_turn_and_records_session_steps() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("http-chat-resume-store");
+    let port = reserve_local_port();
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let child = std::process::Command::new(agent_bin)
+        .args([
+            "serve",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--mock-response",
+            "resumed over sse",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("HTTP server starts");
+    let _server = ChildGuard(child);
+    wait_for_http_server(port);
+
+    let created = http_json_request(
+        port,
+        "POST",
+        "/sessions",
+        Some(r#"{"title":"Chat resume","metadata":{"source":"test"}}"#),
+    );
+    let session_id = created["session"]["session_id"]
+        .as_str()
+        .expect("session id is string");
+    let thread_id = created["thread"]["thread_id"]
+        .as_str()
+        .expect("thread id is string");
+    let resume_body = serde_json::json!({
+        "protocol_version": "agent.v1",
+        "state": {
+            "protocol_version": "agent.v1",
+            "turn_id": "turn_resume_http",
+            "surface": "ai_chat",
+            "mode": "chat",
+            "session_id": session_id,
+            "thread_id": thread_id,
+            "agent_id": "execution_review",
+            "provider": "mock",
+            "model": "mock-model",
+            "messages": [
+                {"role": "user", "content": "read task", "metadata": {}},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "read_task",
+                            "input": {"id": "task_1"}
+                        }
+                    ],
+                    "metadata": {}
+                }
+            ],
+            "tools": [],
+            "metadata": {"source": "http_test"},
+            "max_tool_rounds": 4,
+            "round": 1,
+            "pending_tool_calls": [
+                {"id": "call_1", "name": "read_task", "input": {"id": "task_1"}}
+            ],
+            "tool_execution": "client"
+        },
+        "tool_results": [
+            {
+                "tool_call_id": "call_1",
+                "tool_name": "read_task",
+                "output": {"title": "Task title"},
+                "is_error": false
+            }
+        ]
+    })
+    .to_string();
+
+    let response = http_text_request(port, "POST", "/chat/resume", Some(&resume_body));
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.contains("content-type: text/event-stream"));
+    assert!(response.contains(r#""kind":"tool_result""#));
+    assert!(response.contains(r#""content":"resumed over sse""#));
+    assert!(response.contains(r#""status":"completed""#));
+    assert!(response.contains(r#""kind":"done""#));
+
+    let shown = http_json_request(port, "GET", &format!("/sessions/{session_id}"), None);
+    let steps = shown["threads"][0]["steps"]
+        .as_array()
+        .expect("steps are array");
+    let kinds = steps
+        .iter()
+        .filter_map(|step| step["kind"].as_str())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&"tool_call"));
+    assert!(kinds.contains(&"llm_round"));
+    assert!(kinds.contains(&"state_update"));
+    assert!(steps.iter().any(|step| {
+        step["kind"] == "llm_round" && step["payload"]["event"]["metadata"]["status"] == "completed"
+    }));
 }
 
 #[test]
@@ -1663,6 +1903,75 @@ fn http_server_persists_and_decides_proposals() {
     assert_eq!(metrics["proposal_approved_count"], 1);
     assert_eq!(metrics["proposal_applied_count"], 1);
     assert_eq!(metrics["proposals_by_status"]["undone"], 1);
+}
+
+#[test]
+fn http_server_applies_proposal_kind_policy() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("http-proposal-policy-store");
+    let catalog_path = dir.path().join("catalog.auto-approve.json");
+    let mut catalog = read_json("../../fixtures/contracts/catalog.valid.json");
+    catalog["proposal_kinds"][0]["risk"] = serde_json::json!("low");
+    catalog["proposal_kinds"][0]["approval_policy"] = serde_json::json!("auto_approve");
+    std::fs::write(
+        &catalog_path,
+        serde_json::to_vec_pretty(&catalog).expect("catalog encodes"),
+    )
+    .expect("catalog written");
+    let port = reserve_local_port();
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let child = std::process::Command::new(agent_bin)
+        .args([
+            "serve",
+            "--catalog",
+            catalog_path.to_str().expect("utf8 catalog path"),
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--mock-tool",
+            r#"propose_fake={"policy_action":true}"#,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("HTTP server starts");
+    let _server = ChildGuard(child);
+    wait_for_http_server(port);
+
+    let run = http_json_request(
+        port,
+        "POST",
+        "/agents/execution_review/run",
+        Some(r#"{"input":{"message":"proposal policy trace seed"}}"#),
+    );
+    let run_id = run["result"]["run_id"].as_str().expect("run_id is string");
+    let created = http_json_request(
+        port,
+        "POST",
+        "/proposals",
+        Some(&format!(
+            r#"{{"run_id":"{run_id}","agent_id":"execution_review","kind":"fake","summary":"Auto proposal","payload":{{"value":17}}}}"#
+        )),
+    );
+    let proposal_id = created["proposal_id"]
+        .as_str()
+        .expect("proposal id is string");
+    assert_eq!(created["risk"], "low");
+    assert_eq!(created["approval_policy"], "auto_approve");
+    assert_eq!(created["approval_required"], false);
+    assert_eq!(created["status"], "approved");
+
+    let applied = http_json_request(
+        port,
+        "POST",
+        &format!("/proposals/{proposal_id}/apply"),
+        Some("{}"),
+    );
+    assert_eq!(applied["proposal"]["status"], "applied");
+    assert_eq!(applied["tool_output"]["policy_action"], true);
 }
 
 #[test]
@@ -2605,7 +2914,7 @@ fn http_request_complete(bytes: &[u8]) -> bool {
 }
 
 fn wait_for_http_server(port: u16) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if try_http_json_request(port, "GET", "/healthz", None).is_ok() {
             return;

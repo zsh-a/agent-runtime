@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use agent_chat::{ChatToolResult, ChatTurnEvent, ChatTurnRequest, ChatTurnState};
+use agent_chat::{
+    ChatResumeRequest, ChatToolResult, ChatTurnEvent, ChatTurnRequest, ChatTurnState,
+};
 use agent_core::{
     AgentRunResult, AgentRuntimeCatalog, AgentTrace, ApprovalDecision, HookEvent, PromptManifest,
     ProposalEnvelope, RunRequest, SessionRecord, StepRecord, ThreadRecord,
@@ -14,6 +16,10 @@ fn committed_fixtures_match_json_schemas() {
     assert_valid(
         "schemas/run-request.schema.json",
         "fixtures/contracts/run-request.valid.json",
+    );
+    assert_valid(
+        "schemas/http-agent-run-request.schema.json",
+        "fixtures/contracts/http-agent-run-request.valid.json",
     );
     assert_invalid(
         "schemas/run-request.schema.json",
@@ -135,6 +141,10 @@ fn committed_fixtures_match_json_schemas() {
         "schemas/chat-turn-request.schema.json",
         "fixtures/contracts/chat-turn-request.valid.json",
     );
+    assert_valid(
+        "schemas/chat-resume-request.schema.json",
+        "fixtures/contracts/chat-resume-request.valid.json",
+    );
     assert_invalid(
         "schemas/chat-turn-request.schema.json",
         "fixtures/contracts/chat-turn-request.invalid.missing-messages.json",
@@ -182,6 +192,7 @@ fn committed_valid_fixtures_deserialize_to_runtime_types() {
     assert_deserializes::<LlmResponse>("fixtures/contracts/llm-response.valid.json");
     assert_deserializes::<LlmResponse>("fixtures/contracts/llm-response.structured.valid.json");
     assert_deserializes::<ChatTurnRequest>("fixtures/contracts/chat-turn-request.valid.json");
+    assert_deserializes::<ChatResumeRequest>("fixtures/contracts/chat-resume-request.valid.json");
     assert_deserializes::<ChatTurnState>(
         "fixtures/contracts/chat-turn-state.requires-tool-results.valid.json",
     );
@@ -237,11 +248,13 @@ fn openapi_contract_documents_http_server_routes() {
     assert!(openapi["paths"]["/catalog/summary"]["get"].is_object());
     assert!(openapi["paths"]["/metrics/summary"]["get"].is_object());
     assert!(openapi["paths"]["/chat/turn"]["post"].is_object());
+    assert!(openapi["paths"]["/chat/resume"]["post"].is_object());
     assert!(openapi["paths"]["/tools"]["get"].is_object());
     assert!(openapi["paths"]["/runs"]["get"].is_object());
     assert!(openapi["paths"]["/runs/{run_id}"]["get"].is_object());
     assert!(openapi["paths"]["/runs/{run_id}/trace"]["get"].is_object());
     assert!(openapi["paths"]["/runs/{run_id}/events"]["get"].is_object());
+    assert!(openapi["paths"]["/runs/{run_id}/cancel"]["post"].is_object());
     assert!(openapi["paths"]["/runs/{run_id}/replay"]["post"].is_object());
     assert!(openapi["paths"]["/tools/{tool_name}/call"]["post"].is_object());
     assert!(openapi["paths"]["/proposals"]["get"].is_object());
@@ -261,6 +274,16 @@ fn openapi_contract_documents_http_server_routes() {
         "#/components/schemas/AgentRunResponse"
     );
     assert_eq!(
+        openapi["paths"]["/agents/{agent_id}/run"]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "../schemas/http-agent-run-request.schema.json"
+    );
+    assert_eq!(
+        openapi["paths"]["/runs/{run_id}/cancel"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/CancelRunResponse"
+    );
+    assert_eq!(
         openapi["paths"]["/tools/{tool_name}/call"]["post"]["responses"]["200"]["content"]["application/json"]
             ["schema"]["$ref"],
         "#/components/schemas/ToolCallResponse"
@@ -272,6 +295,11 @@ fn openapi_contract_documents_http_server_routes() {
     );
     assert_eq!(
         openapi["components"]["schemas"]["RuntimeMetricsSummary"]["properties"]["tool_call_count"]
+            ["minimum"],
+        0
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["RuntimeMetricsSummary"]["properties"]["artifact_ref_count"]
             ["minimum"],
         0
     );
@@ -305,10 +333,20 @@ fn openapi_contract_documents_http_server_routes() {
     assert_eq!(
         openapi["paths"]["/runs/{run_id}/events"]["get"]["responses"]["200"]["content"]["text/event-stream"]
             ["schema"]["description"],
-        "Each SSE data frame is a TraceEvent JSON object from trace.schema.json; agent_runtime_step frames include payload.run_state."
+        "Each SSE data frame is a TraceEvent JSON object from trace.schema.json."
     );
     assert_eq!(
         openapi["paths"]["/chat/turn"]["post"]["responses"]["200"]["content"]["text/event-stream"]
+            ["schema"]["description"],
+        "Each SSE data frame is a ChatTurnEvent JSON object from chat-turn-event.schema.json."
+    );
+    assert_eq!(
+        openapi["paths"]["/chat/resume"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+            ["$ref"],
+        "../schemas/chat-resume-request.schema.json"
+    );
+    assert_eq!(
+        openapi["paths"]["/chat/resume"]["post"]["responses"]["200"]["content"]["text/event-stream"]
             ["schema"]["description"],
         "Each SSE data frame is a ChatTurnEvent JSON object from chat-turn-event.schema.json."
     );

@@ -1,9 +1,10 @@
 use agent_core::{
-    AgentRunRecord, AgentRunStore, AgentSessionStore, RunId, RunScope, SessionRecord, StepRecord,
-    ThreadRecord,
+    AgentLockStore, AgentRunRecord, AgentRunStore, AgentSessionStore, RunId, RunScope,
+    SessionRecord, StepRecord, ThreadRecord,
 };
 use camino::Utf8PathBuf;
 use serde_json::json;
+use std::time::Duration;
 
 use super::*;
 
@@ -63,6 +64,34 @@ async fn file_session_store_round_trips_session_thread_and_step() {
             .step_id,
         step.step_id
     );
+}
+
+#[tokio::test]
+async fn file_lock_store_coordinates_lease_owners() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).expect("utf8 temp path");
+    let store = FileLockStore::new(root).await.expect("store opens");
+
+    let first = store
+        .acquire("agent:echo:scope:global", "run_1", Duration::from_secs(60))
+        .await
+        .expect("lock acquired")
+        .expect("first owner gets lease");
+    assert_eq!(first.owner, "run_1");
+
+    let contended = store
+        .acquire("agent:echo:scope:global", "run_2", Duration::from_secs(60))
+        .await
+        .expect("contended lock checks");
+    assert!(contended.is_none());
+
+    store.release(first).await.expect("lock released");
+    let second = store
+        .acquire("agent:echo:scope:global", "run_2", Duration::from_secs(60))
+        .await
+        .expect("second lock acquired")
+        .expect("second owner gets released lease");
+    assert_eq!(second.owner, "run_2");
 }
 
 #[tokio::test]

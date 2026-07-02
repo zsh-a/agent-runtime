@@ -38,6 +38,7 @@ pub fn chat_turn_initial_state(request: &ChatTurnRequest) -> Result<ChatTurnStat
         max_tool_rounds: request.max_tool_rounds.max(1),
         round: 0,
         pending_tool_calls: Vec::new(),
+        tool_execution: request.tool_execution,
     })
 }
 
@@ -68,6 +69,14 @@ pub fn chat_turn_apply_response(
     let round = chat_turn_next_round(&state);
     state.round = round;
     if !matches!(response.finish_reason, LlmFinishReason::ToolCall) || tool_calls.is_empty() {
+        let content = if assistant_text.is_empty() {
+            response.content.as_str()
+        } else {
+            assistant_text
+        };
+        if !content.is_empty() {
+            state.messages.push(assistant_text_message(content));
+        }
         state.pending_tool_calls.clear();
         return Ok(ChatTurnAdvance::Completed {
             state,
@@ -104,6 +113,12 @@ pub fn chat_turn_apply_tool_results(
             .ok_or_else(|| {
                 ChatError::validation(format!("missing tool result for tool call '{}'", call.id))
             })?;
+        if result.tool_name != call.name {
+            return Err(ChatError::validation(format!(
+                "tool result '{}' uses tool '{}' but pending call requires '{}'",
+                result.tool_call_id, result.tool_name, call.name
+            )));
+        }
         result_blocks.push(tool_result_block(
             &call.id,
             ToolOutput {
@@ -144,6 +159,15 @@ fn assistant_message(text: &str, tool_calls: &[ChatToolCall]) -> LlmMessage {
     LlmMessage {
         role: LlmRole::Assistant,
         content: Value::Array(blocks),
+        name: None,
+        metadata: json!({}),
+    }
+}
+
+fn assistant_text_message(text: &str) -> LlmMessage {
+    LlmMessage {
+        role: LlmRole::Assistant,
+        content: Value::String(text.to_owned()),
         name: None,
         metadata: json!({}),
     }

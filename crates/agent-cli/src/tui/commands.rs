@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use agent_chat::{ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner};
+use agent_chat::{
+    ChatToolExecution, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner,
+};
 use agent_core::{
     AgentRegistry, AgentRunStore, AgentServices, PROTOCOL_VERSION, RunId, RunRequest, ToolRisk,
     ToolSpec,
 };
 use agent_llm::{LlmMessage, LlmRole, user_message};
 use agent_runtime::AgentRunner;
-use agent_store::{FileProposalStore, FileRunStore};
+use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use camino::Utf8PathBuf;
 use futures::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
@@ -122,6 +124,11 @@ async fn run_agent_with_input(
             .await
             .into_diagnostic()?,
     );
+    let lock_store = Arc::new(
+        FileLockStore::new(store_path.clone())
+            .await
+            .into_diagnostic()?,
+    );
     let proposal_store = Arc::new(
         FileProposalStore::new(store_path.clone())
             .await
@@ -131,11 +138,13 @@ async fn run_agent_with_input(
         state.options.tool_overrides.clone(),
         proposal_store,
     ));
-    let runner = AgentRunner::new(registry, store, services).with_policy(execution_policy(
-        state.options.timeout_seconds,
-        state.options.max_retries,
-        state.options.retry_backoff_ms,
-    ));
+    let runner = AgentRunner::new(registry, store, services)
+        .with_lock_store(lock_store)
+        .with_policy(execution_policy(
+            state.options.timeout_seconds,
+            state.options.max_retries,
+            state.options.retry_backoff_ms,
+        ));
     let outcome = runner
         .run_once(
             agent_id,
@@ -219,6 +228,7 @@ async fn run_chat_turn(state: &mut TuiState, agent_id: &str, text: &str) -> Resu
             "mode": "natural_language",
         }),
         max_tool_rounds: state.options.chat.max_tool_rounds,
+        tool_execution: ChatToolExecution::Runtime,
     };
 
     let mut stream = runner.stream(request);
@@ -285,6 +295,7 @@ async fn run_natural_language_stream(
             "mode": "natural_language",
         }),
         max_tool_rounds: options.chat.max_tool_rounds,
+        tool_execution: ChatToolExecution::Runtime,
     };
 
     let mut stream = runner.stream(request);

@@ -1,4 +1,7 @@
-use agent_core::{AgentSessionStore, SessionId, SessionRecord, StepRecord, ThreadId, ThreadRecord};
+use agent_chat::{ChatTurnEvent, ChatTurnEventKind};
+use agent_core::{
+    AgentSessionStore, SessionId, SessionRecord, StepKind, StepRecord, ThreadId, ThreadRecord,
+};
 use agent_runtime::RunOutcome;
 use agent_store::FileSessionStore;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -105,6 +108,78 @@ pub(crate) async fn record_session_step(
         }),
     );
     store.create_step(step).await.into_diagnostic()
+}
+
+pub(crate) async fn ensure_thread(
+    store: &FileSessionStore,
+    thread_id: Option<&str>,
+) -> Result<Option<ThreadId>> {
+    let Some(thread_id) = thread_id else {
+        return Ok(None);
+    };
+    let thread_id = ThreadId(thread_id.to_owned());
+    store
+        .get_thread(&thread_id)
+        .await
+        .into_diagnostic()?
+        .ok_or_else(|| miette!("thread '{}' was not found", thread_id.0))?;
+    Ok(Some(thread_id))
+}
+
+pub(crate) async fn record_chat_event_step(
+    store: &FileSessionStore,
+    thread_id: &ThreadId,
+    event: &ChatTurnEvent,
+) -> Result<()> {
+    let Some(step) = chat_event_step(thread_id.clone(), event) else {
+        return Ok(());
+    };
+    store.create_step(step).await.into_diagnostic()
+}
+
+fn chat_event_step(thread_id: ThreadId, event: &ChatTurnEvent) -> Option<StepRecord> {
+    let payload = json!({"event": event});
+    match event.kind {
+        ChatTurnEventKind::RoundFinished => {
+            let status = event
+                .metadata
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("finished");
+            Some(StepRecord::new(
+                thread_id,
+                StepKind::LlmRound,
+                None,
+                Some(format!("chat round {} {status}", event.round)),
+                payload,
+            ))
+        }
+        ChatTurnEventKind::ToolResult => Some(StepRecord::new(
+            thread_id,
+            StepKind::ToolCall,
+            None,
+            event
+                .tool_name
+                .as_ref()
+                .map(|tool_name| format!("chat tool {tool_name}")),
+            payload,
+        )),
+        ChatTurnEventKind::Done => Some(StepRecord::new(
+            thread_id,
+            StepKind::StateUpdate,
+            None,
+            Some("chat turn done".to_owned()),
+            payload,
+        )),
+        ChatTurnEventKind::Error => Some(StepRecord::new(
+            thread_id,
+            StepKind::StateUpdate,
+            None,
+            Some("chat turn error".to_owned()),
+            payload,
+        )),
+        _ => None,
+    }
 }
 
 pub(crate) async fn show_session(

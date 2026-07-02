@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
 use agent_core::AgentServices;
-use agent_llm::{LlmEventKind, LlmProvider};
+use agent_llm::{LlmEventKind, LlmProvider, LlmResponse};
 use futures::stream;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    ChatError, ChatEventStream, ChatToolCall, ChatToolResult, ChatTurnAdvance, ChatTurnEvent,
-    ChatTurnEventKind, ChatTurnRequest, ToolOutput, chat_event_from_llm_event,
-    chat_turn_apply_response, chat_turn_apply_tool_results, chat_turn_initial_state,
-    chat_turn_llm_request, chat_turn_next_round, send_done, send_error, send_event, turn_metadata,
+    ChatError, ChatEventStream, ChatResumeRequest, ChatToolCall, ChatToolExecution, ChatToolResult,
+    ChatTurnAdvance, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnState, ToolOutput,
+    chat_event_from_llm_event, chat_turn_apply_response, chat_turn_apply_tool_results,
+    chat_turn_initial_state, chat_turn_llm_request, chat_turn_next_round, send_done, send_error,
+    send_event, turn_metadata,
 };
 
 #[derive(Clone)]
@@ -31,6 +32,18 @@ impl ChatTurnRunner {
         let services = self.services.clone();
         tokio::spawn(async move {
             run_chat_turn(provider, services, request, sender).await;
+        });
+        Box::pin(stream::unfold(receiver, |mut receiver| async move {
+            receiver.recv().await.map(|event| (event, receiver))
+        }))
+    }
+
+    pub fn resume(&self, request: ChatResumeRequest) -> ChatEventStream {
+        let (sender, receiver) = mpsc::channel(64);
+        let provider = self.provider.clone();
+        let services = self.services.clone();
+        tokio::spawn(async move {
+            run_chat_resume(provider, services, request, sender).await;
         });
         Box::pin(stream::unfold(receiver, |mut receiver| async move {
             receiver.recv().await.map(|event| (event, receiver))
@@ -57,7 +70,7 @@ async fn run_chat_turn(
         max_tool_rounds = request.max_tool_rounds,
         "starting chat turn",
     );
-    let mut state = match chat_turn_initial_state(&request) {
+    let state = match chat_turn_initial_state(&request) {
         Ok(state) => state,
         Err(error) => {
             warn!(
@@ -87,6 +100,95 @@ async fn run_chat_turn(
     )
     .await;
 
+    run_chat_state(provider, services, state, sender, turn_timer).await;
+}
+
+async fn run_chat_resume(
+    provider: Arc<dyn LlmProvider>,
+    services: Arc<dyn AgentServices>,
+    request: ChatResumeRequest,
+    sender: mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
+) {
+    let turn_timer = std::time::Instant::now();
+    let pending_calls = request.state.pending_tool_calls.clone();
+    let previous_round = request.state.round;
+    info!(
+        turn_id = request.state.turn_id.as_deref().unwrap_or("none"),
+        session_id = request.state.session_id.as_deref().unwrap_or("none"),
+        thread_id = request.state.thread_id.as_deref().unwrap_or("none"),
+        agent_id = request.state.agent_id.as_deref().unwrap_or("none"),
+        provider = %request.state.provider,
+        model = %request.state.model,
+        pending_tool_call_count = pending_calls.len(),
+        tool_result_count = request.tool_results.len(),
+        "resuming chat turn",
+    );
+    let state = match chat_turn_apply_tool_results(request.state, request.tool_results.clone()) {
+        Ok(state) => state,
+        Err(error) => {
+            warn!(
+                round = previous_round,
+                error_code = %error.record.code,
+                retryable = error.record.retryable,
+                "chat turn resume failed",
+            );
+            send_error(&sender, previous_round, error).await;
+            return;
+        }
+    };
+    send_event(
+        &sender,
+        ChatTurnEvent {
+            kind: ChatTurnEventKind::Started,
+            content: None,
+            response: None,
+            tool_call_id: None,
+            tool_name: None,
+            partial_input_json: None,
+            tool_input: None,
+            tool_output: None,
+            usage: None,
+            round: state.round,
+            metadata: turn_metadata(&state),
+        },
+    )
+    .await;
+    for call in pending_calls {
+        if let Some(result) = request
+            .tool_results
+            .iter()
+            .find(|result| result.tool_call_id == call.id)
+        {
+            send_event(
+                &sender,
+                ChatTurnEvent {
+                    kind: ChatTurnEventKind::ToolResult,
+                    content: None,
+                    response: None,
+                    tool_call_id: Some(call.id.clone()),
+                    tool_name: Some(call.name.clone()),
+                    partial_input_json: None,
+                    tool_input: Some(call.input.clone()),
+                    tool_output: Some(result.output.clone()),
+                    usage: None,
+                    round: state.round,
+                    metadata: json!({"is_error": result.is_error, "resumed": true}),
+                },
+            )
+            .await;
+        }
+    }
+
+    run_chat_state(provider, services, state, sender, turn_timer).await;
+}
+
+async fn run_chat_state(
+    provider: Arc<dyn LlmProvider>,
+    services: Arc<dyn AgentServices>,
+    mut state: ChatTurnState,
+    sender: mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
+    turn_timer: std::time::Instant,
+) {
     loop {
         let round = chat_turn_next_round(&state);
         let llm_request = chat_turn_llm_request(&state);
@@ -213,23 +315,6 @@ async fn run_chat_turn(
             )
             .await;
         }
-        send_event(
-            &sender,
-            ChatTurnEvent {
-                kind: ChatTurnEventKind::RoundFinished,
-                content: None,
-                response: Some(response.clone()),
-                tool_call_id: None,
-                tool_name: None,
-                partial_input_json: None,
-                tool_input: None,
-                tool_output: None,
-                usage: response.usage.clone(),
-                round,
-                metadata: json!({"finish_reason": response.finish_reason}),
-            },
-        )
-        .await;
         info!(
             turn_id = state.turn_id.as_deref().unwrap_or("none"),
             round,
@@ -241,25 +326,34 @@ async fn run_chat_turn(
             "chat round finished",
         );
 
-        let advance = match chat_turn_apply_response(state, &assistant_text, tool_calls, &response)
-        {
-            Ok(advance) => advance,
-            Err(error) => {
-                warn!(
-                    round,
-                    error_code = %error.record.code,
-                    retryable = error.record.retryable,
-                    "failed to apply chat response",
-                );
-                send_error(&sender, round, error).await;
-                return;
-            }
-        };
+        let advance =
+            match chat_turn_apply_response(state, &assistant_text, tool_calls.clone(), &response) {
+                Ok(advance) => advance,
+                Err(error) => {
+                    warn!(
+                        round,
+                        error_code = %error.record.code,
+                        retryable = error.record.retryable,
+                        "failed to apply chat response",
+                    );
+                    send_error(&sender, round, error).await;
+                    return;
+                }
+            };
         let (pending_state, tool_calls) = match advance {
             ChatTurnAdvance::Completed {
-                state: _,
+                state: completed_state,
                 stop_reason,
             } => {
+                send_round_finished(
+                    &sender,
+                    round,
+                    &response,
+                    "completed",
+                    &completed_state,
+                    &[],
+                )
+                .await;
                 info!(
                     round,
                     stop_reason = %stop_reason,
@@ -270,12 +364,25 @@ async fn run_chat_turn(
                 return;
             }
             ChatTurnAdvance::RequiresToolResults { state, tool_calls } => {
+                send_round_finished(
+                    &sender,
+                    round,
+                    &response,
+                    "requires_tool_results",
+                    &state,
+                    &tool_calls,
+                )
+                .await;
                 info!(
                     turn_id = state.turn_id.as_deref().unwrap_or("none"),
                     round,
                     tool_call_count = tool_calls.len(),
                     "chat turn requires tool results",
                 );
+                if state.tool_execution == ChatToolExecution::Client {
+                    send_done(&sender, round, "requires_tool_results").await;
+                    return;
+                }
                 (state, tool_calls)
             }
         };
@@ -381,6 +488,38 @@ fn non_empty(value: Option<String>) -> Option<String> {
             Some(trimmed.to_owned())
         }
     })
+}
+
+async fn send_round_finished(
+    sender: &mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
+    round: u32,
+    response: &LlmResponse,
+    status: &str,
+    state: &ChatTurnState,
+    tool_calls: &[ChatToolCall],
+) {
+    send_event(
+        sender,
+        ChatTurnEvent {
+            kind: ChatTurnEventKind::RoundFinished,
+            content: None,
+            response: Some(response.clone()),
+            tool_call_id: None,
+            tool_name: None,
+            partial_input_json: None,
+            tool_input: None,
+            tool_output: None,
+            usage: response.usage.clone(),
+            round,
+            metadata: json!({
+                "status": status,
+                "chat_state": state,
+                "tool_calls": tool_calls,
+                "finish_reason": response.finish_reason,
+            }),
+        },
+    )
+    .await;
 }
 
 fn serialized_value_len(value: &serde_json::Value) -> usize {

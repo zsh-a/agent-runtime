@@ -6,7 +6,7 @@ use agent_core::{
     ProposalStatus, RunId, RunRequest, TriggerKind,
 };
 use agent_runtime::{AgentRunner, RunOutcome};
-use agent_store::{FileProposalStore, FileRunStore};
+use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
@@ -262,6 +262,11 @@ async fn run_eval(
     let registry = registry_from_catalog(&catalog);
     let trace_store_path = store_path.clone();
     let store = Arc::new(FileRunStore::new(store_path).await.into_diagnostic()?);
+    let lock_store = Arc::new(
+        FileLockStore::new(trace_store_path.clone())
+            .await
+            .into_diagnostic()?,
+    );
     let proposal_store = Arc::new(
         FileProposalStore::new(trace_store_path.clone())
             .await
@@ -271,7 +276,7 @@ async fn run_eval(
         tool_overrides,
         proposal_store.clone(),
     ));
-    let runner = AgentRunner::new(registry, store, services);
+    let runner = AgentRunner::new(registry, store, services).with_lock_store(lock_store);
     let outcome = runner
         .run_once(
             &case.agent_id,

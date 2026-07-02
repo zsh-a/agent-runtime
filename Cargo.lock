@@ -42,6 +42,7 @@ dependencies = [
  "agent-llm",
  "agent-runtime",
  "agent-store",
+ "agent-tools",
  "assert_cmd",
  "async-trait",
  "axum",
@@ -61,6 +62,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -124,6 +126,7 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "async-trait",
+ "blake3",
  "camino",
  "fs-err",
  "serde",
@@ -131,6 +134,23 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+]
+
+[[package]]
+name = "agent-tools"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "blake3",
+ "camino",
+ "fs-err",
+ "miette",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

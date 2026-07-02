@@ -114,9 +114,10 @@ pub struct StepRecord {
 }
 
 impl StepRecord {
-    pub fn agent_run(
+    pub fn new(
         thread_id: ThreadId,
-        run_id: RunId,
+        kind: StepKind,
+        run_id: Option<RunId>,
         summary: Option<String>,
         payload: Value,
     ) -> Self {
@@ -124,11 +125,26 @@ impl StepRecord {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             step_id: StepId::new_v7(),
             thread_id,
-            kind: StepKind::AgentRun,
-            run_id: Some(run_id),
+            kind,
+            run_id,
             summary,
             payload,
             created_at: OffsetDateTime::now_utc(),
         }
+    }
+
+    pub fn agent_run(
+        thread_id: ThreadId,
+        run_id: RunId,
+        summary: Option<String>,
+        payload: Value,
+    ) -> Self {
+        Self::new(
+            thread_id,
+            StepKind::AgentRun,
+            Some(run_id),
+            summary,
+            payload,
+        )
     }
 }

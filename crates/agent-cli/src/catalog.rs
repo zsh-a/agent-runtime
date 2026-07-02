@@ -9,6 +9,7 @@ use miette::{Result, miette};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::time::Duration;
 use time::format_description::well_known::Rfc3339;
 
 #[derive(Debug, Serialize)]
@@ -135,6 +136,26 @@ impl Agent for CatalogDryRunAgent {
                 }),
             ))
             .await?;
+        if let Some(sleep_ms) = ctx.input.get("sleep_ms").and_then(Value::as_u64) {
+            ctx.trace
+                .emit(TraceEvent::new(
+                    "catalog_dry_run.sleep_started",
+                    json!({"duration_ms": sleep_ms}),
+                ))
+                .await?;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {}
+                _ = ctx.cancellation.cancelled() => {
+                    return Err(AgentError::cancelled("catalog dry-run cancelled"));
+                }
+            }
+            ctx.trace
+                .emit(TraceEvent::new(
+                    "catalog_dry_run.sleep_finished",
+                    json!({"duration_ms": sleep_ms}),
+                ))
+                .await?;
+        }
         let tool_result = match ctx.input.get("tool_call") {
             Some(call) => Some(run_requested_tool_call(&ctx, call).await?),
             None => None,

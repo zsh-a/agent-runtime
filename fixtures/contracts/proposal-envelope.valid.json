@@ -8,6 +8,9 @@
   "payload": {
     "value": 7
   },
+  "risk": "medium",
+  "approval_policy": "manual",
+  "approval_required": true,
   "status": "pending_approval",
   "created_at": "2026-06-28T09:12:31Z",
   "expires_at": null

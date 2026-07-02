@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use agent_core::{AgentRunRecord, AgentRunStore, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind};
 use agent_runtime::AgentRunner;
-use agent_store::{FileProposalStore, FileRunStore};
+use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
@@ -140,6 +140,11 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
             .await
             .into_diagnostic()?,
     );
+    let lock_store = Arc::new(
+        FileLockStore::new(options.store.clone())
+            .await
+            .into_diagnostic()?,
+    );
     let proposal_store = Arc::new(
         FileProposalStore::new(options.store.clone())
             .await
@@ -149,11 +154,13 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
         tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?,
         proposal_store,
     ));
-    let runner = AgentRunner::new(registry, store, services).with_policy(execution_policy(
-        options.timeout_seconds,
-        options.max_retries,
-        options.retry_backoff_ms,
-    ));
+    let runner = AgentRunner::new(registry, store, services)
+        .with_lock_store(lock_store)
+        .with_policy(execution_policy(
+            options.timeout_seconds,
+            options.max_retries,
+            options.retry_backoff_ms,
+        ));
     let outcome = runner
         .run_once(
             &template.frontmatter.agent,

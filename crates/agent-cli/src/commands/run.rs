@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use agent_core::{PROTOCOL_VERSION, RunRequest};
 use agent_runtime::AgentRunner;
-use agent_store::{FileProposalStore, FileRunStore};
+use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use camino::Utf8PathBuf;
 use miette::{IntoDiagnostic, Result};
 use serde_json::json;
@@ -61,6 +61,11 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
             .await
             .into_diagnostic()?,
     );
+    let lock_store = Arc::new(
+        FileLockStore::new(store_path.clone())
+            .await
+            .into_diagnostic()?,
+    );
     let proposal_store = Arc::new(
         FileProposalStore::new(store_path.clone())
             .await
@@ -70,11 +75,13 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
         options.tool_overrides,
         proposal_store,
     ));
-    let runner = AgentRunner::new(registry, store, services).with_policy(execution_policy(
-        options.timeout_seconds,
-        options.max_retries,
-        options.retry_backoff_ms,
-    ));
+    let runner = AgentRunner::new(registry, store, services)
+        .with_lock_store(lock_store)
+        .with_policy(execution_policy(
+            options.timeout_seconds,
+            options.max_retries,
+            options.retry_backoff_ms,
+        ));
     let outcome = runner
         .run_once(
             &options.agent_id,
@@ -122,6 +129,11 @@ pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
             .await
             .into_diagnostic()?,
     );
+    let lock_store = Arc::new(
+        FileLockStore::new(store_path.clone())
+            .await
+            .into_diagnostic()?,
+    );
     let proposal_store = Arc::new(
         FileProposalStore::new(store_path.clone())
             .await
@@ -131,7 +143,8 @@ pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
         ToolOverrides::default(),
         proposal_store,
     ));
-    let runner = AgentRunner::new(registry.into_agent_registry(), store, services);
+    let runner = AgentRunner::new(registry.into_agent_registry(), store, services)
+        .with_lock_store(lock_store);
     let outcomes = runner
         .tick(RunRequest {
             protocol_version: PROTOCOL_VERSION.to_owned(),

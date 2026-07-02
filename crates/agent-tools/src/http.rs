@@ -5,20 +5,20 @@ use miette::{Result, miette};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
-use super::error::tool_error;
+use crate::error::tool_error;
 
 #[derive(Debug, Clone)]
-pub(super) struct HttpToolEndpoint {
+pub(crate) struct HttpToolEndpoint {
     endpoint: String,
     headers: BTreeMap<String, String>,
 }
 
 impl HttpToolEndpoint {
-    pub(super) fn new(endpoint: String, headers: BTreeMap<String, String>) -> Self {
+    pub(crate) fn new(endpoint: String, headers: BTreeMap<String, String>) -> Self {
         Self { endpoint, headers }
     }
 
-    pub(super) async fn call(
+    pub(crate) async fn call(
         &self,
         name: &str,
         input: Value,
@@ -101,7 +101,7 @@ impl HttpToolEndpoint {
     }
 }
 
-pub(super) fn validate_http_tool_endpoint(source_id: &str, endpoint: &str) -> Result<()> {
+pub(crate) fn validate_http_tool_endpoint(source_id: &str, endpoint: &str) -> Result<()> {
     if endpoint.trim().is_empty() {
         return Err(miette!(
             "tool source '{source_id}' endpoint cannot be empty"

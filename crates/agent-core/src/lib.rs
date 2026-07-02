@@ -14,7 +14,8 @@ pub use catalog::{
 pub use errors::{AgentError, AgentErrorKind, AgentErrorRecord, StoreError, ToolError};
 pub use ids::{ProposalId, RunId, SessionId, StepId, ThreadId, ToolCallId};
 pub use proposal::{
-    ApprovalDecision, ApprovalDecisionKind, ProposalEnvelope, ProposalKindSpec, ProposalStatus,
+    ApprovalDecision, ApprovalDecisionKind, ProposalApprovalPolicy, ProposalEnvelope,
+    ProposalKindSpec, ProposalStatus,
 };
 pub use run::{
     AgentRunRecord, AgentRunResult, AgentRunStatus, AgentSpec, RunLease, RunRequest, RunScope,
@@ -27,7 +28,8 @@ pub use stores::{
     AgentStateStore,
 };
 pub use trace::{
-    AgentEvent, AgentTrace, HookEvent, HookEventName, HookInvocationStatus, HookKind, TraceEvent,
+    AgentEvent, AgentTrace, ArtifactRef, HookEvent, HookEventName, HookInvocationStatus, HookKind,
+    TraceEvent,
 };
 
 pub const PROTOCOL_VERSION: &str = "agent.v1";

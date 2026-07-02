@@ -23,6 +23,11 @@
     "finished_at": { "type": "string", "format": "date-time" },
     "input": { "type": "object", "default": {} },
     "output": { "type": "object", "default": {} },
+    "artifact_refs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact_ref" },
+      "default": []
+    },
     "events": {
       "type": "array",
       "items": {
@@ -267,6 +272,24 @@
         ],
         "additionalProperties": false
       }
+    }
+  },
+  "$defs": {
+    "artifact_ref": {
+      "type": "object",
+      "required": ["artifact_id", "uri"],
+      "properties": {
+        "artifact_id": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string", "minLength": 1 },
+        "media_type": { "type": ["string", "null"], "minLength": 1 },
+        "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[a-fA-F0-9]{64}$"
+        },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

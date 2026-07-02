@@ -36,6 +36,7 @@ pub(crate) struct RuntimeMetricsSummary {
     proposal_approved_count: usize,
     proposal_denied_count: usize,
     proposal_applied_count: usize,
+    artifact_ref_count: usize,
     llm_total_tokens: u64,
 }
 
@@ -61,6 +62,7 @@ pub(crate) async fn build_metrics_summary(
     let mut proposal_approved_count = 0_usize;
     let mut proposal_denied_count = 0_usize;
     let mut proposal_applied_count = 0_usize;
+    let mut artifact_ref_count = 0_usize;
 
     for run in &runs {
         *runs_by_status
@@ -75,6 +77,13 @@ pub(crate) async fn build_metrics_summary(
             }
         }
         if let Some(trace) = read_store_trace(store_path, &run.run_id).await? {
+            artifact_ref_count = artifact_ref_count.saturating_add(
+                trace
+                    .get("artifact_refs")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0),
+            );
             if trace_started_by_replay(&trace) {
                 replay_count += 1;
             }
@@ -109,6 +118,9 @@ pub(crate) async fn build_metrics_summary(
                     }
                     Some("proposal_applied") => {
                         proposal_applied_count += 1;
+                    }
+                    Some("artifact_ref") => {
+                        artifact_ref_count += 1;
                     }
                     _ => {}
                 }
@@ -162,6 +174,7 @@ pub(crate) async fn build_metrics_summary(
         proposal_approved_count,
         proposal_denied_count,
         proposal_applied_count,
+        artifact_ref_count,
         proposals_by_status,
         runs_by_status,
         llm_total_tokens,

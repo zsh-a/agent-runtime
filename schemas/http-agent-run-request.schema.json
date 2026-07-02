@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-runtime.local/schemas/http-agent-run-request.schema.json",
+  "title": "HttpAgentRunRequest",
+  "type": "object",
+  "properties": {
+    "run_id": { "type": ["string", "null"], "minLength": 1 },
+    "input": { "type": "object", "default": {} },
+    "session_id": { "type": ["string", "null"], "minLength": 1 },
+    "thread_id": { "type": ["string", "null"], "minLength": 1 }
+  },
+  "additionalProperties": false
+}

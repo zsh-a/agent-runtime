@@ -22,6 +22,17 @@
     "kind": { "type": "string", "minLength": 1 },
     "summary": { "type": "string", "minLength": 1 },
     "payload": { "type": "object" },
+    "risk": {
+      "type": "string",
+      "enum": ["read_only", "low", "medium", "high"],
+      "default": "medium"
+    },
+    "approval_policy": {
+      "type": "string",
+      "enum": ["manual", "auto_approve"],
+      "default": "manual"
+    },
+    "approval_required": { "type": "boolean", "default": true },
     "status": {
       "type": "string",
       "enum": [

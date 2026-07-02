@@ -1,18 +1,21 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use agent_chat::{ChatEventStream, ChatTurnRequest, ChatTurnRunner};
+use agent_chat::{ChatEventStream, ChatResumeRequest, ChatTurnRequest, ChatTurnRunner};
 use agent_core::{
-    AgentProposalStore, AgentRunRecord, AgentRunResult, AgentRunStore, AgentRuntimeCatalog,
-    AgentServices, AgentSessionStore, ApprovalDecision, ApprovalDecisionKind, PROTOCOL_VERSION,
-    ProposalEnvelope, ProposalId, ProposalStatus, RunId, RunRequest, SessionId, SessionRecord,
-    ThreadId, ThreadRecord,
+    AgentProposalStore, AgentRunRecord, AgentRunResult, AgentRunStatus, AgentRunStore,
+    AgentRuntimeCatalog, AgentServices, AgentSessionStore, ApprovalDecision, ApprovalDecisionKind,
+    PROTOCOL_VERSION, ProposalEnvelope, ProposalId, ProposalStatus, RunId, RunRequest, SessionId,
+    SessionRecord, ThreadId, ThreadRecord, TraceEvent,
 };
-use agent_runtime::AgentRunner;
-use agent_store::{FileProposalStore, FileRunStore, FileSessionStore};
+use agent_runtime::{AgentRunner, RunControl};
+use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileSessionStore};
 use camino::Utf8PathBuf;
+use futures::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::{Mutex, broadcast};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -23,12 +26,13 @@ use crate::{
         ProposalAction, ProposalActionResponse, ProposalDecisionResponse,
         append_proposal_action_trace_event, append_proposal_created_trace_event,
         append_proposal_decision_trace_event, execute_proposal_action_with_store,
-        parse_approval_decision, proposal_action_tool,
+        parse_approval_decision, proposal_action_tool, proposal_kind_spec,
     },
     replay::{ReplayExecutionReport, ReplayMode, replay_source_trace},
     session::{
         HttpSessionCreateParams, HttpSessionCreateResponse, HttpThreadForkParams,
-        SessionShowReport, ThreadForkReport, ThreadWithSteps, record_session_step, run_metadata,
+        SessionShowReport, ThreadForkReport, ThreadWithSteps, ensure_thread,
+        record_chat_event_step, record_session_step, run_metadata,
     },
     tools::{CliServices, ToolOverrides},
     trace_store::{read_store_trace, write_store_trace},
@@ -44,6 +48,7 @@ pub(crate) struct RuntimeServer {
     proposal_store: Arc<FileProposalStore>,
     session_store: Arc<FileSessionStore>,
     store_path: Utf8PathBuf,
+    active_runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +61,21 @@ pub(crate) struct AgentRunResponse {
 pub(crate) struct ToolCallResponse {
     tool: String,
     output: Value,
+}
+
+#[derive(Clone)]
+pub(crate) struct ActiveRun {
+    cancellation: CancellationToken,
+    events: broadcast::Sender<TraceEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CancelRunResponse {
+    pub(crate) cancellation_requested: bool,
+    pub(crate) message: String,
+    pub(crate) run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) status: Option<AgentRunStatus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +113,8 @@ pub(crate) struct HttpProposalDecisionParams {
 pub(crate) struct AgentRunParams {
     pub(crate) agent_id: String,
     #[serde(default)]
+    pub(crate) run_id: Option<String>,
+    #[serde(default)]
     pub(crate) input: Value,
     #[serde(default)]
     pub(crate) session_id: Option<String>,
@@ -102,6 +124,8 @@ pub(crate) struct AgentRunParams {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct HttpAgentRunParams {
+    #[serde(default)]
+    pub(crate) run_id: Option<String>,
     #[serde(default)]
     pub(crate) input: Value,
     #[serde(default)]
@@ -153,7 +177,14 @@ impl RuntimeServer {
             tool_overrides,
             proposal_store.clone(),
         ));
-        let runner = Arc::new(AgentRunner::new(registry, store.clone(), services.clone()));
+        let lock_store = Arc::new(
+            FileLockStore::new(store_path.clone())
+                .await
+                .into_diagnostic()?,
+        );
+        let runner = Arc::new(
+            AgentRunner::new(registry, store.clone(), services.clone()).with_lock_store(lock_store),
+        );
         let session_store = Arc::new(
             FileSessionStore::new(store_path.clone())
                 .await
@@ -168,10 +199,14 @@ impl RuntimeServer {
             proposal_store,
             session_store,
             store_path,
+            active_runs: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    pub(crate) fn stream_chat_turn(&self, mut request: ChatTurnRequest) -> Result<ChatEventStream> {
+    pub(crate) async fn stream_chat_turn(
+        &self,
+        mut request: ChatTurnRequest,
+    ) -> Result<ChatEventStream> {
         if request.tools.is_empty() {
             request.tools = self.catalog.tools.clone();
         }
@@ -189,18 +224,73 @@ impl RuntimeServer {
         chat.provider = request.provider.clone();
         chat.model = request.model.clone();
         let provider = provider_from_options(&chat)?;
-        Ok(ChatTurnRunner::new(provider, self.services.clone()).stream(request))
+        let thread_id =
+            ensure_thread(self.session_store.as_ref(), request.thread_id.as_deref()).await?;
+        let stream = ChatTurnRunner::new(provider, self.services.clone()).stream(request);
+        Ok(self.persist_chat_steps(stream, thread_id))
+    }
+
+    pub(crate) async fn stream_chat_resume(
+        &self,
+        mut request: ChatResumeRequest,
+    ) -> Result<ChatEventStream> {
+        if request.state.tools.is_empty() {
+            request.state.tools = self.catalog.tools.clone();
+        }
+        info!(
+            turn_id = request.state.turn_id.as_deref().unwrap_or("none"),
+            session_id = request.state.session_id.as_deref().unwrap_or("none"),
+            thread_id = request.state.thread_id.as_deref().unwrap_or("none"),
+            agent_id = request.state.agent_id.as_deref().unwrap_or("none"),
+            provider = %request.state.provider,
+            model = %request.state.model,
+            tool_result_count = request.tool_results.len(),
+            "server chat resume requested",
+        );
+        let mut chat = self.chat.clone();
+        chat.provider = request.state.provider.clone();
+        chat.model = request.state.model.clone();
+        let provider = provider_from_options(&chat)?;
+        let thread_id = ensure_thread(
+            self.session_store.as_ref(),
+            request.state.thread_id.as_deref(),
+        )
+        .await?;
+        let stream = ChatTurnRunner::new(provider, self.services.clone()).resume(request);
+        Ok(self.persist_chat_steps(stream, thread_id))
     }
 
     pub(crate) async fn run_agent(
         &self,
         agent_id: String,
+        run_id: Option<String>,
         input: Value,
         session_id: Option<String>,
         thread_id: Option<String>,
     ) -> Result<AgentRunResponse> {
         let started_at = std::time::Instant::now();
+        let run_id = match run_id {
+            Some(value) if !value.trim().is_empty() => RunId(value),
+            Some(_) => return Err(miette!("run_id cannot be empty")),
+            None => RunId::new_v7(),
+        };
+        let cancellation = CancellationToken::new();
+        let (events, _) = broadcast::channel(256);
+        {
+            let mut active = self.active_runs.lock().await;
+            if active.contains_key(&run_id.0) {
+                return Err(miette!("run '{}' is already active", run_id.0));
+            }
+            active.insert(
+                run_id.0.clone(),
+                ActiveRun {
+                    cancellation: cancellation.clone(),
+                    events: events.clone(),
+                },
+            );
+        }
         info!(
+            run_id = %run_id.0,
             agent_id = %agent_id,
             session_id = session_id.as_deref().unwrap_or("none"),
             thread_id = thread_id.as_deref().unwrap_or("none"),
@@ -209,19 +299,24 @@ impl RuntimeServer {
         );
         let outcome = self
             .runner
-            .run_once(
+            .run_once_with_control(
                 &agent_id,
                 RunRequest {
                     protocol_version: PROTOCOL_VERSION.to_owned(),
-                    run_id: None,
+                    run_id: Some(run_id.clone()),
                     input,
                     user: None,
                     trigger: agent_core::TriggerKind::Manual,
                     metadata: run_metadata(session_id.as_deref(), thread_id.as_deref()),
                 },
+                RunControl {
+                    cancellation,
+                    trace_events: Some(events),
+                },
             )
-            .await
-            .into_diagnostic()?;
+            .await;
+        self.active_runs.lock().await.remove(&run_id.0);
+        let outcome = outcome.into_diagnostic()?;
         record_session_step(&self.store_path, thread_id.as_deref(), &outcome).await?;
         write_store_trace(&self.store_path, &outcome.trace).await?;
         info!(
@@ -235,6 +330,67 @@ impl RuntimeServer {
             result: outcome.result,
             trace: outcome.trace,
         })
+    }
+
+    pub(crate) async fn cancel_run(&self, run_id: RunId) -> Result<CancelRunResponse> {
+        let active = self.active_runs.lock().await.get(&run_id.0).cloned();
+
+        if let Some(active) = active {
+            active.cancellation.cancel();
+            return Ok(CancelRunResponse {
+                cancellation_requested: true,
+                message: "cancellation requested".to_owned(),
+                run_id: run_id.0,
+                status: Some(AgentRunStatus::Running),
+            });
+        }
+
+        let run = self.get_run(run_id.clone()).await?;
+        Ok(CancelRunResponse {
+            cancellation_requested: false,
+            message: "run is not active".to_owned(),
+            run_id: run_id.0,
+            status: Some(run.status),
+        })
+    }
+
+    fn persist_chat_steps(
+        &self,
+        stream: ChatEventStream,
+        thread_id: Option<ThreadId>,
+    ) -> ChatEventStream {
+        let Some(thread_id) = thread_id else {
+            return stream;
+        };
+        let store = self.session_store.clone();
+        Box::pin(stream.then(move |item| {
+            let store = store.clone();
+            let thread_id = thread_id.clone();
+            async move {
+                if let Ok(event) = &item
+                    && let Err(err) =
+                        record_chat_event_step(store.as_ref(), &thread_id, event).await
+                {
+                    warn!(
+                        thread_id = %thread_id.0,
+                        error = %err,
+                        "failed to record chat session step",
+                    );
+                }
+                item
+            }
+        }))
+    }
+
+    pub(crate) async fn subscribe_run_events(
+        &self,
+        run_id: &RunId,
+    ) -> Option<broadcast::Receiver<TraceEvent>> {
+        self.active_runs
+            .lock()
+            .await
+            .get(&run_id.0)
+            .map(|active| active.events.subscribe())
     }
 
     pub(crate) async fn call_tool(&self, name: String, input: Value) -> Result<ToolCallResponse> {
@@ -327,13 +483,15 @@ impl RuntimeServer {
             proposal_kind = %params.kind,
             "server create_proposal requested",
         );
+        let kind_spec = proposal_kind_spec(&self.catalog, &params.kind)?;
         let proposal = ProposalEnvelope::new(
             RunId(params.run_id),
             params.agent_id,
             params.kind,
             params.summary,
             params.payload,
-        );
+        )
+        .with_kind_policy(kind_spec);
         self.proposal_store
             .create_proposal(proposal.clone())
             .await

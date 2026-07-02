@@ -1,7 +1,7 @@
 use agent_core::{AgentErrorKind, AgentErrorRecord, ToolError};
 use serde_json::{Value, json};
 
-pub(super) fn tool_error(code: &str, message: impl Into<String>) -> ToolError {
+pub(crate) fn tool_error(code: &str, message: impl Into<String>) -> ToolError {
     ToolError {
         record: AgentErrorRecord {
             kind: AgentErrorKind::ToolError,
@@ -13,7 +13,7 @@ pub(super) fn tool_error(code: &str, message: impl Into<String>) -> ToolError {
     }
 }
 
-pub(super) fn tool_error_from_json(default_code: &str, error: &Value) -> ToolError {
+pub(crate) fn tool_error_from_json(default_code: &str, error: &Value) -> ToolError {
     let code = error
         .get("code")
         .and_then(Value::as_i64)

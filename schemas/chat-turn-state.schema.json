@@ -41,6 +41,11 @@
       "type": "array",
       "items": { "$ref": "#/$defs/chat_tool_call" },
       "default": []
+    },
+    "tool_execution": {
+      "type": "string",
+      "enum": ["runtime", "client"],
+      "default": "runtime"
     }
   },
   "additionalProperties": false,

@@ -3,10 +3,13 @@ import type {
   AgentRunResponse,
   AgentTrace,
   ApprovalDecision,
+  CancelRunResponse,
+  ChatResumeRequest,
   ChatTurnEvent,
   ChatTurnRequest,
   JsonObject,
   ProposalEnvelope,
+  RuntimeMetricsSummary,
   ToolSpec,
 } from './types.js'
 
@@ -17,6 +20,7 @@ export interface AgentRuntimeHttpClientOptions {
 
 export interface RunAgentParams {
   input?: JsonObject
+  runId?: string
   sessionId?: string
   threadId?: string
 }
@@ -45,13 +49,20 @@ export class AgentRuntimeHttpClient {
     return this.request('GET', '/healthz')
   }
 
+  metricsSummary(): Promise<RuntimeMetricsSummary> {
+    return this.request('GET', '/metrics/summary')
+  }
+
   listTools(): Promise<ToolSpec[]> {
     return this.request('GET', '/tools')
   }
 
   async *streamChatTurn(request: ChatTurnRequest): AsyncGenerator<ChatTurnEvent> {
     const response = await this.fetchImpl(`${this.baseUrl}/chat/turn`, {
-      body: JSON.stringify(request),
+      body: JSON.stringify({
+        ...request,
+        protocol_version: request.protocol_version ?? 'agent.v1',
+      }),
       headers: {
         accept: 'text/event-stream',
         'content-type': 'application/json',
@@ -72,9 +83,36 @@ export class AgentRuntimeHttpClient {
     }
   }
 
+  async *streamChatResume(request: ChatResumeRequest): AsyncGenerator<ChatTurnEvent> {
+    const response = await this.fetchImpl(`${this.baseUrl}/chat/resume`, {
+      body: JSON.stringify({
+        ...request,
+        protocol_version: request.protocol_version ?? 'agent.v1',
+      }),
+      headers: {
+        accept: 'text/event-stream',
+        'content-type': 'application/json',
+      },
+      method: 'POST',
+    })
+
+    if (!response.ok) {
+      const payload = await readResponseBody(response)
+      throw new AgentRuntimeHttpError(readErrorMessage(payload, response.statusText), response.status, payload)
+    }
+    if (response.body === null) {
+      throw new AgentRuntimeHttpError('Agent Runtime chat resume stream response had no body', response.status, undefined)
+    }
+
+    for await (const data of readServerSentEventData(response.body)) {
+      yield JSON.parse(data) as ChatTurnEvent
+    }
+  }
+
   runAgent(agentId: string, params: RunAgentParams = {}): Promise<AgentRunResponse> {
     return this.request('POST', `/agents/${encodeURIComponent(agentId)}/run`, {
       input: params.input ?? {},
+      ...(params.runId === undefined ? {} : {run_id: params.runId}),
       ...(params.sessionId === undefined ? {} : {session_id: params.sessionId}),
       ...(params.threadId === undefined ? {} : {thread_id: params.threadId}),
     })
@@ -99,6 +137,31 @@ export class AgentRuntimeHttpClient {
 
   getRunTrace(runId: string): Promise<AgentTrace> {
     return this.request('GET', `/runs/${encodeURIComponent(runId)}/trace`)
+  }
+
+  async *streamRunEvents(runId: string): AsyncGenerator<AgentTrace['events'][number]> {
+    const response = await this.fetchImpl(`${this.baseUrl}/runs/${encodeURIComponent(runId)}/events`, {
+      headers: {
+        accept: 'text/event-stream',
+      },
+      method: 'GET',
+    })
+
+    if (!response.ok) {
+      const payload = await readResponseBody(response)
+      throw new AgentRuntimeHttpError(readErrorMessage(payload, response.statusText), response.status, payload)
+    }
+    if (response.body === null) {
+      throw new AgentRuntimeHttpError('Agent Runtime run event stream response had no body', response.status, undefined)
+    }
+
+    for await (const data of readServerSentEventData(response.body)) {
+      yield JSON.parse(data) as AgentTrace['events'][number]
+    }
+  }
+
+  cancelRun(runId: string): Promise<CancelRunResponse> {
+    return this.request('POST', `/runs/${encodeURIComponent(runId)}/cancel`, {})
   }
 
   callTool<TOutput = unknown>(toolName: string, input: JsonObject = {}): Promise<{output: TOutput; tool: string}> {

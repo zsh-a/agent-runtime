@@ -1,9 +1,10 @@
 use std::{convert::Infallible, net::SocketAddr};
 
-use agent_chat::{ChatError, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest};
-use agent_core::{ProposalId, RunId, SessionId, ToolSpec};
+use agent_chat::{ChatError, ChatResumeRequest, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest};
+use agent_core::{ProposalId, RunId, SessionId, ToolSpec, TraceEvent};
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{
@@ -15,6 +16,7 @@ use axum::{
 use futures::{StreamExt, stream};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -46,11 +48,13 @@ pub(crate) async fn serve_http(server: RuntimeServer, host: String, port: u16) -
         .route("/catalog/summary", get(http_catalog_summary))
         .route("/metrics/summary", get(http_metrics_summary))
         .route("/chat/turn", post(http_chat_turn))
+        .route("/chat/resume", post(http_chat_resume))
         .route("/agents/{agent_id}/run", post(http_agent_run))
         .route("/runs", get(http_runs))
         .route("/runs/{run_id}", get(http_run_inspect))
         .route("/runs/{run_id}/trace", get(http_run_trace))
         .route("/runs/{run_id}/events", get(http_run_events))
+        .route("/runs/{run_id}/cancel", post(http_run_cancel))
         .route("/runs/{run_id}/replay", post(http_run_replay))
         .route("/tools", get(http_tools))
         .route("/tools/{tool_name}/call", post(http_tool_call))
@@ -114,41 +118,80 @@ async fn http_metrics_summary(State(server): State<RuntimeServer>) -> Response {
     }
 }
 
-async fn http_chat_turn(
-    State(server): State<RuntimeServer>,
-    Json(request): Json<ChatTurnRequest>,
-) -> Response {
-    match server.stream_chat_turn(request) {
-        Ok(stream) => {
-            let stream = stream.map(|event| {
-                let event = match event {
-                    Ok(event) => event,
-                    Err(error) => chat_error_event(error),
-                };
-                let data = serde_json::to_string(&event).unwrap_or_else(|err| {
-                    json!({
-                        "kind": "error",
-                        "content": format!("failed to encode chat event: {err}"),
-                        "round": event.round,
-                        "metadata": {}
-                    })
-                    .to_string()
-                });
-                Ok::<_, Infallible>(Event::default().event("chat_turn_event").data(data))
-            });
-            Sse::new(stream).into_response()
-        }
+async fn http_chat_turn(State(server): State<RuntimeServer>, body: Bytes) -> Response {
+    let request = match decode_schema_json::<ChatTurnRequest>(
+        &body,
+        include_str!("../../../schemas/chat-turn-request.schema.json"),
+        "chat-turn-request",
+    ) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+
+    match server.stream_chat_turn(request).await {
+        Ok(stream) => chat_sse_response(stream),
         Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, "chat_turn_failed", err),
     }
+}
+
+async fn http_chat_resume(State(server): State<RuntimeServer>, body: Bytes) -> Response {
+    let request = match decode_schema_json::<ChatResumeRequest>(
+        &body,
+        include_str!("../../../schemas/chat-resume-request.schema.json"),
+        "chat-resume-request",
+    ) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+
+    match server.stream_chat_resume(request).await {
+        Ok(stream) => chat_sse_response(stream),
+        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, "chat_resume_failed", err),
+    }
+}
+
+fn chat_sse_response(stream: agent_chat::ChatEventStream) -> Response {
+    let stream = stream.map(|event| {
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => chat_error_event(error),
+        };
+        let data = serde_json::to_string(&event).unwrap_or_else(|err| {
+            json!({
+                "kind": "error",
+                "content": format!("failed to encode chat event: {err}"),
+                "round": event.round,
+                "metadata": {}
+            })
+            .to_string()
+        });
+        Ok::<_, Infallible>(Event::default().event("chat_turn_event").data(data))
+    });
+    Sse::new(stream).into_response()
 }
 
 async fn http_agent_run(
     State(server): State<RuntimeServer>,
     Path(agent_id): Path<String>,
-    Json(params): Json<HttpAgentRunParams>,
+    body: Bytes,
 ) -> Response {
+    let params = match decode_schema_json::<HttpAgentRunParams>(
+        &body,
+        include_str!("../../../schemas/http-agent-run-request.schema.json"),
+        "http-agent-run-request",
+    ) {
+        Ok(params) => params,
+        Err(response) => return response,
+    };
+
     match server
-        .run_agent(agent_id, params.input, params.session_id, params.thread_id)
+        .run_agent(
+            agent_id,
+            params.run_id,
+            params.input,
+            params.session_id,
+            params.thread_id,
+        )
         .await
     {
         Ok(response) => Json(response).into_response(),
@@ -190,7 +233,23 @@ async fn http_run_events(
     State(server): State<RuntimeServer>,
     Path(run_id): Path<String>,
 ) -> Response {
-    match server.get_run_trace(RunId(run_id)).await {
+    let run_id = RunId(run_id);
+    if let Some(receiver) = server.subscribe_run_events(&run_id).await {
+        let stream = stream::unfold(receiver, |mut receiver| async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(event) => {
+                        return Some((Ok::<_, Infallible>(trace_event_sse(event)), receiver));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        });
+        return Sse::new(stream).into_response();
+    }
+
+    match server.get_run_trace(run_id).await {
         Ok(trace) => {
             let events = event_records_from_trace(&trace);
             let stream = stream::iter(events.into_iter().map(|event| {
@@ -205,6 +264,16 @@ async fn http_run_events(
             Sse::new(stream).into_response()
         }
         Err(err) => http_error(StatusCode::NOT_FOUND, "trace_not_found", err),
+    }
+}
+
+async fn http_run_cancel(
+    State(server): State<RuntimeServer>,
+    Path(run_id): Path<String>,
+) -> Response {
+    match server.cancel_run(RunId(run_id)).await {
+        Ok(response) => Json(response).into_response(),
+        Err(err) => http_error(StatusCode::NOT_FOUND, "run_not_found", err),
     }
 }
 
@@ -383,6 +452,77 @@ fn chat_error_event(error: ChatError) -> ChatTurnEvent {
     }
 }
 
+fn trace_event_sse(event: TraceEvent) -> Event {
+    let kind = event.kind.clone();
+    let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_owned());
+
+    Event::default().event(kind).data(data)
+}
+
+fn decode_schema_json<T: DeserializeOwned>(
+    body: &Bytes,
+    schema_json: &str,
+    schema_name: &str,
+) -> std::result::Result<T, Response> {
+    let body = if body.is_empty() {
+        b"{}"
+    } else {
+        body.as_ref()
+    };
+    let value = match serde_json::from_slice::<Value>(body) {
+        Ok(value) => value,
+        Err(err) => {
+            return Err(http_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                format!("request body is not valid JSON: {err}"),
+            ));
+        }
+    };
+    let schema = match serde_json::from_str::<Value>(schema_json) {
+        Ok(schema) => schema,
+        Err(err) => {
+            return Err(http_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "schema_load_failed",
+                format!("failed to load {schema_name} schema: {err}"),
+            ));
+        }
+    };
+    let validator = match jsonschema::validator_for(&schema) {
+        Ok(validator) => validator,
+        Err(err) => {
+            return Err(http_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "schema_compile_failed",
+                format!("failed to compile {schema_name} schema: {err}"),
+            ));
+        }
+    };
+    let errors = validator
+        .iter_errors(&value)
+        .map(|error| format!("{}: {}", error.instance_path(), error))
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
+        return Err(http_error(
+            StatusCode::BAD_REQUEST,
+            "schema_validation_failed",
+            format!(
+                "{schema_name} request failed schema validation: {}",
+                errors.join("; ")
+            ),
+        ));
+    }
+
+    serde_json::from_value(value).map_err(|err| {
+        http_error(
+            StatusCode::BAD_REQUEST,
+            "request_decode_failed",
+            format!("failed to decode {schema_name} request: {err}"),
+        )
+    })
+}
+
 fn http_error(status: StatusCode, code: &str, err: impl std::fmt::Display) -> Response {
     warn!(
         status = status.as_u16(),
@@ -444,6 +584,7 @@ async fn handle_stdio_line(server: &RuntimeServer, line: &str) -> StdioResponse 
             let outcome = server
                 .run_agent(
                     params.agent_id,
+                    params.run_id,
                     params.input,
                     params.session_id,
                     params.thread_id,

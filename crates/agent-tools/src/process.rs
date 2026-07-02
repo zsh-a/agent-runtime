@@ -7,19 +7,19 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, info, warn};
 
-use super::{
+use crate::{
     error::{tool_error, tool_error_from_json},
     mcp,
 };
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProcessToolHost {
-    pub(super) command: String,
-    pub(super) args: Vec<String>,
+    pub(crate) command: String,
+    pub(crate) args: Vec<String>,
 }
 
 impl ProcessToolHost {
-    pub(super) fn new(command: String, args: Vec<String>) -> Self {
+    pub(crate) fn new(command: String, args: Vec<String>) -> Self {
         Self { command, args }
     }
 
@@ -145,7 +145,7 @@ impl ProcessToolHost {
         Ok(result)
     }
 
-    pub(super) async fn call_mcp_tool(
+    pub(crate) async fn call_mcp_tool(
         &self,
         name: &str,
         input: Value,
@@ -154,7 +154,7 @@ impl ProcessToolHost {
     }
 }
 
-pub(super) fn process_tool_host(args: Vec<String>) -> Result<Option<ProcessToolHost>> {
+pub(crate) fn process_tool_host(args: Vec<String>) -> Result<Option<ProcessToolHost>> {
     let Some((command, rest)) = args.split_first() else {
         return Ok(None);
     };

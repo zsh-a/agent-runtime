@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::{debug, info};
 
-use super::{
+use crate::{
     error::tool_error,
     http::{HttpToolEndpoint, validate_http_tool_endpoint},
     process::ProcessToolHost,
@@ -22,7 +22,7 @@ struct ToolSourceManifest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ToolSourceDefinition {
+pub struct ToolSourceDefinition {
     id: String,
     #[serde(default)]
     protocol: ToolSourceProtocol,
@@ -35,7 +35,13 @@ pub(crate) struct ToolSourceDefinition {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     headers: BTreeMap<String, String>,
     #[serde(default)]
-    pub(crate) tools: Vec<ToolSpec>,
+    tools: Vec<ToolSpec>,
+}
+
+impl ToolSourceDefinition {
+    pub fn tools(&self) -> &[ToolSpec] {
+        &self.tools
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -55,7 +61,7 @@ pub(crate) struct ToolSourceRuntime {
 }
 
 impl ToolSourceRuntime {
-    pub(super) fn from_source(source: &ToolSourceDefinition) -> Result<Self> {
+    pub(crate) fn from_source(source: &ToolSourceDefinition) -> Result<Self> {
         let host = match source.protocol {
             ToolSourceProtocol::JsonlToolCall | ToolSourceProtocol::McpStdio => {
                 let command = source.command.as_ref().ok_or_else(|| {
@@ -138,7 +144,7 @@ impl ToolSourceRuntime {
     }
 }
 
-pub(crate) async fn load_tool_source_specs(paths: Vec<Utf8PathBuf>) -> Result<Vec<ToolSpec>> {
+pub async fn load_tool_source_specs(paths: Vec<Utf8PathBuf>) -> Result<Vec<ToolSpec>> {
     Ok(load_tool_sources(paths)
         .await?
         .into_iter()
@@ -146,9 +152,7 @@ pub(crate) async fn load_tool_source_specs(paths: Vec<Utf8PathBuf>) -> Result<Ve
         .collect())
 }
 
-pub(crate) async fn load_tool_sources(
-    paths: Vec<Utf8PathBuf>,
-) -> Result<Vec<ToolSourceDefinition>> {
+pub async fn load_tool_sources(paths: Vec<Utf8PathBuf>) -> Result<Vec<ToolSourceDefinition>> {
     let mut sources = Vec::new();
     for path in paths {
         debug!(path = %path, "loading tool source manifest");
@@ -176,7 +180,7 @@ pub(crate) async fn load_tool_sources(
     Ok(sources)
 }
 
-pub(crate) fn source_has_tool(sources: &[ToolSourceDefinition], name: &str) -> bool {
+pub fn source_has_tool(sources: &[ToolSourceDefinition], name: &str) -> bool {
     sources
         .iter()
         .any(|source| source.tools.iter().any(|tool| tool.name == name))

@@ -1,6 +1,6 @@
 use agent_core::{
     AgentProposalStore, AgentRuntimeCatalog, AgentServices, ApprovalDecision, ApprovalDecisionKind,
-    ProposalEnvelope, ProposalStatus, RunId, TraceEvent,
+    ProposalEnvelope, ProposalKindSpec, ProposalStatus, RunId, TraceEvent,
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
@@ -118,11 +118,17 @@ pub(crate) async fn execute_proposal_action_with_store(
 }
 
 pub(crate) fn proposal_action_tool(catalog: &AgentRuntimeCatalog, kind: &str) -> Result<String> {
+    Ok(proposal_kind_spec(catalog, kind)?.tool_name.clone())
+}
+
+pub(crate) fn proposal_kind_spec<'a>(
+    catalog: &'a AgentRuntimeCatalog,
+    kind: &str,
+) -> Result<&'a ProposalKindSpec> {
     catalog
         .proposal_kinds
         .iter()
         .find(|spec| spec.kind == kind)
-        .map(|spec| spec.tool_name.clone())
         .ok_or_else(|| miette!("proposal kind '{kind}' is not present in the active catalog"))
 }
 
@@ -141,6 +147,9 @@ pub(crate) async fn append_proposal_created_trace_event(
                 "agent_id": proposal.agent_id.clone(),
                 "kind": proposal.kind.clone(),
                 "summary": proposal.summary.clone(),
+                "risk": proposal.risk.clone(),
+                "approval_policy": proposal.approval_policy,
+                "approval_required": proposal.approval_required,
                 "status": proposal.status.clone(),
             }),
         ),
@@ -162,6 +171,9 @@ pub(crate) async fn append_proposal_decision_trace_event(
                 "run_id": response.proposal.run_id.0.clone(),
                 "agent_id": response.proposal.agent_id.clone(),
                 "kind": response.proposal.kind.clone(),
+                "risk": response.proposal.risk.clone(),
+                "approval_policy": response.proposal.approval_policy,
+                "approval_required": response.proposal.approval_required,
                 "decision": response.decision.decision.clone(),
                 "status": response.proposal.status.clone(),
                 "comment": response.decision.comment.clone(),
@@ -190,6 +202,9 @@ pub(crate) async fn append_proposal_action_trace_event(
                 "run_id": response.proposal.run_id.0.clone(),
                 "agent_id": response.proposal.agent_id.clone(),
                 "kind": response.proposal.kind.clone(),
+                "risk": response.proposal.risk.clone(),
+                "approval_policy": response.proposal.approval_policy,
+                "approval_required": response.proposal.approval_required,
                 "action": response.action,
                 "status": response.proposal.status.clone(),
                 "tool": response.tool.clone(),

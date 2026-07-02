@@ -9,6 +9,7 @@ export type AgentRunStatus = 'abandoned' | 'cancelled' | 'completed' | 'failed' 
 export type ToolRisk = 'high' | 'low' | 'medium' | 'read_only'
 export type LlmRole = 'assistant' | 'system' | 'tool' | 'user'
 export type LlmFinishReason = 'content_filter' | 'error' | 'length' | 'stop' | 'tool_call'
+export type ChatToolExecution = 'client' | 'runtime'
 
 export interface UserContext {
   metadata?: JsonObject
@@ -75,6 +76,13 @@ export interface AgentRunResult {
   summary?: null | string
 }
 
+export interface CancelRunResponse {
+  cancellation_requested: boolean
+  message: string
+  run_id: string
+  status?: AgentRunStatus
+}
+
 export interface AgentErrorRecord {
   code: string
   details?: JsonObject
@@ -89,9 +97,19 @@ export interface TraceEvent {
   payload?: JsonObject
 }
 
+export interface ArtifactRef {
+  artifact_id: string
+  media_type?: null | string
+  metadata?: JsonObject
+  sha256?: null | string
+  size_bytes?: null | number
+  uri: string
+}
+
 export interface AgentTrace {
   agent_id: string
   agent_version: string
+  artifact_refs?: ArtifactRef[]
   events: TraceEvent[]
   finished_at: string
   input?: JsonObject
@@ -105,6 +123,34 @@ export interface AgentTrace {
 export interface AgentRunResponse {
   result: AgentRunResult
   trace: AgentTrace
+}
+
+export interface RuntimeMetricsSummary {
+  artifact_ref_count: number
+  average_run_latency_ms?: null | number
+  average_tool_call_latency_ms?: null | number
+  failed_run_count: number
+  failed_tool_call_count: number
+  generated_at: string
+  llm_total_tokens: number
+  proposal_applied_count: number
+  proposal_approved_count: number
+  proposal_count: number
+  proposal_created_count: number
+  proposal_denied_count: number
+  proposals_by_status: {[key: string]: number | undefined}
+  protocol_version: ProtocolVersion
+  replay_count: number
+  run_count: number
+  runs_by_status: {[key: string]: number | undefined}
+  runtime_version: string
+  skipped_run_count: number
+  store_root: string
+  successful_run_count: number
+  timeout_count: number
+  tool_call_count: number
+  total_run_latency_ms: number
+  total_tool_call_latency_ms: number
 }
 
 export interface LlmMessage {
@@ -161,8 +207,49 @@ export interface ChatTurnRequest {
   surface?: null | string
   temperature?: null | number
   thread_id?: null | string
+  tool_execution?: ChatToolExecution
   tools?: ToolSpec[]
   turn_id?: null | string
+}
+
+export interface ChatToolCall {
+  id: string
+  input?: JsonValue
+  name: string
+}
+
+export interface ChatToolResult {
+  is_error: boolean
+  output: JsonValue
+  tool_call_id: string
+  tool_name: string
+}
+
+export interface ChatTurnState {
+  agent_id?: null | string
+  max_output_tokens?: null | number
+  max_tool_rounds: number
+  messages: LlmMessage[]
+  metadata?: JsonObject
+  mode?: null | string
+  model: string
+  pending_tool_calls: ChatToolCall[]
+  protocol_version: ProtocolVersion
+  provider: string
+  round: number
+  session_id?: null | string
+  surface?: null | string
+  temperature?: null | number
+  thread_id?: null | string
+  tool_execution?: ChatToolExecution
+  tools?: ToolSpec[]
+  turn_id?: null | string
+}
+
+export interface ChatResumeRequest {
+  protocol_version?: ProtocolVersion
+  state: ChatTurnState
+  tool_results: ChatToolResult[]
 }
 
 export type ChatTurnEventKind =
@@ -209,12 +296,15 @@ export type ProposalStatus =
 
 export interface ProposalEnvelope {
   agent_id: string
+  approval_policy?: 'auto_approve' | 'manual'
+  approval_required?: boolean
   created_at: string
   expires_at?: null | string
   kind: string
   payload: JsonObject
   proposal_id: string
   protocol_version: ProtocolVersion
+  risk?: ToolRisk
   run_id: string
   status: ProposalStatus
   summary: string
