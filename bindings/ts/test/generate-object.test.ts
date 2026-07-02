@@ -88,4 +88,48 @@ describe('AgentRuntimeHttpClient', () => {
       url: 'http://runtime.local/agents/demo/run',
     }])
   })
+
+  test('streams chat turn SSE frames as typed events', async () => {
+    const calls: Array<{body?: string; method?: string; url: string}> = []
+    const client = new AgentRuntimeHttpClient({
+      baseUrl: 'http://runtime.local/',
+      fetch: async (url, init) => {
+        calls.push({body: init?.body?.toString(), method: init?.method, url: url.toString()})
+        return new Response([
+          'event: chat_turn_event\n',
+          'data: {"kind":"started","round":0,"metadata":{}}\n\n',
+          'event: chat_turn_event\n',
+          'data: {"kind":"delta","content":"hello","round":1,"metadata":{}}\n\n',
+          'event: chat_turn_event\n',
+          'data: {"kind":"done","round":1,"metadata":{"stop_reason":"end_turn"}}\n\n',
+        ].join(''), {
+          headers: {'content-type': 'text/event-stream'},
+          status: 200,
+        })
+      },
+    })
+
+    const events = []
+    for await (const event of client.streamChatTurn({
+      messages: [{content: 'ping', role: 'user'}],
+      model: 'mock-model',
+      provider: 'mock',
+      turn_id: 'turn_1',
+    })) {
+      events.push(event)
+    }
+
+    expect(events.map((event) => event.kind)).toEqual(['started', 'delta', 'done'])
+    expect(events[1]?.content).toBe('hello')
+    expect(calls).toEqual([{
+      body: JSON.stringify({
+        messages: [{content: 'ping', role: 'user'}],
+        model: 'mock-model',
+        provider: 'mock',
+        turn_id: 'turn_1',
+      }),
+      method: 'POST',
+      url: 'http://runtime.local/chat/turn',
+    }])
+  })
 })

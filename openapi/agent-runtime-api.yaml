@@ -46,6 +46,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /chat/turn:
+    post:
+      operationId: streamChatTurn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "../schemas/chat-turn-request.schema.json"
+      responses:
+        "200":
+          description: Server-sent event stream of chat turn events.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Each SSE data frame is a ChatTurnEvent JSON object from chat-turn-event.schema.json.
+        "500":
+          description: Chat turn failed before streaming started.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /tools:
     get:
       operationId: listTools

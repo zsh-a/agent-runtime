@@ -113,9 +113,10 @@ openapi/agent-runtime-api.yaml
 
 bindings/ts/
   Dependency-light TypeScript package for stable `agent.v1` wire types, a small
-  HTTP client, and `generateObject<T>()` helpers over JSON Schema structured LLM
-  requests. It intentionally does not depend on Zod or AI SDK; host apps convert
-  their schema system into JSON Schema before calling it.
+  HTTP client including `streamChatTurn()`, and `generateObject<T>()` helpers
+  over JSON Schema structured LLM requests. It intentionally does not depend on
+  Zod or AI SDK; host apps convert their schema system into JSON Schema before
+  calling it.
 
 docs/integration/
   Host-application integration guidance. `business-agent-integration.md`
@@ -154,6 +155,7 @@ rtk cargo run -p agent-cli -- list
 rtk cargo run -p agent-cli -- run echo_agent --input examples/fixtures/echo-input.json
 rtk cargo run -p agent-cli -- tui
 rtk cargo run -p agent-cli -- serve --catalog fixtures/contracts/catalog.valid.json
+curl -N -X POST http://127.0.0.1:8765/chat/turn -H 'content-type: application/json' -d '{"provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}]}'
 rtk cargo run -p agent-cli -- validate schemas/run-request.schema.json fixtures/contracts/run-request.valid.json
 ```
 
@@ -178,6 +180,7 @@ TUI uses persistent natural input by default. Plain text runs the shared
 | Change runner lifecycle | `crates/agent-runtime/src/lib.rs` | `rtk cargo test -p agent-runtime`, `rtk cargo test -p agent-cli` |
 | Change LLM provider behavior | `crates/agent-llm/src/providers/` | `rtk cargo test -p agent-llm` |
 | Change ChatTurn behavior | `crates/agent-chat/`, `schemas/chat-turn-*.schema.json`, ChatTurn fixtures | `rtk cargo test -p agent-chat`, `rtk cargo test -p agent-cli --test contracts` |
+| Change HTTP ChatTurn streaming | `crates/agent-cli/src/server.rs`, `crates/agent-cli/src/runtime_server.rs`, `openapi/agent-runtime-api.yaml`, `bindings/ts/` | `rtk cargo test -p agent-cli --test catalog_cli http_server_streams_chat_turn_events`, TS binding tests |
 | Change CLI command behavior | `crates/agent-cli/src/commands/` plus supporting module | focused command test, `rtk cargo test -p agent-cli` |
 | Change tool host behavior | `crates/agent-cli/src/tools.rs`, `crates/agent-cli/src/tools/` | CLI tool tests |
 | Change proposal apply behavior | `crates/agent-cli/src/proposal.rs` | proposal CLI tests |

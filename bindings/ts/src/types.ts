@@ -147,6 +147,53 @@ export interface LlmResponse {
   usage?: LlmUsage | null
 }
 
+export interface ChatTurnRequest {
+  agent_id?: null | string
+  max_output_tokens?: null | number
+  max_tool_rounds?: number
+  messages: LlmMessage[]
+  metadata?: JsonObject
+  mode?: null | string
+  model: string
+  protocol_version?: ProtocolVersion
+  provider: string
+  session_id?: null | string
+  surface?: null | string
+  temperature?: null | number
+  thread_id?: null | string
+  tools?: ToolSpec[]
+  turn_id?: null | string
+}
+
+export type ChatTurnEventKind =
+  | 'delta'
+  | 'done'
+  | 'error'
+  | 'llm_started'
+  | 'round_finished'
+  | 'started'
+  | 'thinking_delta'
+  | 'thinking_signature_delta'
+  | 'tool_call_delta'
+  | 'tool_call_end'
+  | 'tool_call_start'
+  | 'tool_result'
+  | 'usage'
+
+export interface ChatTurnEvent {
+  content?: null | string
+  kind: ChatTurnEventKind
+  metadata?: JsonObject
+  partial_input_json?: null | string
+  response?: LlmResponse | null
+  round: number
+  tool_call_id?: null | string
+  tool_input?: JsonValue
+  tool_name?: null | string
+  tool_output?: JsonValue
+  usage?: LlmUsage | null
+}
+
 export type ProposalStatus =
   | 'applied'
   | 'apply_failed'

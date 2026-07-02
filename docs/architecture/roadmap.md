@@ -14,15 +14,16 @@ The runtime currently works well as a schema-first agent execution kernel for:
 - JSON tool dispatch through host adapters
 - proposal envelope creation and approval/application flows
 - provider-neutral chat turn state and event contracts
+- HTTP/SSE chat turn streaming over `agent-chat`
 - CLI, HTTP, stdio, TUI, replay, eval, and debug-bundle development workflows
-- initial dependency-light TypeScript bindings for HTTP runtime calls and
-  structured LLM object generation
+- initial dependency-light TypeScript bindings for HTTP runtime calls, chat
+  streaming, and structured LLM object generation
 - file-backed local stores and in-memory test stores
 
 It is not yet a full production agent platform. The main gaps are generated or
-broader SDK coverage, real-time HTTP chat, external run control, production
-stores, distributed scheduling, stronger risk policy, artifact handling, and
-richer observability.
+broader SDK coverage, chat resume and cancellation, external run control,
+production stores, distributed scheduling, stronger risk policy, artifact
+handling, and richer observability.
 
 ## Roadmap Principles
 
@@ -89,10 +90,10 @@ transport glue for common workflows.
 
 ### Deliverables
 
-- Add HTTP/SSE chat endpoints over `agent-chat`:
-  - validate chat turn request
-  - stream `ChatTurnEvent`
+- Extend HTTP/SSE chat endpoints over `agent-chat`:
   - resume from `ChatTurnState` plus `ChatToolResult`
+  - persist or correlate chat turn traces where host apps need replay
+  - expose client disconnect/cancel semantics consistently
 - Add run control protocol:
   - cancel active run
   - mark cancellation in run record and trace
@@ -279,8 +280,8 @@ Goal: handle complex agent products that need more than single-run execution.
 ## Suggested Near-Term Order
 
 1. Add smoke tests for `examples/business-integration/`.
-2. Add HTTP/SSE chat endpoint over `agent-chat`.
-3. Add cancellation protocol for runs and chat turns.
+2. Add cancellation protocol for runs and chat turns.
+3. Add ChatTurn resume support over HTTP/SSE.
 4. Add DB-backed store conformance tests before implementing a concrete backend.
 5. Promote proposal risk metadata into stable schema fields.
 6. Extend generated TypeScript or Dart bindings after the above protocol

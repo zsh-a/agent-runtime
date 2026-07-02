@@ -236,6 +236,7 @@ fn openapi_contract_documents_http_server_routes() {
     assert!(openapi["paths"]["/healthz"]["get"].is_object());
     assert!(openapi["paths"]["/catalog/summary"]["get"].is_object());
     assert!(openapi["paths"]["/metrics/summary"]["get"].is_object());
+    assert!(openapi["paths"]["/chat/turn"]["post"].is_object());
     assert!(openapi["paths"]["/tools"]["get"].is_object());
     assert!(openapi["paths"]["/runs"]["get"].is_object());
     assert!(openapi["paths"]["/runs/{run_id}"]["get"].is_object());
@@ -305,6 +306,11 @@ fn openapi_contract_documents_http_server_routes() {
         openapi["paths"]["/runs/{run_id}/events"]["get"]["responses"]["200"]["content"]["text/event-stream"]
             ["schema"]["description"],
         "Each SSE data frame is a TraceEvent JSON object from trace.schema.json; agent_runtime_step frames include payload.run_state."
+    );
+    assert_eq!(
+        openapi["paths"]["/chat/turn"]["post"]["responses"]["200"]["content"]["text/event-stream"]
+            ["schema"]["description"],
+        "Each SSE data frame is a ChatTurnEvent JSON object from chat-turn-event.schema.json."
     );
     assert_eq!(
         openapi["paths"]["/runs/{run_id}/replay"]["post"]["responses"]["200"]["content"]["application/json"]

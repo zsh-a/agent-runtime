@@ -3,6 +3,8 @@ import type {
   AgentRunResponse,
   AgentTrace,
   ApprovalDecision,
+  ChatTurnEvent,
+  ChatTurnRequest,
   JsonObject,
   ProposalEnvelope,
   ToolSpec,
@@ -45,6 +47,29 @@ export class AgentRuntimeHttpClient {
 
   listTools(): Promise<ToolSpec[]> {
     return this.request('GET', '/tools')
+  }
+
+  async *streamChatTurn(request: ChatTurnRequest): AsyncGenerator<ChatTurnEvent> {
+    const response = await this.fetchImpl(`${this.baseUrl}/chat/turn`, {
+      body: JSON.stringify(request),
+      headers: {
+        accept: 'text/event-stream',
+        'content-type': 'application/json',
+      },
+      method: 'POST',
+    })
+
+    if (!response.ok) {
+      const payload = await readResponseBody(response)
+      throw new AgentRuntimeHttpError(readErrorMessage(payload, response.statusText), response.status, payload)
+    }
+    if (response.body === null) {
+      throw new AgentRuntimeHttpError('Agent Runtime chat stream response had no body', response.status, undefined)
+    }
+
+    for await (const data of readServerSentEventData(response.body)) {
+      yield JSON.parse(data) as ChatTurnEvent
+    }
   }
 
   runAgent(agentId: string, params: RunAgentParams = {}): Promise<AgentRunResponse> {
@@ -145,4 +170,82 @@ function readErrorMessage(payload: unknown, fallback: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+async function* readServerSentEventData(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const {done, value} = await reader.read()
+      if (done) {
+        break
+      }
+      buffer += decoder.decode(value, {stream: true})
+      const drained = drainServerSentEventFrames(buffer)
+      buffer = drained.rest
+      for (const data of drained.data) {
+        yield data
+      }
+    }
+    buffer += decoder.decode()
+    const drained = drainServerSentEventFrames(buffer)
+    for (const data of drained.data) {
+      yield data
+    }
+    const tail = drained.rest.trim()
+    if (tail.length > 0) {
+      const data = readServerSentEventFrameData(tail)
+      if (data !== undefined) {
+        yield data
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+function drainServerSentEventFrames(buffer: string): {data: string[]; rest: string} {
+  const data: string[] = []
+  let rest = buffer
+
+  while (true) {
+    const boundary = nextServerSentEventBoundary(rest)
+    if (boundary === undefined) {
+      return {data, rest}
+    }
+
+    const frame = rest.slice(0, boundary.index)
+    rest = rest.slice(boundary.index + boundary.length)
+    const frameData = readServerSentEventFrameData(frame)
+    if (frameData !== undefined) {
+      data.push(frameData)
+    }
+  }
+}
+
+function nextServerSentEventBoundary(buffer: string): {index: number; length: number} | undefined {
+  const lf = buffer.indexOf('\n\n')
+  const crlf = buffer.indexOf('\r\n\r\n')
+  if (lf === -1 && crlf === -1) {
+    return undefined
+  }
+  if (lf === -1) {
+    return {index: crlf, length: 4}
+  }
+  if (crlf === -1 || lf < crlf) {
+    return {index: lf, length: 2}
+  }
+  return {index: crlf, length: 4}
+}
+
+function readServerSentEventFrameData(frame: string): string | undefined {
+  const lines = frame.split(/\r?\n/)
+  const data = lines
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).replace(/^ /, ''))
+
+  return data.length === 0 ? undefined : data.join('\n')
 }

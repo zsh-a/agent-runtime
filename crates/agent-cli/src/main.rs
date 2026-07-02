@@ -299,6 +299,24 @@ enum Command {
         host: String,
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
+        #[arg(long, env = "AGENT_LLM_PROVIDER", default_value = "mock")]
+        provider: String,
+        #[arg(long, default_value = "mock-model")]
+        model: String,
+        #[arg(long, default_value = "mock response")]
+        mock_response: String,
+        #[arg(long, env = "OPENAI_BASE_URL")]
+        api_base_url: Option<String>,
+        #[arg(long, default_value = "OPENAI_API_KEY")]
+        api_key_env: String,
+        #[arg(long, default_value = "2023-06-01")]
+        anthropic_version: String,
+        #[arg(long)]
+        temperature: Option<f32>,
+        #[arg(long)]
+        max_output_tokens: Option<u32>,
+        #[arg(long, default_value_t = 4)]
+        max_tool_rounds: u32,
     },
     Tui {
         #[arg(long, default_value = DEFAULT_REGISTRY)]
@@ -744,6 +762,15 @@ async fn main() -> Result<()> {
             stdio,
             host,
             port,
+            provider,
+            model,
+            mock_response,
+            api_base_url,
+            api_key_env,
+            anthropic_version,
+            temperature,
+            max_output_tokens,
+            max_tool_rounds,
         } => {
             let catalog = context.required_catalog(catalog)?;
             let store = context.store(store);
@@ -755,6 +782,17 @@ async fn main() -> Result<()> {
                 catalog,
                 store,
                 tool_overrides(tool_host, mock_tool, tool_source).await?,
+                chat::ChatLlmOptions {
+                    provider,
+                    model,
+                    mock_response,
+                    api_base_url,
+                    api_key_env,
+                    anthropic_version,
+                    temperature,
+                    max_output_tokens,
+                    max_tool_rounds,
+                },
             )
             .await?;
             if stdio {

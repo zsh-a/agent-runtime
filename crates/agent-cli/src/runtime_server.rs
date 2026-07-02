@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use agent_chat::{ChatEventStream, ChatTurnRequest, ChatTurnRunner};
 use agent_core::{
     AgentProposalStore, AgentRunRecord, AgentRunResult, AgentRunStore, AgentRuntimeCatalog,
     AgentServices, AgentSessionStore, ApprovalDecision, ApprovalDecisionKind, PROTOCOL_VERSION,
@@ -16,6 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     catalog::{read_catalog, registry_from_catalog},
+    chat::{ChatLlmOptions, provider_from_options},
     metrics::{RuntimeMetricsSummary, build_metrics_summary},
     proposal::{
         ProposalAction, ProposalActionResponse, ProposalDecisionResponse,
@@ -37,6 +39,7 @@ pub(crate) struct RuntimeServer {
     pub(crate) catalog: Arc<AgentRuntimeCatalog>,
     runner: Arc<AgentRunner>,
     services: Arc<CliServices>,
+    chat: ChatLlmOptions,
     run_store: Arc<FileRunStore>,
     proposal_store: Arc<FileProposalStore>,
     session_store: Arc<FileSessionStore>,
@@ -118,6 +121,7 @@ impl RuntimeServer {
         catalog_path: Utf8PathBuf,
         store_path: Utf8PathBuf,
         tool_overrides: ToolOverrides,
+        chat: ChatLlmOptions,
     ) -> Result<Self> {
         info!(
             catalog = %catalog_path,
@@ -159,11 +163,33 @@ impl RuntimeServer {
             catalog,
             runner,
             services,
+            chat,
             run_store: store,
             proposal_store,
             session_store,
             store_path,
         })
+    }
+
+    pub(crate) fn stream_chat_turn(&self, mut request: ChatTurnRequest) -> Result<ChatEventStream> {
+        if request.tools.is_empty() {
+            request.tools = self.catalog.tools.clone();
+        }
+        info!(
+            turn_id = request.turn_id.as_deref().unwrap_or("none"),
+            session_id = request.session_id.as_deref().unwrap_or("none"),
+            thread_id = request.thread_id.as_deref().unwrap_or("none"),
+            agent_id = request.agent_id.as_deref().unwrap_or("none"),
+            provider = %request.provider,
+            model = %request.model,
+            tool_count = request.tools.len(),
+            "server chat turn requested",
+        );
+        let mut chat = self.chat.clone();
+        chat.provider = request.provider.clone();
+        chat.model = request.model.clone();
+        let provider = provider_from_options(&chat)?;
+        Ok(ChatTurnRunner::new(provider, self.services.clone()).stream(request))
     }
 
     pub(crate) async fn run_agent(

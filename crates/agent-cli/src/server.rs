@@ -1,5 +1,6 @@
 use std::{convert::Infallible, net::SocketAddr};
 
+use agent_chat::{ChatError, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest};
 use agent_core::{ProposalId, RunId, SessionId, ToolSpec};
 use axum::{
     Json, Router,
@@ -11,7 +12,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use futures::stream;
+use futures::{StreamExt, stream};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -44,6 +45,7 @@ pub(crate) async fn serve_http(server: RuntimeServer, host: String, port: u16) -
         .route("/healthz", get(http_healthz))
         .route("/catalog/summary", get(http_catalog_summary))
         .route("/metrics/summary", get(http_metrics_summary))
+        .route("/chat/turn", post(http_chat_turn))
         .route("/agents/{agent_id}/run", post(http_agent_run))
         .route("/runs", get(http_runs))
         .route("/runs/{run_id}", get(http_run_inspect))
@@ -109,6 +111,34 @@ async fn http_metrics_summary(State(server): State<RuntimeServer>) -> Response {
             "metrics_summary_failed",
             err,
         ),
+    }
+}
+
+async fn http_chat_turn(
+    State(server): State<RuntimeServer>,
+    Json(request): Json<ChatTurnRequest>,
+) -> Response {
+    match server.stream_chat_turn(request) {
+        Ok(stream) => {
+            let stream = stream.map(|event| {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(error) => chat_error_event(error),
+                };
+                let data = serde_json::to_string(&event).unwrap_or_else(|err| {
+                    json!({
+                        "kind": "error",
+                        "content": format!("failed to encode chat event: {err}"),
+                        "round": event.round,
+                        "metadata": {}
+                    })
+                    .to_string()
+                });
+                Ok::<_, Infallible>(Event::default().event("chat_turn_event").data(data))
+            });
+            Sse::new(stream).into_response()
+        }
+        Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, "chat_turn_failed", err),
     }
 }
 
@@ -330,6 +360,26 @@ async fn http_session_fork(
             "session_fork_failed",
             err,
         ),
+    }
+}
+
+fn chat_error_event(error: ChatError) -> ChatTurnEvent {
+    ChatTurnEvent {
+        kind: ChatTurnEventKind::Error,
+        content: Some(error.record.message.clone()),
+        response: None,
+        tool_call_id: None,
+        tool_name: None,
+        partial_input_json: None,
+        tool_input: None,
+        tool_output: None,
+        usage: None,
+        round: 0,
+        metadata: json!({
+            "code": error.record.code,
+            "retryable": error.record.retryable,
+            "details": error.record.details,
+        }),
     }
 }
 

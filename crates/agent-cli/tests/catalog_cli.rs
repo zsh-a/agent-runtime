@@ -1425,6 +1425,52 @@ fn http_server_handles_catalog_summary_and_agent_run() {
 }
 
 #[test]
+fn http_server_streams_chat_turn_events() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("http-chat-store");
+    let port = reserve_local_port();
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let child = std::process::Command::new(agent_bin)
+        .args([
+            "serve",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--mock-response",
+            "hello over sse",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("HTTP server starts");
+    let _server = ChildGuard(child);
+    wait_for_http_server(port);
+
+    let response = http_text_request(
+        port,
+        "POST",
+        "/chat/turn",
+        Some(
+            r#"{"turn_id":"turn_http_1","agent_id":"execution_review","provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}],"metadata":{"source":"http_test"}}"#,
+        ),
+    );
+
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.contains("content-type: text/event-stream"));
+    assert!(response.contains("event: chat_turn_event"));
+    assert!(response.contains(r#""kind":"started""#));
+    assert!(response.contains(r#""kind":"delta""#));
+    assert!(response.contains(r#""content":"hello over sse""#));
+    assert!(response.contains(r#""kind":"round_finished""#));
+    assert!(response.contains(r#""kind":"done""#));
+}
+
+#[test]
 fn config_profile_drives_http_serve_defaults() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = dir.path().join("configured-http-store");

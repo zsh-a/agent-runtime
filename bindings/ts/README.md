@@ -5,7 +5,8 @@ Small, dependency-light TypeScript bindings for the `agent.v1` JSON contracts.
 The package intentionally keeps runtime concerns separate:
 
 - `types.ts` mirrors stable wire contracts.
-- `http-client.ts` talks to the Agent Runtime HTTP server.
+- `http-client.ts` talks to the Agent Runtime HTTP server, including
+  `streamChatTurn()` for chat turn SSE events.
 - `generate-object.ts` builds structured LLM requests over any `complete()`
   transport.
 
