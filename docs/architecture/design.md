@@ -1617,6 +1617,20 @@ profile = "local-dev"
 trace_dir = "./traces"
 store = "file"
 
+[[runtime.hooks]]
+name = "audit_run"
+event = "RunStart"
+kind = "process"
+effect = "observe"
+command = ["./hooks/audit-run"]
+timeout_ms = 1000
+
+[runtime.context]
+max_input_tokens = 128000
+reserve_output_tokens = 4096
+preserve_recent_messages = 12
+compact_when_over_budget = true
+
 [llm]
 provider = "mock"
 model = "mock-model"

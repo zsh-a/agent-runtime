@@ -687,7 +687,11 @@ Load external tool sources from JSON/YAML manifests:
 ```
 
 The manifest can be used with `run`, `replay --execute`, `tool list`,
-`tool call`, `serve`, `eval`, and proposal apply/undo:
+`tool call`, `serve`, `tui`, `eval`, and proposal apply/undo. Tools from
+manifests are added to chat/TUI tool specs, so their `risk` values participate
+in TUI high-risk approval. Interactive TUI treats tools without a manifest
+`ToolSpec` as high-risk by default, and `/tools` shows the active chat tool
+inventory with risk, source, and policy status:
 
 ```bash
 rtk cargo run -p agent-cli -- tool list \
@@ -984,6 +988,10 @@ GET  /sessions/{session_id}
 POST /sessions/{session_id}/fork
 POST /agents/{agent_id}/run
 ```
+
+`GET /tools` returns the effective server runtime tools, including catalog
+tools, configured tool-source manifest tools, and the runtime built-in
+`agent.run`.
 
 `GET /runs/{run_id}/events` returns `text/event-stream` where each SSE data
 frame is one persisted `TraceEvent` JSON object from the run trace. This is the
@@ -1339,6 +1347,20 @@ catalog = "fixtures/contracts/catalog.valid.json"
 store = ".agent-runtime/server-store"
 host = "127.0.0.1"
 port = 8765
+
+[[profiles.server.hooks]]
+name = "audit_run"
+event = "RunStart"
+kind = "process"
+effect = "observe"
+command = ["./hooks/audit-run"]
+timeout_ms = 1000
+
+[profiles.server.context]
+max_input_tokens = 128000
+reserve_output_tokens = 4096
+preserve_recent_messages = 12
+compact_when_over_budget = true
 ```
 
 The CLI loads `agent-runtime.toml` automatically when it exists. Override the
@@ -1364,10 +1386,13 @@ rtk cargo run -p agent-cli -- \
 
 Command-line values win over profile values. Profiles currently cover common
 runtime defaults: `registry`, `catalog`, `store`, `eval_store`,
-`tool_sources`, `host`, `port`, `stdio`, `timeout_seconds`, `max_retries`, and
-`retry_backoff_ms`. `agent run`, `agent replay --mode live`, and `agent cmd run`
-also expose `--max-retries` and `--retry-backoff-ms` flags for one-off
-debugging runs.
+`tool_sources`, `hooks`, `host`, `port`, `stdio`, `timeout_seconds`,
+`max_retries`, `retry_backoff_ms`, and chat context policy under
+`runtime.context`. `agent run`, `agent tick`,
+`agent replay --mode live`, `agent cmd run`, `agent serve`, and `agent tui`
+install configured process hooks into the runtime runner; view-only and
+deterministic replay modes do not execute hooks. One-off debugging runs can
+still override retry settings with `--max-retries` and `--retry-backoff-ms`.
 
 ## Dependency Approach
 

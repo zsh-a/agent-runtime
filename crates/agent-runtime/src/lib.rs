@@ -19,6 +19,7 @@ pub use scheduler::AgentScheduler;
 pub use services::BasicAgentServices;
 pub use subagent::{
     AGENT_RUN_TOOL_NAME, AgentRunToolContext, agent_run_tool_spec, call_agent_run_tool,
+    ensure_agent_run_tool,
 };
 pub use trace::MemoryTraceSink;
 

@@ -11,6 +11,12 @@ use crate::{HookManager, MemoryTraceSink, RunControl, runner::AgentRunner};
 
 pub const AGENT_RUN_TOOL_NAME: &str = "agent.run";
 
+pub fn ensure_agent_run_tool(tools: &mut Vec<ToolSpec>) {
+    if !tools.iter().any(|tool| tool.name == AGENT_RUN_TOOL_NAME) {
+        tools.push(agent_run_tool_spec());
+    }
+}
+
 pub fn agent_run_tool_spec() -> ToolSpec {
     ToolSpec {
         name: AGENT_RUN_TOOL_NAME.to_owned(),

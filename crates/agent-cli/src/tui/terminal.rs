@@ -10,11 +10,11 @@ use crossterm::event::{
 use miette::{IntoDiagnostic, Result};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::task::JoinHandle;
 
 use super::{
-    commands::{execute_command, start_natural_language_task},
-    data::{TuiState, TuiUpdate},
+    chat::{TuiTaskHandle, start_natural_language_task},
+    commands::execute_command,
+    data::{TuiActivityItem, TuiActivityKind, TuiState, TuiUpdate},
     render::render_tui_frame,
 };
 
@@ -47,10 +47,13 @@ async fn run_tui_event_loop(
     mouse_capture: bool,
 ) -> Result<()> {
     let (sender, mut receiver) = unbounded_channel();
-    let mut active_task: Option<JoinHandle<()>> = None;
+    let mut active_task: Option<TuiTaskHandle> = None;
     loop {
         drain_updates(state, &mut receiver);
-        if active_task.as_ref().is_some_and(|task| task.is_finished()) {
+        if active_task
+            .as_ref()
+            .is_some_and(|task| task.join.is_finished())
+        {
             active_task = None;
         }
         terminal
@@ -75,9 +78,16 @@ async fn run_tui_event_loop(
                         KeyCode::Char('i') => state.enter_command("/inspect "),
                         KeyCode::Char('R') => {
                             if let Err(error) = state.refresh().await {
-                                state.push_event(format!("refresh failed: {error}"));
+                                state.push_activity(TuiActivityItem::with_detail(
+                                    TuiActivityKind::Error,
+                                    "refresh failed",
+                                    error.to_string(),
+                                ));
                             } else {
-                                state.push_event("refreshed catalog/trace/store");
+                                state.push_activity(TuiActivityItem::new(
+                                    TuiActivityKind::System,
+                                    "refreshed catalog/trace/store",
+                                ));
                             }
                         }
                         KeyCode::Char('?') => run_command(state, "/help").await,
@@ -102,7 +112,7 @@ async fn handle_input_key(
     state: &mut TuiState,
     key: KeyEvent,
     sender: &UnboundedSender<TuiUpdate>,
-    active_task: &mut Option<JoinHandle<()>>,
+    active_task: &mut Option<TuiTaskHandle>,
 ) -> Result<bool> {
     let code = key.code;
     let modifiers = key.modifiers;
@@ -131,7 +141,10 @@ async fn handle_input_key(
                 return Ok(false);
             }
             if state.busy {
-                state.push_event("still running; press Esc or Ctrl-C to cancel before sending");
+                state.push_activity(TuiActivityItem::new(
+                    TuiActivityKind::System,
+                    "still running; press Esc or Ctrl-C to cancel before sending",
+                ));
                 return Ok(false);
             }
             let command = state.take_submitted_input();
@@ -232,7 +245,11 @@ async fn run_command(state: &mut TuiState, command: &str) {
     state.set_busy(true);
     if let Err(error) = execute_command(state, command).await {
         state.push_system_message(format!("Command failed: {error}"));
-        state.push_event(format!("command failed: {error}"));
+        state.push_activity(TuiActivityItem::with_detail(
+            TuiActivityKind::Error,
+            "command failed",
+            error.to_string(),
+        ));
     }
     state.set_busy(false);
 }
@@ -266,13 +283,15 @@ fn scroll_at_column(state: &mut TuiState, column: u16, terminal_width: u16, up: 
     }
 }
 
-fn cancel_active_task(state: &mut TuiState, active_task: &mut Option<JoinHandle<()>>) {
-    if let Some(task) = active_task.take() {
-        task.abort();
+fn cancel_active_task(state: &mut TuiState, active_task: &mut Option<TuiTaskHandle>) {
+    if let Some(task) = active_task.as_ref() {
+        task.cancellation.cancel();
     }
-    state.replace_active_assistant("Cancelled.");
-    state.set_busy(false);
-    state.push_event("cancelled current task");
+    state.replace_active_assistant("Cancelling...");
+    state.push_activity(TuiActivityItem::new(
+        TuiActivityKind::Cancellation,
+        "cancellation requested",
+    ));
 }
 
 fn newline_modifier(modifiers: KeyModifiers) -> bool {
@@ -287,7 +306,8 @@ fn text_modifier(modifiers: KeyModifiers) -> bool {
 
 fn complete_slash_command(state: &mut TuiState) {
     const COMMANDS: &[&str] = &[
-        "help", "clear", "refresh", "run ", "tool ", "replay ", "inspect ",
+        "help", "tools", "clear", "refresh", "run ", "tool ", "approve", "deny", "replay ",
+        "inspect ",
     ];
     let input = state.command_input.as_str();
     if !input.starts_with('/') || input[1..].contains(char::is_whitespace) {

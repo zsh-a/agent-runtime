@@ -58,7 +58,7 @@ pub struct ContextSnapshot {
     pub metadata: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ContextPolicy {
     pub max_input_tokens: u32,
     pub reserve_output_tokens: u32,

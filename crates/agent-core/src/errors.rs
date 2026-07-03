@@ -123,6 +123,12 @@ impl ToolError {
         }
     }
 
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            record: AgentError::cancelled(message).record,
+        }
+    }
+
     pub fn policy_denied(message: impl Into<String>, details: Value) -> Self {
         Self {
             record: AgentError::policy_denied(message, details).record,

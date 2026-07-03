@@ -10,7 +10,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::data::{TranscriptItem, TranscriptRole, TuiState};
+use super::data::{TranscriptItem, TranscriptRole, TuiActivityItem, TuiActivityKind, TuiState};
 
 const MAX_INPUT_HEIGHT: u16 = 8;
 const MIN_INPUT_HEIGHT: u16 = 3;
@@ -110,6 +110,48 @@ fn context_panel(state: &TuiState) -> List<'static> {
             ListItem::new(format!("events: {}", trace.events.len())),
         ]);
     }
+    if let Some(inventory) = &state.tool_inventory {
+        items.push(ListItem::new(format!(
+            "tools {} high {} blocked {}",
+            inventory.total_count(),
+            inventory.high_risk_count(),
+            inventory.blocked_count()
+        )));
+    }
+    if let Some(context) = &state.context_status {
+        items.push(ListItem::new(""));
+        items.push(ListItem::new(Line::styled(
+            "chat context",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        items.push(ListItem::new(format!(
+            "tokens {}/{}",
+            context.token_estimate, context.max_input_tokens
+        )));
+        items.push(ListItem::new(format!("blocks {}", context.block_count)));
+        if context.compacted {
+            let strategy = context.compaction_strategy.as_deref().unwrap_or("unknown");
+            items.push(ListItem::new(format!(
+                "compacted: {} omitted ({strategy})",
+                context.omitted_block_count
+            )));
+        } else {
+            items.push(ListItem::new("compacted: no"));
+        }
+    }
+    if let Some(approval) = &state.pending_approval {
+        items.push(ListItem::new(""));
+        items.push(ListItem::new(Line::styled(
+            "pending approval",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        items.push(ListItem::new(approval.summary()));
+        items.push(ListItem::new("/approve or /deny"));
+    }
     List::new(items).block(panel_block("Context"))
 }
 
@@ -129,15 +171,13 @@ fn chat_panel(state: &TuiState, area: Rect) -> Paragraph<'static> {
 
 fn activity_panel(state: &TuiState, area: Rect) -> List<'static> {
     let mut items = Vec::new();
-    if state.events.is_empty() {
+    if state.activity.is_empty() {
         items.push(ListItem::new(Line::styled(
             "no activity",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        items.extend(state.events.iter().map(|line| {
-            ListItem::new(Line::styled(line.clone(), Style::default().fg(Color::Gray)))
-        }));
+        items.extend(state.activity.iter().map(activity_item));
     }
     if !state.recent_runs.is_empty() {
         items.push(ListItem::new(""));
@@ -168,6 +208,24 @@ fn activity_panel(state: &TuiState, area: Rect) -> List<'static> {
         format!("Activity +{} lines", state.event_scroll)
     };
     List::new(visible).block(panel_block(title))
+}
+
+fn activity_item(activity: &TuiActivityItem) -> ListItem<'static> {
+    let mut spans = vec![
+        Span::styled(
+            format!("{:<7}", activity.kind.label()),
+            activity_kind_style(&activity.kind),
+        ),
+        Span::raw(" "),
+        Span::styled(activity.title.clone(), Style::default().fg(Color::Gray)),
+    ];
+    if let Some(detail) = activity.detail.as_ref().filter(|detail| !detail.is_empty()) {
+        spans.extend([
+            Span::styled(": ", Style::default().fg(Color::DarkGray)),
+            Span::styled(detail.clone(), Style::default().fg(Color::DarkGray)),
+        ]);
+    }
+    ListItem::new(Line::from(spans))
 }
 
 struct InputPanel {
@@ -457,6 +515,22 @@ fn role_style(role: &TranscriptRole) -> Style {
     }
 }
 
+fn activity_kind_style(kind: &TuiActivityKind) -> Style {
+    match kind {
+        TuiActivityKind::System => Style::default().fg(Color::DarkGray),
+        TuiActivityKind::Chat => Style::default().fg(Color::Cyan),
+        TuiActivityKind::Tool => Style::default().fg(Color::Magenta),
+        TuiActivityKind::Context => Style::default().fg(Color::Green),
+        TuiActivityKind::Policy => Style::default().fg(Color::Yellow),
+        TuiActivityKind::Approval => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        TuiActivityKind::Run => Style::default().fg(Color::Cyan),
+        TuiActivityKind::Cancellation => Style::default().fg(Color::Yellow),
+        TuiActivityKind::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    }
+}
+
 fn content_style(role: &TranscriptRole, line: &str) -> Style {
     let trimmed = line.trim_start();
     if trimmed.starts_with('#') {
@@ -497,6 +571,7 @@ mod tests {
                 store_path: Utf8PathBuf::from("store"),
                 registry_path: Utf8PathBuf::from("agents.yaml"),
                 tool_overrides: ToolOverrides::default(),
+                allow_high_risk_tools: true,
                 chat: ChatLlmOptions {
                     provider: "mock".to_owned(),
                     model: "mock-model".to_owned(),
@@ -511,6 +586,8 @@ mod tests {
                 timeout_seconds: 60,
                 max_retries: 0,
                 retry_backoff_ms: 0,
+                hooks: Vec::new(),
+                context_policy: Default::default(),
                 mouse_capture: false,
                 once: false,
             },
@@ -525,6 +602,10 @@ mod tests {
             transcript: Vec::new(),
             active_assistant_index: None,
             events: VecDeque::new(),
+            activity: VecDeque::new(),
+            tool_inventory: None,
+            context_status: None,
+            pending_approval: None,
             chat_messages: Vec::new(),
             chat_scroll: 0,
             event_scroll: 0,

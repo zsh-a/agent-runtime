@@ -1,37 +1,17 @@
-use std::sync::Arc;
-
-use agent_chat::{
-    ChatToolExecution, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner,
-};
-use agent_core::{
-    AgentError, AgentRegistry, AgentRunStore, AgentServices, AgentTrace, PROTOCOL_VERSION, RunId,
-    RunRequest, ToolError, ToolRisk, ToolSpec,
-};
-use agent_llm::{LlmMessage, LlmRole, user_message};
-use agent_runtime::{
-    AGENT_RUN_TOOL_NAME, AgentRunToolContext, AgentRunner, agent_run_tool_spec, call_agent_run_tool,
-};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
-use async_trait::async_trait;
+use agent_core::{AgentRunStore, RunId};
+use agent_store::FileRunStore;
 use camino::Utf8PathBuf;
-use futures::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
-use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
-use crate::{
-    catalog::{load_catalog_registry, read_catalog},
-    chat::provider_from_options,
-    config::execution_policy,
-    registry::load_registry,
-    tools::CliServices,
-    trace_store::write_store_trace,
+use super::{
+    approval::{approve_pending_tool, call_tool_or_request_approval, deny_pending_tool},
+    chat::run_natural_language_command,
+    data::{TuiActivityItem, TuiActivityKind, TuiState, read_trace},
+    format::{compact_json, pretty_json},
+    runtime::TuiRuntime,
+    tool_inventory::{TuiToolInventory, load_tui_tool_inventory},
 };
-
-use super::data::{TuiState, TuiUpdate, read_trace};
 
 pub(super) async fn execute_command(state: &mut TuiState, input: &str) -> Result<()> {
     let input = input.trim();
@@ -44,25 +24,6 @@ pub(super) async fn execute_command(state: &mut TuiState, input: &str) -> Result
     execute_slash_command(state, command.trim()).await
 }
 
-pub(super) fn start_natural_language_task(
-    state: &mut TuiState,
-    text: String,
-    sender: UnboundedSender<TuiUpdate>,
-) -> JoinHandle<()> {
-    let mut messages = state.chat_messages.clone();
-    messages.push(user_message(text.clone()));
-    let options = state.options.clone();
-    state.push_user_message(text);
-    state.start_assistant_stream();
-    state.set_busy(true);
-    tokio::spawn(async move {
-        if let Err(error) = run_natural_language_stream(options, messages, sender.clone()).await {
-            let _ = sender.send(TuiUpdate::Error(error.to_string()));
-        }
-        let _ = sender.send(TuiUpdate::Busy(false));
-    })
-}
-
 async fn execute_slash_command(state: &mut TuiState, input: &str) -> Result<()> {
     let (verb, rest) = split_once(input);
     match verb {
@@ -70,14 +31,20 @@ async fn execute_slash_command(state: &mut TuiState, input: &str) -> Result<()> 
         "clear" => state.clear_output(),
         "refresh" => {
             state.refresh().await?;
-            state.push_event("refreshed catalog/trace/store");
+            state.push_activity(TuiActivityItem::new(
+                TuiActivityKind::System,
+                "refreshed catalog/trace/store",
+            ));
         }
+        "tools" => show_tools_command(state).await?,
         "run" => run_agent_command(state, rest).await?,
         "tool" | "call" => tool_call_command(state, rest).await?,
+        "approve" => approve_pending_tool(state).await?,
+        "deny" => deny_pending_tool(state).await?,
         "trace" | "replay" => load_trace_command(state, rest).await?,
         "inspect" => inspect_run_command(state, rest).await?,
         other => state.push_system_message(format!(
-            "unknown command '/{other}'. Try: /help, /run, /tool, /replay, /inspect, /refresh, /clear"
+            "unknown command '/{other}'. Try: /help, /tools, /run, /tool, /approve, /deny, /replay, /inspect, /refresh, /clear"
         )),
     }
     Ok(())
@@ -87,8 +54,11 @@ fn show_help(state: &mut TuiState) {
     state.push_system_message(
         "Type natural language and press Enter to chat with the default agent.\n\n\
         Slash commands:\n\
+        /tools                      list chat tools, risks, sources, and policy status\n\
         /run <agent_id> [json|text]  run a specific runtime agent\n\
         /tool <name> [json]          call a tool through active CLI services\n\
+        /approve                     approve the pending high-risk tool call\n\
+        /deny                        deny the pending high-risk tool call\n\
         /replay <trace_path>         load a trace into the side panel\n\
         /inspect <run_id>            load a persisted run record summary\n\
         /refresh                     reload catalog, trace, and recent runs\n\
@@ -102,10 +72,22 @@ fn show_help(state: &mut TuiState) {
     );
 }
 
-async fn run_natural_language_command(state: &mut TuiState, text: &str) -> Result<()> {
-    let agent_id = default_agent_id(state).await?;
-    state.push_user_message(text.to_owned());
-    run_chat_turn(state, &agent_id, text).await
+async fn show_tools_command(state: &mut TuiState) -> Result<()> {
+    let inventory = load_tui_tool_inventory(&state.options).await?;
+    state.tool_inventory = Some(inventory.clone());
+    state.push_user_message("/tools");
+    state.push_activity(TuiActivityItem::with_detail(
+        TuiActivityKind::Tool,
+        "tools listed",
+        format!(
+            "{} available, {} high-risk, {} blocked",
+            inventory.total_count(),
+            inventory.high_risk_count(),
+            inventory.blocked_count()
+        ),
+    ));
+    state.push_system_message(format_tool_inventory(&inventory));
+    Ok(())
 }
 
 async fn run_agent_command(state: &mut TuiState, rest: &str) -> Result<()> {
@@ -121,64 +103,24 @@ async fn run_agent_with_input(
     input: Value,
     input_mode: &str,
 ) -> Result<()> {
-    let registry = load_active_registry(state).await?;
-    let store_path = state.options.store_path.clone();
-    let store = Arc::new(
-        FileRunStore::new(store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let lock_store = Arc::new(
-        FileLockStore::new(store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let proposal_store = Arc::new(
-        FileProposalStore::new(store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let services = Arc::new(CliServices::with_proposal_store(
-        state.options.tool_overrides.clone(),
-        proposal_store,
-    ));
-    let runner = AgentRunner::new(registry, store, services)
-        .with_lock_store(lock_store)
-        .with_policy(execution_policy(
-            state.options.timeout_seconds,
-            state.options.max_retries,
-            state.options.retry_backoff_ms,
-        ));
-    let outcome = runner
-        .run_once(
-            agent_id,
-            RunRequest {
-                protocol_version: PROTOCOL_VERSION.to_owned(),
-                run_id: None,
-                input,
-                user: None,
-                trigger: agent_core::TriggerKind::Manual,
-                metadata: json!({
-                    "source": "agent_tui",
-                    "input_mode": input_mode,
-                    "surface": "agent_tui"
-                }),
-            },
-        )
-        .await
-        .into_diagnostic()?;
-    write_store_trace(&store_path, &outcome.trace).await?;
+    let runtime = TuiRuntime::load(&state.options).await?;
+    let outcome = runtime.run_agent_once(agent_id, input, input_mode).await?;
     state.set_trace(
         format!("latest run {}", outcome.result.run_id.0),
         outcome.trace,
     );
     state.refresh_runs().await?;
-    state.push_event(format!(
-        "run {} {} {:?}",
-        outcome.result.run_id.0, outcome.result.agent_id, outcome.result.status
+    state.push_activity(TuiActivityItem::with_detail(
+        TuiActivityKind::Run,
+        format!("run {}", outcome.result.run_id.0),
+        format!("{} {:?}", outcome.result.agent_id, outcome.result.status),
     ));
     if let Some(summary) = outcome.result.summary {
-        state.push_event(format!("summary: {summary}"));
+        state.push_activity(TuiActivityItem::with_detail(
+            TuiActivityKind::Run,
+            "summary",
+            summary,
+        ));
     }
     push_agent_output(state, &outcome.result.output);
     Ok(())
@@ -188,346 +130,7 @@ async fn tool_call_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let (name, json_input) = split_name_and_json(rest, "tool name")?;
     let input = parse_json_or_default(json_input, "tool input")?;
     state.push_user_message(format!("/tool {name} {}", compact_json(&input)));
-    let services = tui_tool_services(&state.options, None).await?;
-    let output = services
-        .call_tool(&name, input)
-        .await
-        .map_err(|err| miette!(err.record.message))?;
-    state.push_tool_message(Some(name), pretty_json(&output));
-    Ok(())
-}
-
-async fn run_chat_turn(state: &mut TuiState, agent_id: &str, text: &str) -> Result<()> {
-    let provider = provider_from_options(&state.options.chat)?;
-    let services = tui_tool_services(&state.options, Some(agent_id.to_owned())).await?;
-    let runner = ChatTurnRunner::new(provider, services);
-    let user = user_message(text);
-    state.chat_messages.push(user.clone());
-    let request = ChatTurnRequest {
-        protocol_version: PROTOCOL_VERSION.to_owned(),
-        turn_id: None,
-        surface: Some("agent_tui".to_owned()),
-        mode: Some("natural_language".to_owned()),
-        session_id: None,
-        thread_id: None,
-        agent_id: Some(agent_id.to_owned()),
-        provider: state.options.chat.provider.clone(),
-        model: state.options.chat.model.clone(),
-        messages: chat_request_messages(&state.options, agent_id, state.chat_messages.clone())
-            .await?,
-        temperature: state.options.chat.temperature,
-        max_output_tokens: state.options.chat.max_output_tokens,
-        tools: chat_tools(state).await?,
-        metadata: json!({
-            "source": "agent_tui",
-            "surface": "agent_tui",
-            "mode": "natural_language",
-        }),
-        context_policy: Default::default(),
-        max_tool_rounds: state.options.chat.max_tool_rounds,
-        tool_execution: ChatToolExecution::Runtime,
-    };
-
-    let mut stream = runner.stream(request);
-    let mut assistant_text = String::new();
-    let mut final_response = None;
-    state.start_assistant_stream();
-    while let Some(event) = stream.next().await {
-        let event = event.map_err(|err| miette!(err.record.message))?;
-        apply_chat_event_to_tui(state, &event, &mut assistant_text, &mut final_response);
-    }
-    let assistant_content = final_response
-        .as_ref()
-        .map(|response: &agent_llm::LlmResponse| response.content.clone())
-        .filter(|content| !content.is_empty())
-        .unwrap_or(assistant_text);
-    if !assistant_content.is_empty() {
-        state.replace_active_assistant(assistant_content.clone());
-        state.chat_messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: Value::String(assistant_content),
-            name: None,
-            metadata: json!({}),
-        });
-    } else {
-        state.finish_assistant_stream();
-    }
-    Ok(())
-}
-
-async fn run_natural_language_stream(
-    options: super::data::TuiOptions,
-    mut messages: Vec<LlmMessage>,
-    sender: UnboundedSender<TuiUpdate>,
-) -> Result<()> {
-    let agent_id = default_agent_id_from_options(&options).await?;
-    let provider = provider_from_options(&options.chat)?;
-    let services = tui_tool_services(&options, Some(agent_id.clone())).await?;
-    let runner = ChatTurnRunner::new(provider, services);
-    let request = ChatTurnRequest {
-        protocol_version: PROTOCOL_VERSION.to_owned(),
-        turn_id: None,
-        surface: Some("agent_tui".to_owned()),
-        mode: Some("natural_language".to_owned()),
-        session_id: None,
-        thread_id: None,
-        agent_id: Some(agent_id.clone()),
-        provider: options.chat.provider.clone(),
-        model: options.chat.model.clone(),
-        messages: chat_request_messages(&options, &agent_id, messages.clone()).await?,
-        temperature: options.chat.temperature,
-        max_output_tokens: options.chat.max_output_tokens,
-        tools: chat_tools_from_options(&options).await?,
-        metadata: json!({
-            "source": "agent_tui",
-            "surface": "agent_tui",
-            "mode": "natural_language",
-        }),
-        context_policy: Default::default(),
-        max_tool_rounds: options.chat.max_tool_rounds,
-        tool_execution: ChatToolExecution::Runtime,
-    };
-
-    let mut stream = runner.stream(request);
-    let mut assistant_text = String::new();
-    let mut final_response = None;
-    while let Some(event) = stream.next().await {
-        let event = event.map_err(|err| miette!(err.record.message))?;
-        for update in updates_from_chat_event(&event, &mut assistant_text, &mut final_response) {
-            let _ = sender.send(update);
-        }
-    }
-    let assistant_content = final_response
-        .as_ref()
-        .map(|response: &agent_llm::LlmResponse| response.content.clone())
-        .filter(|content| !content.is_empty())
-        .unwrap_or(assistant_text);
-    if !assistant_content.is_empty() {
-        let _ = sender.send(TuiUpdate::AssistantReplace(assistant_content.clone()));
-        messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: Value::String(assistant_content),
-            name: None,
-            metadata: json!({}),
-        });
-        let _ = sender.send(TuiUpdate::ChatMessages(messages));
-    } else {
-        let _ = sender.send(TuiUpdate::AssistantFinish);
-    }
-    Ok(())
-}
-
-fn apply_chat_event_to_tui(
-    state: &mut TuiState,
-    event: &ChatTurnEvent,
-    assistant_text: &mut String,
-    final_response: &mut Option<agent_llm::LlmResponse>,
-) {
-    for update in updates_from_chat_event(event, assistant_text, final_response) {
-        state.apply_update(update);
-    }
-}
-
-fn updates_from_chat_event(
-    event: &ChatTurnEvent,
-    assistant_text: &mut String,
-    final_response: &mut Option<agent_llm::LlmResponse>,
-) -> Vec<TuiUpdate> {
-    let mut updates = Vec::new();
-    match event.kind {
-        ChatTurnEventKind::Started => {
-            let provider = event
-                .metadata
-                .get("provider")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let model = event
-                .metadata
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            updates.push(TuiUpdate::Event(format!(
-                "chat started: {provider}/{model}"
-            )));
-        }
-        ChatTurnEventKind::LlmStarted => {
-            updates.push(TuiUpdate::Event(format!("round {} started", event.round)));
-        }
-        ChatTurnEventKind::Delta => {
-            if let Some(content) = &event.content {
-                assistant_text.push_str(content);
-                updates.push(TuiUpdate::AssistantDelta(content.clone()));
-            }
-        }
-        ChatTurnEventKind::ThinkingDelta => {
-            if let Some(content) = &event.content {
-                updates.push(TuiUpdate::Event(format!("thinking: {content}")));
-            }
-        }
-        ChatTurnEventKind::ThinkingSignatureDelta => {}
-        ChatTurnEventKind::ToolCallStart => {
-            updates.push(TuiUpdate::Event(format!(
-                "tool start: {} {}",
-                event.tool_call_id.as_deref().unwrap_or(""),
-                event.tool_name.as_deref().unwrap_or("")
-            )));
-        }
-        ChatTurnEventKind::ToolCallDelta => {
-            if let Some(partial) = &event.partial_input_json {
-                updates.push(TuiUpdate::Event(format!(
-                    "tool args {}: {partial}",
-                    event.tool_call_id.as_deref().unwrap_or("")
-                )));
-            }
-        }
-        ChatTurnEventKind::ToolCallEnd => {
-            updates.push(TuiUpdate::Event(format!(
-                "tool ready: {} {}",
-                event.tool_call_id.as_deref().unwrap_or(""),
-                event.tool_name.as_deref().unwrap_or("")
-            )));
-        }
-        ChatTurnEventKind::ToolResult => {
-            let tool_name = event.tool_name.as_deref().unwrap_or("");
-            let output = event.tool_output.as_ref().unwrap_or(&Value::Null);
-            if tool_name == "ask_user" {
-                if let Some(lines) = decision_request_lines(output) {
-                    updates.push(TuiUpdate::ToolMessage {
-                        title: Some(tool_name.to_owned()),
-                        content: lines.join("\n"),
-                    });
-                } else {
-                    updates.push(TuiUpdate::ToolMessage {
-                        title: Some(tool_name.to_owned()),
-                        content: format!("tool result: {}", compact_json(output)),
-                    });
-                }
-            } else {
-                updates.push(TuiUpdate::ToolMessage {
-                    title: Some(tool_name.to_owned()),
-                    content: format!("tool result: {}", compact_json(output)),
-                });
-            }
-        }
-        ChatTurnEventKind::Usage => {
-            if let Some(usage) = &event.usage {
-                updates.push(TuiUpdate::Event(format!(
-                    "usage: input={} output={} total={}",
-                    usage.input_tokens, usage.output_tokens, usage.total_tokens
-                )));
-            }
-        }
-        ChatTurnEventKind::RoundFinished => {
-            if let Some(response) = &event.response {
-                *final_response = Some(response.clone());
-                updates.push(TuiUpdate::Event(format!(
-                    "round {} finished: {:?}",
-                    event.round, response.finish_reason
-                )));
-            }
-        }
-        ChatTurnEventKind::Error => {
-            let message = event.content.as_deref().unwrap_or("unknown error");
-            updates.push(TuiUpdate::AssistantReplace(format!("Error: {message}")));
-            updates.push(TuiUpdate::Event(format!("chat error: {message}")));
-        }
-        ChatTurnEventKind::Done => {
-            let reason = event
-                .metadata
-                .get("stop_reason")
-                .and_then(Value::as_str)
-                .unwrap_or("done");
-            updates.push(TuiUpdate::AssistantFinish);
-            updates.push(TuiUpdate::Event(format!(
-                "done: {reason} in {} round(s)",
-                event.round
-            )));
-        }
-    }
-    updates
-}
-
-async fn chat_tools(state: &TuiState) -> Result<Vec<ToolSpec>> {
-    chat_tools_from_options(&state.options).await
-}
-
-async fn chat_request_messages(
-    options: &super::data::TuiOptions,
-    agent_id: &str,
-    messages: Vec<LlmMessage>,
-) -> Result<Vec<LlmMessage>> {
-    let Some(system_prompt) = catalog_system_prompt(options, agent_id).await? else {
-        return Ok(messages);
-    };
-    let mut request_messages = Vec::with_capacity(messages.len() + 1);
-    request_messages.push(LlmMessage {
-        role: LlmRole::System,
-        content: Value::String(system_prompt),
-        name: None,
-        metadata: json!({"source": "agent_catalog"}),
-    });
-    request_messages.extend(messages);
-    Ok(request_messages)
-}
-
-async fn catalog_system_prompt(
-    options: &super::data::TuiOptions,
-    agent_id: &str,
-) -> Result<Option<String>> {
-    let Some(path) = &options.catalog_path else {
-        return Ok(None);
-    };
-    let catalog = read_catalog(path.clone()).await?;
-    let Some(agent) = catalog.agents.iter().find(|agent| agent.id == agent_id) else {
-        return Ok(None);
-    };
-
-    let mut sections = vec![format!("You are {}.", agent.name)];
-    if let Some(description) = agent
-        .description
-        .as_deref()
-        .map(str::trim)
-        .filter(|description| !description.is_empty())
-    {
-        sections.push(description.to_owned());
-    }
-    let mut prompt_blocks = catalog.prompt_blocks;
-    prompt_blocks.sort_by_key(|block| block.index);
-    for block in prompt_blocks {
-        let text = block.text.trim();
-        if !text.is_empty() {
-            sections.push(text.to_owned());
-        }
-    }
-    if !catalog.tools.is_empty() {
-        sections.push(
-            "Use the provided tools when they are necessary. Keep normal replies concise and direct."
-                .to_owned(),
-        );
-    }
-    Ok(Some(sections.join("\n\n")))
-}
-
-async fn chat_tools_from_options(options: &super::data::TuiOptions) -> Result<Vec<ToolSpec>> {
-    let mut tools = match &options.catalog_path {
-        Some(path) => read_catalog(path.clone()).await?.tools,
-        None => Vec::new(),
-    };
-    tools.extend(options.tool_overrides.source_specs.clone());
-    if !tools.iter().any(|tool| tool.name == AGENT_RUN_TOOL_NAME) {
-        tools.push(agent_run_tool_spec());
-    }
-    if !tools.iter().any(|tool| tool.name == "echo") {
-        tools.push(ToolSpec {
-            name: "echo".to_owned(),
-            description: "Echo the provided JSON input.".to_owned(),
-            input_schema: json!({"type": "object"}),
-            output_schema: Some(json!({"type": "object"})),
-            risk: ToolRisk::ReadOnly,
-            metadata: json!({"source": "agent_cli_builtin"}),
-        });
-    }
-    Ok(tools)
+    call_tool_or_request_approval(state, name, input).await
 }
 
 async fn load_trace_command(state: &mut TuiState, rest: &str) -> Result<()> {
@@ -538,7 +141,11 @@ async fn load_trace_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let path = Utf8PathBuf::from(path);
     let trace = read_trace(path.clone()).await?;
     state.set_trace(path.to_string(), trace);
-    state.push_event(format!("loaded trace {path}"));
+    state.push_activity(TuiActivityItem::with_detail(
+        TuiActivityKind::System,
+        "loaded trace",
+        path.to_string(),
+    ));
     Ok(())
 }
 
@@ -555,9 +162,10 @@ async fn inspect_run_command(state: &mut TuiState, rest: &str) -> Result<()> {
         .await
         .into_diagnostic()?
         .ok_or_else(|| miette!("run '{run_id}' was not found"))?;
-    state.push_event(format!(
-        "run {} {} {:?}",
-        run_id, record.agent_id, record.status
+    state.push_activity(TuiActivityItem::with_detail(
+        TuiActivityKind::Run,
+        format!("run {run_id}"),
+        format!("{} {:?}", record.agent_id, record.status),
     ));
     state.push_system_message(pretty_json(&record));
     Ok(())
@@ -601,159 +209,6 @@ fn parse_run_input(input: &str) -> Result<Value> {
     }
 }
 
-async fn default_agent_id(state: &TuiState) -> Result<String> {
-    default_agent_id_from_options(&state.options).await
-}
-
-async fn default_agent_id_from_options(options: &super::data::TuiOptions) -> Result<String> {
-    let agents = match &options.catalog_path {
-        Some(path) => read_catalog(path.clone()).await?.agents,
-        None => load_registry(options.registry_path.clone())
-            .await?
-            .list_specs(),
-    };
-    agents
-        .into_iter()
-        .next()
-        .map(|agent| agent.id)
-        .ok_or_else(|| miette!("no default agent is available"))
-}
-
-async fn load_active_registry(state: &TuiState) -> Result<Arc<dyn AgentRegistry>> {
-    load_active_registry_from_options(&state.options).await
-}
-
-async fn load_active_registry_from_options(
-    options: &super::data::TuiOptions,
-) -> Result<Arc<dyn AgentRegistry>> {
-    match &options.catalog_path {
-        Some(path) => {
-            let registry: Arc<dyn AgentRegistry> = load_catalog_registry(path.clone()).await?;
-            Ok(registry)
-        }
-        None => {
-            let registry: Arc<dyn AgentRegistry> = load_registry(options.registry_path.clone())
-                .await?
-                .into_agent_registry();
-            Ok(registry)
-        }
-    }
-}
-
-async fn tui_tool_services(
-    options: &super::data::TuiOptions,
-    parent_agent_id: Option<String>,
-) -> Result<Arc<dyn AgentServices>> {
-    let proposal_store = Arc::new(
-        FileProposalStore::new(options.store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let inner = Arc::new(CliServices::with_proposal_store(
-        options.tool_overrides.clone(),
-        proposal_store,
-    ));
-    let registry = load_active_registry_from_options(options).await?;
-    let store = Arc::new(
-        FileRunStore::new(options.store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let lock_store = Arc::new(
-        FileLockStore::new(options.store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let runner = AgentRunner::new(registry, store, inner.clone())
-        .with_lock_store(lock_store)
-        .with_policy(execution_policy(
-            options.timeout_seconds,
-            options.max_retries,
-            options.retry_backoff_ms,
-        ));
-    Ok(Arc::new(TuiToolServices {
-        inner,
-        agent_runner: runner,
-        store_path: options.store_path.clone(),
-        parent_agent_id,
-    }))
-}
-
-struct TuiToolServices {
-    inner: Arc<CliServices>,
-    agent_runner: AgentRunner,
-    store_path: Utf8PathBuf,
-    parent_agent_id: Option<String>,
-}
-
-#[async_trait]
-impl AgentServices for TuiToolServices {
-    async fn call_tool(&self, name: &str, input: Value) -> std::result::Result<Value, ToolError> {
-        if name != AGENT_RUN_TOOL_NAME {
-            return self.inner.call_tool(name, input).await;
-        }
-        let output = call_agent_run_tool(
-            &self.agent_runner,
-            input,
-            AgentRunToolContext {
-                parent_agent_id: self.parent_agent_id.clone(),
-                metadata: json!({
-                    "source": "agent_tui",
-                    "surface": "agent_tui",
-                }),
-                cancellation: CancellationToken::new(),
-                ..AgentRunToolContext::default()
-            },
-        )
-        .await?;
-        persist_agent_run_trace(&self.store_path, &output).await?;
-        Ok(output)
-    }
-
-    async fn emit_event(
-        &self,
-        event: agent_core::AgentEvent,
-    ) -> std::result::Result<(), AgentError> {
-        self.inner.emit_event(event).await
-    }
-
-    async fn load_state(&self, key: &str) -> std::result::Result<Option<Value>, AgentError> {
-        self.inner.load_state(key).await
-    }
-
-    async fn save_state(&self, key: &str, value: Value) -> std::result::Result<(), AgentError> {
-        self.inner.save_state(key, value).await
-    }
-
-    async fn create_proposal(
-        &self,
-        proposal: agent_core::ProposalEnvelope,
-    ) -> std::result::Result<(), AgentError> {
-        self.inner.create_proposal(proposal).await
-    }
-}
-
-async fn persist_agent_run_trace(
-    store_path: &Utf8PathBuf,
-    output: &Value,
-) -> Result<(), ToolError> {
-    let Some(trace) = output.get("trace").cloned() else {
-        return Ok(());
-    };
-    let trace: AgentTrace = serde_json::from_value(trace).map_err(|error| {
-        tool_internal_error(format!("failed to decode agent.run trace: {error}"))
-    })?;
-    write_store_trace(store_path, &trace)
-        .await
-        .map_err(|error| tool_internal_error(format!("failed to persist agent.run trace: {error}")))
-}
-
-fn tool_internal_error(message: impl Into<String>) -> ToolError {
-    ToolError {
-        record: AgentError::internal(message).record,
-    }
-}
-
 fn push_agent_output(state: &mut TuiState, output: &Value) {
     if let Some(message) = output.get("message").and_then(Value::as_str) {
         state.push_assistant_message(message.to_owned());
@@ -764,109 +219,98 @@ fn push_agent_output(state: &mut TuiState, output: &Value) {
     }
 }
 
-fn decision_request_lines(output: &Value) -> Option<Vec<String>> {
-    let object = output.as_object()?;
-    if object.get("type").and_then(Value::as_str) != Some("decision_request") {
-        return None;
-    }
-    let title = object.get("title").and_then(Value::as_str)?.trim();
-    if title.is_empty() {
-        return None;
-    }
-    let options = object.get("options").and_then(Value::as_array)?;
-    if options.len() < 2 {
-        return None;
+fn format_tool_inventory(inventory: &TuiToolInventory) -> String {
+    if inventory.items.is_empty() {
+        return "No tools are available.".to_owned();
     }
 
-    let mut lines = vec![format!("decision: {title}")];
-    if let Some(context) = object
-        .get("context")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|context| !context.is_empty())
-    {
-        lines.push(format!("context: {context}"));
+    let mut lines = vec![format!(
+        "Available tools: {} total, {} high-risk, {} blocked",
+        inventory.total_count(),
+        inventory.high_risk_count(),
+        inventory.blocked_count()
+    )];
+    for item in &inventory.items {
+        lines.push(format!(
+            "- {} [{} / {} / {}] {}",
+            item.name,
+            item.risk.label(),
+            item.status_label(),
+            item.source,
+            compact_description(&item.description),
+        ));
     }
-    for (index, option) in options.iter().enumerate() {
-        let option = option.as_object()?;
-        let label = option.get("label").and_then(Value::as_str)?.trim();
-        if label.is_empty() {
-            return None;
-        }
-        let description = option
-            .get("description")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|description| !description.is_empty());
-        let recommended = option
-            .get("recommended")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let marker = if recommended { " [recommended]" } else { "" };
-        match description {
-            Some(description) => {
-                lines.push(format!("  {}. {label} - {description}{marker}", index + 1))
-            }
-            None => lines.push(format!("  {}. {label}{marker}", index + 1)),
-        }
-    }
-    lines.push("reply with your choice to continue".to_owned());
-    Some(lines)
+    lines.join("\n")
 }
 
-fn pretty_json(value: &impl Serialize) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| "<unprintable json>".to_owned())
-}
-
-fn compact_json(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned())
+fn compact_description(description: &str) -> String {
+    let compact = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_DESCRIPTION: usize = 96;
+    if compact.chars().count() > MAX_DESCRIPTION {
+        let mut truncated = compact
+            .chars()
+            .take(MAX_DESCRIPTION.saturating_sub(3))
+            .collect::<String>();
+        truncated.push_str("...");
+        truncated
+    } else {
+        compact
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        chat::ChatLlmOptions,
-        tools::ToolOverrides,
-        tui::data::{TranscriptRole, TuiOptions},
+    use crate::tui::{
+        data::TranscriptRole,
+        test_support::{test_state, test_state_with_policy},
     };
 
-    fn temp_store_path(dir: &tempfile::TempDir) -> Utf8PathBuf {
-        Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("temp path should be utf8")
+    #[tokio::test]
+    async fn tools_command_lists_runtime_tools_and_policy_status() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+
+        execute_command(&mut state, "/tools")
+            .await
+            .expect("tools command succeeds");
+
+        let inventory = state.tool_inventory.as_ref().expect("inventory is loaded");
+        assert_eq!(inventory.total_count(), 2);
+        assert_eq!(inventory.high_risk_count(), 1);
+        assert_eq!(inventory.blocked_count(), 0);
+        assert!(state.transcript.iter().any(|item| {
+            item.content
+                .contains("- agent.run [high / approval / agent_runtime_builtin]")
+                && item
+                    .content
+                    .contains("- echo [read_only / allowed / agent_cli_builtin]")
+        }));
+        let rendered = crate::tui::render::render_tui_once(&state).expect("tui renders");
+        assert!(rendered.contains("tools 2 high 1 blocked 0"));
     }
 
-    fn test_chat_options(response: &str) -> ChatLlmOptions {
-        ChatLlmOptions {
-            provider: "mock".to_owned(),
-            model: "mock-model".to_owned(),
-            mock_response: response.to_owned(),
-            api_base_url: None,
-            api_key_env: "OPENAI_API_KEY".to_owned(),
-            anthropic_version: "2023-06-01".to_owned(),
-            temperature: None,
-            max_output_tokens: None,
-            max_tool_rounds: 4,
-        }
+    #[tokio::test]
+    async fn tools_command_marks_high_risk_tools_blocked_by_policy() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_policy(&dir, "mock response", false).await;
+
+        execute_command(&mut state, "/tools")
+            .await
+            .expect("tools command succeeds");
+
+        let inventory = state.tool_inventory.as_ref().expect("inventory is loaded");
+        assert_eq!(inventory.blocked_count(), 1);
+        assert!(state.transcript.iter().any(|item| {
+            item.content
+                .contains("- agent.run [high / blocked / agent_runtime_builtin]")
+        }));
     }
 
     #[tokio::test]
     async fn run_command_executes_agent_and_loads_trace() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = TuiState::load(TuiOptions {
-            catalog_path: None,
-            trace_path: None,
-            store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
-            tool_overrides: ToolOverrides::default(),
-            chat: test_chat_options("mock response"),
-            timeout_seconds: 60,
-            max_retries: 0,
-            retry_backoff_ms: 0,
-            mouse_capture: false,
-            once: false,
-        })
-        .await
-        .expect("state loads");
+        let mut state = test_state(&dir, "mock response").await;
 
         execute_command(
             &mut state,
@@ -889,21 +333,7 @@ mod tests {
     #[tokio::test]
     async fn natural_language_input_runs_default_agent() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = TuiState::load(TuiOptions {
-            catalog_path: None,
-            trace_path: None,
-            store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
-            tool_overrides: ToolOverrides::default(),
-            chat: test_chat_options("chat answer"),
-            timeout_seconds: 60,
-            max_retries: 0,
-            retry_backoff_ms: 0,
-            mouse_capture: false,
-            once: false,
-        })
-        .await
-        .expect("state loads");
+        let mut state = test_state(&dir, "chat answer").await;
 
         execute_command(&mut state, "Summarize my day")
             .await
@@ -934,193 +364,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn natural_language_task_streams_updates_to_tui_state() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = TuiState::load(TuiOptions {
-            catalog_path: None,
-            trace_path: None,
-            store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
-            tool_overrides: ToolOverrides::default(),
-            chat: test_chat_options("background answer"),
-            timeout_seconds: 60,
-            max_retries: 0,
-            retry_backoff_ms: 0,
-            mouse_capture: false,
-            once: false,
-        })
-        .await
-        .expect("state loads");
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-
-        let task = start_natural_language_task(&mut state, "Hello async".to_owned(), sender);
-        assert!(state.busy);
-        assert!(
-            state
-                .transcript
-                .iter()
-                .any(|item| item.content.contains("Hello async"))
-        );
-
-        loop {
-            let update = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
-                .await
-                .expect("update arrives")
-                .expect("update exists");
-            state.apply_update(update);
-            if !state.busy {
-                break;
-            }
-        }
-        task.await.expect("task joins");
-
-        assert_eq!(state.chat_messages.len(), 2);
-        assert!(
-            state
-                .transcript
-                .iter()
-                .any(|item| item.content.contains("background answer"))
-        );
-        let assistant_items = state
-            .transcript
-            .iter()
-            .filter(|item| item.role == TranscriptRole::Assistant)
-            .collect::<Vec<_>>();
-        assert_eq!(assistant_items.len(), 1);
-        assert_eq!(assistant_items[0].content, "background answer");
-        assert!(
-            crate::tui::render::render_tui_once(&state)
-                .expect("tui renders")
-                .contains("background answer")
-        );
-    }
-
-    #[tokio::test]
-    async fn tui_applies_shared_agent_chat_turn_event_fixture() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = TuiState::load(TuiOptions {
-            catalog_path: None,
-            trace_path: None,
-            store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
-            tool_overrides: ToolOverrides::default(),
-            chat: test_chat_options("unused"),
-            timeout_seconds: 60,
-            max_retries: 0,
-            retry_backoff_ms: 0,
-            mouse_capture: false,
-            once: false,
-        })
-        .await
-        .expect("state loads");
-        state.clear_output();
-
-        let events: Vec<ChatTurnEvent> = serde_json::from_str(include_str!(
-            "../../../../fixtures/docs/agent_chat_turn_events.json"
-        ))
-        .expect("shared chat turn events fixture");
-        let mut assistant_text = String::new();
-        let mut final_response = None;
-        for event in &events {
-            apply_chat_event_to_tui(&mut state, event, &mut assistant_text, &mut final_response);
-        }
-
-        assert_eq!(assistant_text, "Checking ");
-        assert!(final_response.is_some());
-        assert!(
-            state
-                .events
-                .iter()
-                .any(|line| line.contains("tool start: call_1 get_holdings"))
-        );
-        assert!(
-            state
-                .events
-                .iter()
-                .any(|line| line.contains("usage: input=11 output=7 total=18"))
-        );
-        assert!(
-            state
-                .events
-                .iter()
-                .any(|line| line.contains("round 1 finished"))
-        );
-    }
-
-    #[tokio::test]
-    async fn tui_renders_shared_ask_user_turn_fixture_as_decision_options() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = TuiState::load(TuiOptions {
-            catalog_path: None,
-            trace_path: None,
-            store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
-            tool_overrides: ToolOverrides::default(),
-            chat: test_chat_options("unused"),
-            timeout_seconds: 60,
-            max_retries: 0,
-            retry_backoff_ms: 0,
-            mouse_capture: false,
-            once: false,
-        })
-        .await
-        .expect("state loads");
-        state.clear_output();
-
-        let events: Vec<ChatTurnEvent> = serde_json::from_str(include_str!(
-            "../../../../fixtures/docs/agent_chat_ask_user_turn_events.json"
-        ))
-        .expect("shared ask_user turn events fixture");
-        let mut assistant_text = String::new();
-        let mut final_response = None;
-        for event in &events {
-            apply_chat_event_to_tui(&mut state, event, &mut assistant_text, &mut final_response);
-        }
-
-        assert!(
-            state
-                .transcript
-                .iter()
-                .any(|item| item.content.contains("decision: Implementation path"))
-        );
-        assert!(
-            state
-                .transcript
-                .iter()
-                .any(|item| item.content.contains("1. Context transcript"))
-        );
-        assert!(
-            state
-                .transcript
-                .iter()
-                .any(|item| item.content.contains("[recommended]"))
-        );
-        assert!(
-            state
-                .transcript
-                .iter()
-                .any(|item| item.content.contains("reply with your choice to continue"))
-        );
-    }
-
-    #[tokio::test]
     async fn run_command_accepts_text_input() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = TuiState::load(TuiOptions {
-            catalog_path: None,
-            trace_path: None,
-            store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
-            tool_overrides: ToolOverrides::default(),
-            chat: test_chat_options("mock response"),
-            timeout_seconds: 60,
-            max_retries: 0,
-            retry_backoff_ms: 0,
-            mouse_capture: false,
-            once: false,
-        })
-        .await
-        .expect("state loads");
+        let mut state = test_state(&dir, "mock response").await;
 
         execute_command(&mut state, "/run echo_agent hello tui")
             .await
@@ -1138,26 +384,23 @@ mod tests {
     #[tokio::test]
     async fn tool_command_calls_active_services() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = TuiState::load(TuiOptions {
-            catalog_path: None,
-            trace_path: None,
-            store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
-            tool_overrides: ToolOverrides::default(),
-            chat: test_chat_options("mock response"),
-            timeout_seconds: 60,
-            max_retries: 0,
-            retry_backoff_ms: 0,
-            mouse_capture: false,
-            once: false,
-        })
-        .await
-        .expect("state loads");
+        let mut state = test_state(&dir, "mock response").await;
 
         execute_command(&mut state, r#"/tool echo {"value":42}"#)
             .await
             .expect("tool command succeeds");
 
+        assert!(
+            state
+                .events
+                .iter()
+                .any(|line| line == "tool policy: echo risk=read_only allowed=true")
+        );
+        assert!(state.activity.iter().any(|activity| {
+            activity.kind == TuiActivityKind::Policy
+                && activity.title == "tool policy"
+                && activity.detail.as_deref() == Some("echo risk=read_only allowed=true")
+        }));
         assert!(
             state
                 .transcript
@@ -1167,62 +410,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_tools_include_agent_run() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let options = TuiOptions {
-            catalog_path: None,
-            trace_path: None,
-            store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
-            tool_overrides: ToolOverrides::default(),
-            chat: test_chat_options("mock response"),
-            timeout_seconds: 60,
-            max_retries: 0,
-            retry_backoff_ms: 0,
-            mouse_capture: false,
-            once: false,
-        };
-
-        let tools = chat_tools_from_options(&options).await.expect("tools load");
-
-        assert!(tools.iter().any(|tool| tool.name == AGENT_RUN_TOOL_NAME));
-        assert!(tools.iter().any(|tool| tool.name == "echo"));
-    }
-
-    #[tokio::test]
     async fn tool_command_can_run_agent_run_tool() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = TuiState::load(TuiOptions {
-            catalog_path: None,
-            trace_path: None,
-            store_path: temp_store_path(&dir),
-            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
-            tool_overrides: ToolOverrides::default(),
-            chat: test_chat_options("mock response"),
-            timeout_seconds: 60,
-            max_retries: 0,
-            retry_backoff_ms: 0,
-            mouse_capture: false,
-            once: false,
-        })
-        .await
-        .expect("state loads");
+        let mut state = test_state(&dir, "mock response").await;
 
         execute_command(
             &mut state,
             r#"/tool agent.run {"agent_id":"echo_agent","input":{"message":"from agent.run"}}"#,
         )
         .await
-        .expect("agent.run tool command succeeds");
+        .expect("agent.run tool command requests approval");
         state.refresh_runs().await.expect("runs refresh");
 
+        assert!(
+            state
+                .events
+                .iter()
+                .any(|line| line == "tool policy: agent.run risk=high allowed=true")
+        );
+        assert!(state.pending_approval.is_some());
+        assert!(state.activity.iter().any(|activity| {
+            activity.kind == TuiActivityKind::Approval && activity.title == "approval required"
+        }));
+        assert!(state.recent_runs.is_empty());
+        let rendered = crate::tui::render::render_tui_once(&state).expect("tui renders");
+        assert!(rendered.contains("pending approval"));
+        assert!(rendered.contains("agent.run (high)"));
+
+        execute_command(&mut state, "/approve")
+            .await
+            .expect("approval executes agent.run");
+        state.refresh_runs().await.expect("runs refresh");
+
+        assert!(state.pending_approval.is_none());
         assert_eq!(state.recent_runs.len(), 1);
         assert_eq!(state.recent_runs[0].agent_id, "echo_agent");
+        assert!(state.activity.iter().any(|activity| {
+            activity.kind == TuiActivityKind::Approval && activity.title == "approval granted"
+        }));
         assert!(
             state
                 .transcript
                 .iter()
                 .any(|item| item.content.contains("from agent.run"))
         );
+    }
+
+    #[tokio::test]
+    async fn tool_command_can_deny_high_risk_tool_call() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+
+        execute_command(
+            &mut state,
+            r#"/tool agent.run {"agent_id":"echo_agent","input":{"message":"deny me"}}"#,
+        )
+        .await
+        .expect("agent.run tool command requests approval");
+        assert!(state.pending_approval.is_some());
+
+        execute_command(&mut state, "/deny")
+            .await
+            .expect("deny succeeds");
+        state.refresh_runs().await.expect("runs refresh");
+
+        assert!(state.pending_approval.is_none());
+        assert!(state.recent_runs.is_empty());
+        assert!(state.activity.iter().any(|activity| {
+            activity.kind == TuiActivityKind::Approval && activity.title == "approval denied"
+        }));
+    }
+
+    #[tokio::test]
+    async fn tool_command_blocks_high_risk_when_policy_denies_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state_with_policy(&dir, "mock response", false).await;
+
+        let error = execute_command(
+            &mut state,
+            r#"/tool agent.run {"agent_id":"echo_agent","input":{"message":"blocked"}}"#,
+        )
+        .await
+        .expect_err("high-risk tool should be blocked");
+        state.refresh_runs().await.expect("runs refresh");
+
+        assert!(
+            error
+                .to_string()
+                .contains("blocked by the current TUI tool policy")
+        );
+        assert!(
+            state
+                .events
+                .iter()
+                .any(|line| line == "tool policy: agent.run risk=high allowed=false")
+        );
+        assert!(state.recent_runs.is_empty());
     }
 }

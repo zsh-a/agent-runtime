@@ -174,6 +174,7 @@ pub enum ChatTurnEventKind {
     ToolCallEnd,
     ToolResult,
     Usage,
+    ContextSnapshot,
     RoundFinished,
     Error,
     Done,

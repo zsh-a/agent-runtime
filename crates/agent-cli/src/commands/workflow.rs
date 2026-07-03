@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use agent_core::{AgentRunRecord, AgentRunStore, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind};
-use agent_runtime::AgentRunner;
+use agent_runtime::{AgentRunner, HookManager};
 use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
@@ -57,6 +57,7 @@ pub(crate) struct CommandRunOptions {
     pub(crate) timeout_seconds: u64,
     pub(crate) max_retries: u32,
     pub(crate) retry_backoff_ms: u64,
+    pub(crate) hooks: HookManager,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +157,7 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
     ));
     let runner = AgentRunner::new(registry, store, services)
         .with_lock_store(lock_store)
+        .with_hooks(options.hooks)
         .with_policy(execution_policy(
             options.timeout_seconds,
             options.max_retries,

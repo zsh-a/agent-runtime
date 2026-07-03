@@ -39,6 +39,20 @@ pub trait Agent: Send + Sync {
 #[async_trait]
 pub trait AgentServices: Send + Sync {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError>;
+    async fn call_tool_with_cancellation(
+        &self,
+        name: &str,
+        input: Value,
+        cancellation: CancellationToken,
+    ) -> Result<Value, ToolError> {
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                Err(ToolError::cancelled(format!("tool '{name}' cancelled")))
+            }
+            result = self.call_tool(name, input) => result,
+        }
+    }
+
     async fn emit_event(&self, event: AgentEvent) -> Result<(), AgentError>;
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError>;
     async fn save_state(&self, key: &str, value: Value) -> Result<(), AgentError>;

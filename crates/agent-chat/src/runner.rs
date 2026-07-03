@@ -5,6 +5,7 @@ use agent_llm::{LlmEventKind, LlmProvider, LlmResponse};
 use futures::stream;
 use serde_json::json;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -27,11 +28,19 @@ impl ChatTurnRunner {
     }
 
     pub fn stream(&self, request: ChatTurnRequest) -> ChatEventStream {
+        self.stream_with_cancellation(request, CancellationToken::new())
+    }
+
+    pub fn stream_with_cancellation(
+        &self,
+        request: ChatTurnRequest,
+        cancellation: CancellationToken,
+    ) -> ChatEventStream {
         let (sender, receiver) = mpsc::channel(64);
         let provider = self.provider.clone();
         let services = self.services.clone();
         tokio::spawn(async move {
-            run_chat_turn(provider, services, request, sender).await;
+            run_chat_turn(provider, services, request, sender, cancellation).await;
         });
         Box::pin(stream::unfold(receiver, |mut receiver| async move {
             receiver.recv().await.map(|event| (event, receiver))
@@ -39,11 +48,19 @@ impl ChatTurnRunner {
     }
 
     pub fn resume(&self, request: ChatResumeRequest) -> ChatEventStream {
+        self.resume_with_cancellation(request, CancellationToken::new())
+    }
+
+    pub fn resume_with_cancellation(
+        &self,
+        request: ChatResumeRequest,
+        cancellation: CancellationToken,
+    ) -> ChatEventStream {
         let (sender, receiver) = mpsc::channel(64);
         let provider = self.provider.clone();
         let services = self.services.clone();
         tokio::spawn(async move {
-            run_chat_resume(provider, services, request, sender).await;
+            run_chat_resume(provider, services, request, sender, cancellation).await;
         });
         Box::pin(stream::unfold(receiver, |mut receiver| async move {
             receiver.recv().await.map(|event| (event, receiver))
@@ -56,6 +73,7 @@ async fn run_chat_turn(
     services: Arc<dyn AgentServices>,
     request: ChatTurnRequest,
     sender: mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
+    cancellation: CancellationToken,
 ) {
     let turn_timer = std::time::Instant::now();
     info!(
@@ -100,7 +118,7 @@ async fn run_chat_turn(
     )
     .await;
 
-    run_chat_state(provider, services, state, sender, turn_timer).await;
+    run_chat_state(provider, services, state, sender, turn_timer, cancellation).await;
 }
 
 async fn run_chat_resume(
@@ -108,6 +126,7 @@ async fn run_chat_resume(
     services: Arc<dyn AgentServices>,
     request: ChatResumeRequest,
     sender: mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
+    cancellation: CancellationToken,
 ) {
     let turn_timer = std::time::Instant::now();
     let pending_calls = request.state.pending_tool_calls.clone();
@@ -179,7 +198,7 @@ async fn run_chat_resume(
         }
     }
 
-    run_chat_state(provider, services, state, sender, turn_timer).await;
+    run_chat_state(provider, services, state, sender, turn_timer, cancellation).await;
 }
 
 async fn run_chat_state(
@@ -188,9 +207,14 @@ async fn run_chat_state(
     mut state: ChatTurnState,
     sender: mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
     turn_timer: std::time::Instant,
+    cancellation: CancellationToken,
 ) {
     loop {
         let round = chat_turn_next_round(&state);
+        if cancellation.is_cancelled() {
+            send_cancelled(&sender, round, "before_round").await;
+            return;
+        }
         let llm_request = match chat_turn_prepare_llm_request(&mut state) {
             Ok(request) => request,
             Err(error) => {
@@ -205,6 +229,7 @@ async fn run_chat_state(
                 return;
             }
         };
+        send_context_snapshot(&sender, round, &state).await;
         info!(
             turn_id = state.turn_id.as_deref().unwrap_or("none"),
             round,
@@ -214,7 +239,13 @@ async fn run_chat_state(
             tool_count = llm_request.tools.len(),
             "starting chat round",
         );
-        let mut stream = match provider.stream(llm_request).await {
+        let mut stream = match tokio::select! {
+            _ = cancellation.cancelled() => {
+                send_cancelled(&sender, round, "before_llm_stream").await;
+                return;
+            }
+            stream = provider.stream(llm_request) => stream,
+        } {
             Ok(stream) => stream,
             Err(error) => {
                 let error = ChatError::llm(error);
@@ -233,7 +264,17 @@ async fn run_chat_state(
         let mut assistant_text = String::new();
         let mut tool_calls = Vec::new();
         let mut response = None;
-        while let Some(event) = futures::StreamExt::next(&mut stream).await {
+        loop {
+            let event = tokio::select! {
+                _ = cancellation.cancelled() => {
+                    send_cancelled(&sender, round, "during_llm_stream").await;
+                    return;
+                }
+                event = futures::StreamExt::next(&mut stream) => event,
+            };
+            let Some(event) = event else {
+                break;
+            };
             let event = match event {
                 Ok(event) => event,
                 Err(error) => {
@@ -411,8 +452,16 @@ async fn run_chat_state(
                 input_bytes = serialized_value_len(&tool_call.input),
                 "calling chat tool",
             );
+            if cancellation.is_cancelled() {
+                send_cancelled(&sender, round, "before_tool_call").await;
+                return;
+            }
             let output = match services
-                .call_tool(&tool_call.name, tool_call.input.clone())
+                .call_tool_with_cancellation(
+                    &tool_call.name,
+                    tool_call.input.clone(),
+                    cancellation.clone(),
+                )
                 .await
             {
                 Ok(output) => {
@@ -492,6 +541,33 @@ async fn run_chat_state(
     }
 }
 
+async fn send_context_snapshot(
+    sender: &mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
+    round: u32,
+    state: &ChatTurnState,
+) {
+    send_event(
+        sender,
+        ChatTurnEvent {
+            kind: ChatTurnEventKind::ContextSnapshot,
+            content: None,
+            response: None,
+            tool_call_id: None,
+            tool_name: None,
+            partial_input_json: None,
+            tool_input: None,
+            tool_output: None,
+            usage: None,
+            round,
+            metadata: json!({
+                "context_snapshot": state.context_snapshot.clone(),
+                "compaction": state.compaction.clone(),
+            }),
+        },
+    )
+    .await;
+}
+
 fn non_empty(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
@@ -535,6 +611,35 @@ async fn send_round_finished(
         },
     )
     .await;
+}
+
+async fn send_cancelled(
+    sender: &mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
+    round: u32,
+    stage: &str,
+) {
+    send_event(
+        sender,
+        ChatTurnEvent {
+            kind: ChatTurnEventKind::Error,
+            content: Some("chat turn cancelled".to_owned()),
+            response: None,
+            tool_call_id: None,
+            tool_name: None,
+            partial_input_json: None,
+            tool_input: None,
+            tool_output: None,
+            usage: None,
+            round,
+            metadata: json!({
+                "code": "cancelled",
+                "retryable": false,
+                "details": {"stage": stage},
+            }),
+        },
+    )
+    .await;
+    send_done(sender, round, "cancelled").await;
 }
 
 fn serialized_value_len(value: &serde_json::Value) -> usize {

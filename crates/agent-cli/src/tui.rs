@@ -1,7 +1,16 @@
+mod approval;
+mod chat;
+mod chat_events;
 mod commands;
 mod data;
+mod format;
+mod policy;
 mod render;
+mod runtime;
 mod terminal;
+#[cfg(test)]
+mod test_support;
+mod tool_inventory;
 
 use miette::Result;
 

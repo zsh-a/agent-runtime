@@ -44,7 +44,7 @@ crates/agent-core/src/
 
 crates/agent-runtime/src/
   lib.rs            Public exports only
-  runner.rs         AgentRunner lifecycle, retry/timeout, idempotency keys
+  runner.rs         AgentRunner lifecycle, step hooks, retry/timeout, idempotency keys
   policy.rs         ExecutionPolicy
   lock.rs           AgentLockStore helpers and in-memory lease store
   recovery.rs       Stale run recovery
@@ -78,7 +78,8 @@ crates/agent-chat/src/
   lib.rs            Public exports and tests
   types.rs          ChatTurn request/state/event/tool-result wire DTOs
   state.rs          Pure chat turn state transitions
-  runner.rs         LLM/tool continuation loop and stream orchestration
+  context.rs        Context snapshot and deterministic recent-message compaction
+  runner.rs         LLM/tool continuation loop, context_snapshot events, stream orchestration
   events.rs         Event sender helpers
   error.rs          ChatTurn error mapping
 
@@ -90,14 +91,21 @@ crates/agent-cli/src/
   registry.rs       YAML registry and local example agent implementations
   tools.rs          Tool facade and CLI AgentServices
   tools/            Tool source manifests, process/MCP/HTTP adapters, shared errors
-  runtime_server.rs HTTP/stdio runtime orchestration over AgentRunner
+  runtime_server.rs HTTP/stdio runtime orchestration, runtime chat tools, agent.run facade
   server.rs         HTTP and stdio server transport handlers
   replay.rs         Trace replay modes and output comparison
   eval.rs           Eval case execution, golden trace checks, scoring hooks
   proposal.rs       Proposal lifecycle helpers and trace appenders
   session.rs        Session/thread/step reports and recording helpers
   debug_bundle.rs   Local reproduction bundle export and redaction helpers
-  tui.rs, tui/      Interactive TUI shell, state, command handling, rendering
+  tui.rs, tui/      Interactive TUI shell with narrow submodules:
+                   commands routes slash commands and natural language input;
+                   chat owns the ChatTurn client-tool loop;
+                   chat_events adapts ChatTurnEvent into TUI updates;
+                   approval/policy gate high-risk tools;
+                   runtime is the TUI facade over catalog, store, runner, tools,
+                   and tool inventory;
+                   data/render/terminal own state, presentation, and input.
 
 schemas/
   JSON Schema contracts for runtime wire types, including ChatTurn request,
@@ -164,6 +172,7 @@ TUI uses persistent natural input by default. Plain text runs the shared
 
 ```text
 /run <agent_id> [json|text]
+/tools
 /tool <name> [json]
 /replay <trace_path>
 /inspect <run_id>
@@ -171,6 +180,12 @@ TUI uses persistent natural input by default. Plain text runs the shared
 /clear
 /help
 ```
+
+`/tools` shows the TUI chat tool inventory: catalog tools, configured
+tool-source manifest tools, the runtime built-in `agent.run`, and the local
+debug `echo` tool, annotated with risk and policy status. HTTP `GET /tools`
+returns the server runtime tool catalog: catalog tools, configured tool-source
+manifest tools, and `agent.run`.
 
 ## Change Routing
 

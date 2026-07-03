@@ -39,6 +39,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::{StreamExt, stream};
     use serde_json::{Value, json};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -83,6 +84,21 @@ mod tests {
             events
                 .iter()
                 .any(|event| event.kind == ChatTurnEventKind::Done)
+        );
+        let context_index = events
+            .iter()
+            .position(|event| event.kind == ChatTurnEventKind::ContextSnapshot)
+            .expect("context snapshot event");
+        let llm_index = events
+            .iter()
+            .position(|event| event.kind == ChatTurnEventKind::LlmStarted)
+            .expect("llm started event");
+        assert!(context_index < llm_index);
+        assert!(
+            events[context_index]
+                .metadata
+                .get("context_snapshot")
+                .is_some_and(Value::is_object)
         );
         assert_eq!(
             events
@@ -183,6 +199,65 @@ mod tests {
         assert_eq!(metadata["session_id"], "session_1");
         assert_eq!(metadata["thread_id"], "thread_1");
         assert_eq!(metadata["agent_id"], "chat");
+    }
+
+    #[tokio::test]
+    async fn chat_turn_cancellation_stops_pending_stream_start() {
+        let runner = ChatTurnRunner::new(Arc::new(PendingStreamProvider), Arc::new(TestServices));
+        let cancellation = CancellationToken::new();
+        let mut stream = runner.stream_with_cancellation(
+            ChatTurnRequest {
+                protocol_version: PROTOCOL_VERSION.to_owned(),
+                turn_id: Some("turn_cancel".to_owned()),
+                surface: Some("agent_tui".to_owned()),
+                mode: Some("natural_language".to_owned()),
+                session_id: None,
+                thread_id: None,
+                agent_id: Some("chat".to_owned()),
+                provider: "pending".to_owned(),
+                model: "pending-model".to_owned(),
+                messages: vec![user_message("wait")],
+                temperature: None,
+                max_output_tokens: None,
+                tools: vec![],
+                metadata: json!({}),
+                context_policy: Default::default(),
+                max_tool_rounds: 4,
+                tool_execution: ChatToolExecution::Runtime,
+            },
+            cancellation.clone(),
+        );
+
+        let started = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("started event arrives")
+            .expect("stream still open")
+            .expect("started event ok");
+        assert_eq!(started.kind, ChatTurnEventKind::Started);
+
+        cancellation.cancel();
+        let mut next = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("post-cancel event arrives")
+            .expect("stream still open")
+            .expect("post-cancel event ok");
+        if next.kind == ChatTurnEventKind::ContextSnapshot {
+            next = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .expect("cancelled event arrives")
+                .expect("stream still open")
+                .expect("cancelled event ok");
+        }
+        let error = next;
+        assert_eq!(error.kind, ChatTurnEventKind::Error);
+        assert_eq!(error.metadata["code"], "cancelled");
+        let done = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("done event arrives")
+            .expect("stream still open")
+            .expect("done event ok");
+        assert_eq!(done.kind, ChatTurnEventKind::Done);
+        assert_eq!(done.metadata["stop_reason"], "cancelled");
     }
 
     #[tokio::test]
@@ -587,6 +662,19 @@ mod tests {
 
     struct MetadataProvider {
         metadata: Mutex<Option<Value>>,
+    }
+
+    struct PendingStreamProvider;
+
+    #[async_trait]
+    impl LlmProvider for PendingStreamProvider {
+        async fn complete(&self, _request: LlmRequest) -> Result<LlmResponse, LlmError> {
+            Err(LlmError::validation("pending provider does not complete"))
+        }
+
+        async fn stream(&self, _request: LlmRequest) -> Result<LlmEventStream, LlmError> {
+            std::future::pending::<Result<LlmEventStream, LlmError>>().await
+        }
     }
 
     #[async_trait]

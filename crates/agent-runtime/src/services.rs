@@ -247,6 +247,25 @@ impl AgentServices for TracedAgentServices {
         }
     }
 
+    async fn call_tool_with_cancellation(
+        &self,
+        name: &str,
+        input: Value,
+        cancellation: CancellationToken,
+    ) -> Result<Value, ToolError> {
+        if name == AGENT_RUN_TOOL_NAME {
+            return self
+                .call_subagent_with_cancellation(input, cancellation)
+                .await;
+        }
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                Err(ToolError::cancelled(format!("tool '{name}' cancelled")))
+            }
+            result = self.call_tool(name, input) => result,
+        }
+    }
+
     async fn emit_event(&self, event: AgentEvent) -> Result<(), AgentError> {
         debug!(
             run_id = %self.run_id.0,
@@ -520,6 +539,15 @@ impl AgentServices for TracedAgentServices {
 
 impl TracedAgentServices {
     async fn call_subagent(&self, input: Value) -> Result<Value, ToolError> {
+        self.call_subagent_with_cancellation(input, self.cancellation.clone())
+            .await
+    }
+
+    async fn call_subagent_with_cancellation(
+        &self,
+        input: Value,
+        cancellation: CancellationToken,
+    ) -> Result<Value, ToolError> {
         let Some(runner) = &self.subagent_runner else {
             return Err(ToolError::policy_denied(
                 "agent.run is not available outside an AgentRunner",
@@ -536,7 +564,7 @@ impl TracedAgentServices {
                 metadata: json!({}),
                 trace: Some(self.trace.clone()),
                 hooks: self.hooks.clone(),
-                cancellation: self.cancellation.clone(),
+                cancellation,
             },
         )
         .await

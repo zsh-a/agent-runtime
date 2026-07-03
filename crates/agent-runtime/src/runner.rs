@@ -465,99 +465,66 @@ impl AgentRunner {
                 "starting run attempt",
             );
 
-            let ctx = AgentContext {
-                run_id: run_id.clone(),
-                now: started_at,
-                user: request.user.clone(),
-                input: request.input.clone(),
-                services: Arc::new(TracedAgentServices {
-                    inner: self.services.clone(),
-                    trace: trace.clone(),
-                    run_id: run_id.clone(),
-                    agent_id: spec.id.clone(),
-                    user: request.user.clone(),
-                    hooks: self.hooks.clone(),
-                    subagent_runner: Some(self.nested_runner()),
-                    cancellation: cancellation.clone(),
-                }),
-                cancellation: cancellation.clone(),
-                trace: trace.clone(),
-            };
-
-            let run_future = agent.run(ctx);
             let attempt_timer = std::time::Instant::now();
-            let mut result = tokio::select! {
-                _ = cancellation.cancelled() => {
-                    warn!(
-                        run_id = %run_id.0,
-                        agent_id = %spec.id,
-                        attempt,
-                        duration_ms = attempt_timer.elapsed().as_millis(),
-                        "run attempt cancelled",
-                    );
-                    emit_cancellation_events(
+            let step_input = json!({
+                "run_id": run_id.0.clone(),
+                "agent_id": spec.id.clone(),
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "input": request.input.clone(),
+                "metadata": request.metadata.clone(),
+            });
+            let decision = self
+                .hooks
+                .authorize(
+                    HookEventName::BeforeAgentStep,
+                    Some(run_id.clone()),
+                    Some(spec.id.clone()),
+                    step_input.clone(),
+                    trace.as_ref(),
+                )
+                .await?;
+            let step_started = !decision.is_denied();
+            let mut result = if decision.is_denied() {
+                failure_result(
+                    run_id.clone(),
+                    &spec.id,
+                    started_at,
+                    AgentError::policy_denied(
+                        decision
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "agent step denied by policy hook".to_owned()),
+                        json!({
+                            "decision": decision,
+                            "event": "BeforeAgentStep",
+                            "attempt": attempt,
+                        }),
+                    ),
+                )
+            } else {
+                self.hooks
+                    .observe(
+                        HookEventName::BeforeAgentStep,
+                        Some(run_id.clone()),
+                        Some(spec.id.clone()),
+                        step_input,
                         trace.as_ref(),
-                        &run_id,
-                        &spec.id,
-                        attempt,
-                        "during_attempt",
-                        true,
                     )
                     .await?;
-                    failure_result(
-                        run_id.clone(),
-                        &spec.id,
-                        started_at,
-                        AgentError::cancelled("agent run cancelled"),
-                    )
-                }
-                outcome = tokio::time::timeout(self.policy.timeout, run_future) => match outcome {
-                    Ok(Ok(mut result)) => {
-                        result.run_id = run_id.clone();
-                        result.agent_id = spec.id.clone();
-                        result
-                    }
-                    Ok(Err(err)) => {
-                        warn!(
-                            run_id = %run_id.0,
-                            agent_id = %spec.id,
-                            attempt,
-                            error_code = %err.record.code,
-                            error_kind = ?err.record.kind,
-                            retryable = err.record.retryable,
-                            duration_ms = attempt_timer.elapsed().as_millis(),
-                            "run attempt returned an agent error",
-                        );
-                        if matches!(err.record.kind, agent_core::AgentErrorKind::Cancelled) {
-                            emit_cancellation_events(
-                                trace.as_ref(),
-                                &run_id,
-                                &spec.id,
-                                attempt,
-                                "agent_returned_cancelled",
-                                cancellation.is_cancelled(),
-                            )
-                            .await?;
-                        }
-                        failure_result(run_id.clone(), &spec.id, started_at, err)
-                    }
-                    Err(_) => {
-                        warn!(
-                            run_id = %run_id.0,
-                            agent_id = %spec.id,
-                            attempt,
-                            timeout_ms = self.policy.timeout.as_millis(),
-                            duration_ms = attempt_timer.elapsed().as_millis(),
-                            "run attempt timed out",
-                        );
-                        failure_result(
-                            run_id.clone(),
-                            &spec.id,
-                            started_at,
-                            AgentError::timeout(self.policy.timeout),
-                        )
-                    }
-                }
+
+                self.execute_agent_step(
+                    agent.clone(),
+                    spec,
+                    &run_id,
+                    started_at,
+                    &request,
+                    trace.clone(),
+                    cancellation.clone(),
+                    attempt,
+                    attempt_timer,
+                )
+                .await?
             };
             let retryable = result_is_retryable(&result);
             debug!(
@@ -574,6 +541,27 @@ impl AgentRunner {
                 duration_ms = attempt_timer.elapsed().as_millis(),
                 "run attempt finished",
             );
+            if step_started {
+                self.hooks
+                    .observe(
+                        HookEventName::AfterAgentStep,
+                        Some(run_id.clone()),
+                        Some(spec.id.clone()),
+                        json!({
+                            "run_id": run_id.0.clone(),
+                            "agent_id": spec.id.clone(),
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "status": result.status.clone(),
+                            "retryable": retryable,
+                            "error": result.error.clone(),
+                            "output": result.output.clone(),
+                            "duration_ms": attempt_timer.elapsed().as_millis(),
+                        }),
+                        trace.as_ref(),
+                    )
+                    .await?;
+            }
             if trace_attempts {
                 trace
                     .emit(TraceEvent::new(
@@ -646,6 +634,113 @@ impl AgentRunner {
             }
             attempt = next_attempt;
         }
+    }
+
+    async fn execute_agent_step(
+        &self,
+        agent: Arc<dyn Agent>,
+        spec: &AgentSpec,
+        run_id: &RunId,
+        started_at: OffsetDateTime,
+        request: &RunRequest,
+        trace: Arc<MemoryTraceSink>,
+        cancellation: CancellationToken,
+        attempt: u32,
+        attempt_timer: std::time::Instant,
+    ) -> Result<AgentRunResult, AgentError> {
+        let ctx = AgentContext {
+            run_id: run_id.clone(),
+            now: started_at,
+            user: request.user.clone(),
+            input: request.input.clone(),
+            services: Arc::new(TracedAgentServices {
+                inner: self.services.clone(),
+                trace: trace.clone(),
+                run_id: run_id.clone(),
+                agent_id: spec.id.clone(),
+                user: request.user.clone(),
+                hooks: self.hooks.clone(),
+                subagent_runner: Some(self.nested_runner()),
+                cancellation: cancellation.clone(),
+            }),
+            cancellation: cancellation.clone(),
+            trace: trace.clone(),
+        };
+        let run_future = agent.run(ctx);
+        let result = tokio::select! {
+            _ = cancellation.cancelled() => {
+                warn!(
+                    run_id = %run_id.0,
+                    agent_id = %spec.id,
+                    attempt,
+                    duration_ms = attempt_timer.elapsed().as_millis(),
+                    "run attempt cancelled",
+                );
+                emit_cancellation_events(
+                    trace.as_ref(),
+                    run_id,
+                    &spec.id,
+                    attempt,
+                    "during_attempt",
+                    true,
+                )
+                .await?;
+                failure_result(
+                    run_id.clone(),
+                    &spec.id,
+                    started_at,
+                    AgentError::cancelled("agent run cancelled"),
+                )
+            }
+            outcome = tokio::time::timeout(self.policy.timeout, run_future) => match outcome {
+                Ok(Ok(mut result)) => {
+                    result.run_id = run_id.clone();
+                    result.agent_id = spec.id.clone();
+                    result
+                }
+                Ok(Err(err)) => {
+                    warn!(
+                        run_id = %run_id.0,
+                        agent_id = %spec.id,
+                        attempt,
+                        error_code = %err.record.code,
+                        error_kind = ?err.record.kind,
+                        retryable = err.record.retryable,
+                        duration_ms = attempt_timer.elapsed().as_millis(),
+                        "run attempt returned an agent error",
+                    );
+                    if matches!(err.record.kind, agent_core::AgentErrorKind::Cancelled) {
+                        emit_cancellation_events(
+                            trace.as_ref(),
+                            run_id,
+                            &spec.id,
+                            attempt,
+                            "agent_returned_cancelled",
+                            cancellation.is_cancelled(),
+                        )
+                        .await?;
+                    }
+                    failure_result(run_id.clone(), &spec.id, started_at, err)
+                }
+                Err(_) => {
+                    warn!(
+                        run_id = %run_id.0,
+                        agent_id = %spec.id,
+                        attempt,
+                        timeout_ms = self.policy.timeout.as_millis(),
+                        duration_ms = attempt_timer.elapsed().as_millis(),
+                        "run attempt timed out",
+                    );
+                    failure_result(
+                        run_id.clone(),
+                        &spec.id,
+                        started_at,
+                        AgentError::timeout(self.policy.timeout),
+                    )
+                }
+            }
+        };
+        Ok(result)
     }
 
     pub async fn tick(&self, request: RunRequest) -> Result<Vec<RunOutcome>, AgentError> {

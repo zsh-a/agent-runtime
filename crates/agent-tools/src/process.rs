@@ -40,6 +40,7 @@ impl ProcessToolHost {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| tool_error("tool_host_spawn_failed", e.to_string()))?;
         let child_id = child.id().unwrap_or_default();

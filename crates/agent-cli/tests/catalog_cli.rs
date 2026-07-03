@@ -197,6 +197,64 @@ timeout_seconds = 5
 }
 
 #[test]
+fn config_profile_installs_process_hooks_for_run() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("hooked-run-store");
+    let trace = dir.path().join("trace.json");
+    let config_path = dir.path().join("agent-runtime.toml");
+    let registry = std::path::Path::new("../../examples/agents.yaml")
+        .canonicalize()
+        .expect("registry path");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[runtime]
+registry = "{}"
+store = "{}"
+
+[[runtime.hooks]]
+name = "audit_run"
+event = "RunStart"
+kind = "process"
+effect = "observe"
+command = ["sh", "-c", "cat >/dev/null; printf '{{\"observed\":true}}'"]
+timeout_ms = 1000
+"#,
+            registry.display(),
+            store.display()
+        ),
+    )
+    .expect("config written");
+
+    agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "run",
+            "echo_agent",
+            "--input",
+            "../../examples/fixtures/echo-input.json",
+            "--trace-out",
+            trace.to_str().expect("utf8 trace path"),
+        ])
+        .assert()
+        .success();
+
+    let trace = read_json(trace);
+    let hook = trace["events"]
+        .as_array()
+        .expect("trace events")
+        .iter()
+        .find(|event| {
+            event["kind"] == "hook_invocation"
+                && event["payload"]["hook_name"] == "audit_run"
+                && event["payload"]["hook_event"] == "RunStart"
+        })
+        .expect("configured hook invocation is traced");
+    assert_eq!(hook["payload"]["output"]["observed"], true);
+}
+
+#[test]
 fn run_can_use_catalog_backed_dry_run_registry() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = dir.path().join("store");

@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
-use agent_core::AgentRunRecord;
+use agent_chat::{ChatToolCall, ChatTurnState};
+use agent_core::{AgentRunRecord, ContextPolicy, HookSpec};
 use agent_llm::LlmMessage;
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
@@ -10,6 +11,11 @@ use crate::{
     catalog::{CatalogSummary, read_catalog},
     chat::ChatLlmOptions,
     tools::ToolOverrides,
+};
+
+use super::{
+    policy::TuiToolRisk,
+    tool_inventory::{TuiToolInventory, load_tui_tool_inventory},
 };
 
 const MAX_EVENT_LINES: usize = 160;
@@ -43,9 +49,153 @@ pub(super) struct TranscriptItem {
     pub(super) streaming: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiContextStatus {
+    pub(super) snapshot_id: String,
+    pub(super) token_estimate: u32,
+    pub(super) max_input_tokens: u32,
+    pub(super) block_count: usize,
+    pub(super) omitted_block_count: u32,
+    pub(super) compacted: bool,
+    pub(super) compaction_strategy: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TuiActivityKind {
+    System,
+    Chat,
+    Tool,
+    Context,
+    Policy,
+    Approval,
+    Run,
+    Cancellation,
+    Error,
+}
+
+impl TuiActivityKind {
+    pub(super) fn label(&self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Chat => "chat",
+            Self::Tool => "tool",
+            Self::Context => "context",
+            Self::Policy => "policy",
+            Self::Approval => "approve",
+            Self::Run => "run",
+            Self::Cancellation => "cancel",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiActivityItem {
+    pub(super) kind: TuiActivityKind,
+    pub(super) title: String,
+    pub(super) detail: Option<String>,
+}
+
+impl TuiActivityItem {
+    pub(super) fn new(kind: TuiActivityKind, title: impl Into<String>) -> Self {
+        Self {
+            kind,
+            title: title.into(),
+            detail: None,
+        }
+    }
+
+    pub(super) fn with_detail(
+        kind: TuiActivityKind,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            title: title.into(),
+            detail: Some(detail.into()),
+        }
+    }
+
+    pub(super) fn line(&self) -> String {
+        match self.detail.as_deref() {
+            Some(detail) if !detail.is_empty() => format!("{}: {detail}", self.title),
+            _ => self.title.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct TuiPendingApproval {
+    pub(super) risk: TuiToolRisk,
+    pub(super) action: TuiPendingApprovalAction,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum TuiPendingApprovalAction {
+    SlashTool {
+        tool_name: String,
+        input: Value,
+    },
+    ChatTools {
+        agent_id: String,
+        state: ChatTurnState,
+        tool_calls: Vec<ChatToolCall>,
+        surface_messages: Vec<LlmMessage>,
+    },
+}
+
+impl TuiPendingApproval {
+    pub(super) fn tool_call(tool_name: impl Into<String>, risk: TuiToolRisk, input: Value) -> Self {
+        Self {
+            risk,
+            action: TuiPendingApprovalAction::SlashTool {
+                tool_name: tool_name.into(),
+                input,
+            },
+        }
+    }
+
+    pub(super) fn chat_tools(
+        agent_id: impl Into<String>,
+        risk: TuiToolRisk,
+        state: ChatTurnState,
+        tool_calls: Vec<ChatToolCall>,
+        surface_messages: Vec<LlmMessage>,
+    ) -> Self {
+        Self {
+            risk,
+            action: TuiPendingApprovalAction::ChatTools {
+                agent_id: agent_id.into(),
+                state,
+                tool_calls,
+                surface_messages,
+            },
+        }
+    }
+
+    pub(super) fn subject(&self) -> String {
+        match &self.action {
+            TuiPendingApprovalAction::SlashTool { tool_name, .. } => tool_name.clone(),
+            TuiPendingApprovalAction::ChatTools { tool_calls, .. } => match tool_calls.as_slice() {
+                [] => "chat tools".to_owned(),
+                [call] => call.name.clone(),
+                [first, rest @ ..] => format!("{} +{} tool(s)", first.name, rest.len()),
+            },
+        }
+    }
+
+    pub(super) fn summary(&self) -> String {
+        format!("{} ({})", self.subject(), self.risk.label())
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum TuiUpdate {
-    Event(String),
+    Activity(TuiActivityItem),
+    ContextStatus(TuiContextStatus),
+    PendingApproval(Option<TuiPendingApproval>),
+    SystemMessage(String),
     AssistantDelta(String),
     AssistantReplace(String),
     AssistantFinish,
@@ -65,10 +215,13 @@ pub(crate) struct TuiOptions {
     pub(crate) store_path: Utf8PathBuf,
     pub(crate) registry_path: Utf8PathBuf,
     pub(crate) tool_overrides: ToolOverrides,
+    pub(crate) allow_high_risk_tools: bool,
     pub(crate) chat: ChatLlmOptions,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_retries: u32,
     pub(crate) retry_backoff_ms: u64,
+    pub(crate) hooks: Vec<HookSpec>,
+    pub(crate) context_policy: ContextPolicy,
     pub(crate) mouse_capture: bool,
     pub(crate) once: bool,
 }
@@ -86,6 +239,10 @@ pub(super) struct TuiState {
     pub(super) transcript: Vec<TranscriptItem>,
     pub(super) active_assistant_index: Option<usize>,
     pub(super) events: VecDeque<String>,
+    pub(super) activity: VecDeque<TuiActivityItem>,
+    pub(super) tool_inventory: Option<TuiToolInventory>,
+    pub(super) context_status: Option<TuiContextStatus>,
+    pub(super) pending_approval: Option<TuiPendingApproval>,
     pub(super) chat_messages: Vec<LlmMessage>,
     pub(super) chat_scroll: u16,
     pub(super) event_scroll: u16,
@@ -101,6 +258,7 @@ impl TuiState {
         let trace = load_trace(options.trace_path.as_ref()).await?;
         let trace_label = options.trace_path.as_ref().map(ToString::to_string);
         let recent_runs = read_recent_runs(&options.store_path).await?;
+        let tool_inventory = Some(load_tui_tool_inventory(&options).await?);
         let status = status_line(&catalog_summary, &trace, recent_runs.len());
         let mut state = Self {
             options,
@@ -115,6 +273,10 @@ impl TuiState {
             transcript: Vec::new(),
             active_assistant_index: None,
             events: VecDeque::new(),
+            activity: VecDeque::new(),
+            tool_inventory,
+            context_status: None,
+            pending_approval: None,
             chat_messages: Vec::new(),
             chat_scroll: 0,
             event_scroll: 0,
@@ -130,6 +292,7 @@ impl TuiState {
 
     pub(super) async fn refresh(&mut self) -> Result<()> {
         self.catalog_summary = load_catalog_summary(self.options.catalog_path.as_ref()).await?;
+        self.tool_inventory = Some(load_tui_tool_inventory(&self.options).await?);
         if let Some(path) = &self.options.trace_path {
             self.trace = Some(read_trace(path.clone()).await?);
             self.trace_label = Some(path.to_string());
@@ -163,16 +326,24 @@ impl TuiState {
         let line = line.into();
         for part in line.lines() {
             self.events.push_back(part.to_owned());
+            self.activity
+                .push_back(TuiActivityItem::new(TuiActivityKind::System, part));
         }
-        while self.events.len() > MAX_EVENT_LINES {
-            self.events.pop_front();
-        }
+        self.truncate_activity();
+    }
+
+    pub(super) fn push_activity(&mut self, activity: TuiActivityItem) {
+        self.events.push_back(activity.line());
+        self.activity.push_back(activity);
+        self.truncate_activity();
     }
 
     pub(super) fn clear_output(&mut self) {
         self.transcript.clear();
         self.active_assistant_index = None;
         self.events.clear();
+        self.activity.clear();
+        self.pending_approval = None;
         self.chat_scroll = 0;
         self.event_scroll = 0;
     }
@@ -252,9 +423,24 @@ impl TuiState {
         self.busy = busy;
     }
 
+    pub(super) fn set_pending_approval(&mut self, approval: TuiPendingApproval) {
+        self.pending_approval = Some(approval);
+    }
+
+    pub(super) fn take_pending_approval(&mut self) -> Option<TuiPendingApproval> {
+        self.pending_approval.take()
+    }
+
     pub(super) fn apply_update(&mut self, update: TuiUpdate) {
         match update {
-            TuiUpdate::Event(line) => self.push_event(line),
+            TuiUpdate::Activity(activity) => self.push_activity(activity),
+            TuiUpdate::ContextStatus(status) => {
+                self.context_status = Some(status);
+            }
+            TuiUpdate::PendingApproval(approval) => {
+                self.pending_approval = approval;
+            }
+            TuiUpdate::SystemMessage(content) => self.push_system_message(content),
             TuiUpdate::AssistantDelta(content) => self.append_assistant_delta(&content),
             TuiUpdate::AssistantReplace(content) => self.replace_active_assistant(content),
             TuiUpdate::AssistantFinish => self.finish_assistant_stream(),
@@ -265,7 +451,11 @@ impl TuiState {
             TuiUpdate::Busy(busy) => self.set_busy(busy),
             TuiUpdate::Error(message) => {
                 self.replace_active_assistant(format!("Error: {message}"));
-                self.push_event(format!("command failed: {message}"));
+                self.push_activity(TuiActivityItem::with_detail(
+                    TuiActivityKind::Error,
+                    "command failed",
+                    message,
+                ));
             }
         }
     }
@@ -482,6 +672,15 @@ impl TuiState {
         self.chat_scroll = 0;
     }
 
+    fn truncate_activity(&mut self) {
+        while self.events.len() > MAX_EVENT_LINES {
+            self.events.pop_front();
+        }
+        while self.activity.len() > MAX_EVENT_LINES {
+            self.activity.pop_front();
+        }
+    }
+
     fn break_history_navigation(&mut self) {
         self.history_cursor = None;
         self.history_draft = None;
@@ -633,6 +832,10 @@ fn status_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_chat::{ChatToolExecution, ChatTurnRequest, chat_turn_initial_state};
+    use agent_core::PROTOCOL_VERSION;
+    use agent_llm::user_message;
+    use serde_json::json;
 
     fn test_state() -> TuiState {
         TuiState {
@@ -642,6 +845,7 @@ mod tests {
                 store_path: Utf8PathBuf::from("store"),
                 registry_path: Utf8PathBuf::from("agents.yaml"),
                 tool_overrides: ToolOverrides::default(),
+                allow_high_risk_tools: true,
                 chat: ChatLlmOptions {
                     provider: "mock".to_owned(),
                     model: "mock-model".to_owned(),
@@ -656,6 +860,8 @@ mod tests {
                 timeout_seconds: 60,
                 max_retries: 0,
                 retry_backoff_ms: 0,
+                hooks: Vec::new(),
+                context_policy: ContextPolicy::default(),
                 mouse_capture: false,
                 once: false,
             },
@@ -670,6 +876,10 @@ mod tests {
             transcript: Vec::new(),
             active_assistant_index: None,
             events: VecDeque::new(),
+            activity: VecDeque::new(),
+            tool_inventory: None,
+            context_status: None,
+            pending_approval: None,
             chat_messages: Vec::new(),
             chat_scroll: 0,
             event_scroll: 0,
@@ -678,6 +888,29 @@ mod tests {
             history_draft: None,
             busy: false,
         }
+    }
+
+    fn test_chat_state() -> ChatTurnState {
+        chat_turn_initial_state(&ChatTurnRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            turn_id: None,
+            surface: Some("agent_tui".to_owned()),
+            mode: Some("natural_language".to_owned()),
+            session_id: None,
+            thread_id: None,
+            agent_id: Some("echo_agent".to_owned()),
+            provider: "mock".to_owned(),
+            model: "mock-model".to_owned(),
+            messages: vec![user_message("hello")],
+            temperature: None,
+            max_output_tokens: None,
+            tools: Vec::new(),
+            metadata: json!({}),
+            context_policy: Default::default(),
+            max_tool_rounds: 4,
+            tool_execution: ChatToolExecution::Client,
+        })
+        .expect("chat state")
     }
 
     #[test]
@@ -754,5 +987,51 @@ mod tests {
         assert_eq!(assistant_items.len(), 2);
         assert_eq!(assistant_items[0].content, "checking");
         assert_eq!(assistant_items[1].content, "final answer");
+    }
+
+    #[test]
+    fn pending_approval_summary_names_slash_and_chat_tools() {
+        let slash = TuiPendingApproval::tool_call("agent.run", TuiToolRisk::High, json!({}));
+        assert_eq!(slash.subject(), "agent.run");
+        assert_eq!(slash.summary(), "agent.run (high)");
+
+        let chat = TuiPendingApproval::chat_tools(
+            "echo_agent",
+            TuiToolRisk::High,
+            test_chat_state(),
+            vec![
+                ChatToolCall {
+                    id: "call_1".to_owned(),
+                    name: "agent.run".to_owned(),
+                    input: json!({}),
+                },
+                ChatToolCall {
+                    id: "call_2".to_owned(),
+                    name: "echo".to_owned(),
+                    input: json!({}),
+                },
+            ],
+            vec![user_message("hello")],
+        );
+        assert_eq!(chat.subject(), "agent.run +1 tool(s)");
+        assert_eq!(chat.summary(), "agent.run +1 tool(s) (high)");
+    }
+
+    #[test]
+    fn pending_approval_update_sets_and_clears_state() {
+        let mut state = test_state();
+        let approval = TuiPendingApproval::tool_call("agent.run", TuiToolRisk::High, json!({}));
+
+        state.apply_update(TuiUpdate::PendingApproval(Some(approval)));
+        assert_eq!(
+            state
+                .pending_approval
+                .as_ref()
+                .map(TuiPendingApproval::summary),
+            Some("agent.run (high)".to_owned())
+        );
+
+        state.apply_update(TuiUpdate::PendingApproval(None));
+        assert!(state.pending_approval.is_none());
     }
 }

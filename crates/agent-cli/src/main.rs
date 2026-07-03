@@ -1,7 +1,7 @@
 use std::{fs, io, sync::Mutex, time::Duration};
 
-use agent_core::{AgentRunStore, RunId};
-use agent_runtime::{ExecutionPolicy, recover_stale_runs};
+use agent_core::{AgentRunStore, ContextPolicy, HookSpec, RunId};
+use agent_runtime::{ExecutionPolicy, HookManager, recover_stale_runs};
 use agent_store::{FileProposalStore, FileRunStore};
 use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand};
@@ -117,6 +117,18 @@ impl AppContext {
 
     fn tool_sources(&self, values: Vec<Utf8PathBuf>) -> Vec<Utf8PathBuf> {
         config::configured_paths(values, self.config.runtime.tool_sources.as_ref())
+    }
+
+    fn hooks(&self) -> Result<HookManager> {
+        config::hook_manager(self.hook_specs())
+    }
+
+    fn hook_specs(&self) -> Vec<HookSpec> {
+        config::configured_hooks(self.config.runtime.hooks.as_ref())
+    }
+
+    fn context_policy(&self) -> ContextPolicy {
+        config::context_policy(self.config.runtime.context.as_ref())
     }
 
     fn execution(
@@ -335,6 +347,11 @@ enum Command {
         mock_tool: Vec<String>,
         #[arg(long)]
         tool_source: Vec<Utf8PathBuf>,
+        #[arg(
+            long,
+            help = "Block high-risk tools such as agent.run and shell.exec in the TUI runtime"
+        )]
+        deny_high_risk_tools: bool,
         #[arg(long, env = "AGENT_LLM_PROVIDER", default_value = "mock")]
         provider: String,
         #[arg(long, default_value = "mock-model")]
@@ -533,6 +550,7 @@ async fn main() -> Result<()> {
             let tool_source = context.tool_sources(tool_source);
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
+            let hooks = context.hooks()?;
             run_agent_once(RunCliOptions {
                 agent_id,
                 registry,
@@ -546,13 +564,20 @@ async fn main() -> Result<()> {
                 timeout_seconds: execution.timeout_seconds,
                 max_retries: execution.max_retries,
                 retry_backoff_ms: execution.retry_backoff_ms,
+                hooks,
             })
             .await?;
         }
         Command::Tick { registry, store } => {
             let registry = context.registry(registry);
             let store = context.store(store);
-            tick_agents(TickCliOptions { registry, store }).await?;
+            let hooks = context.hooks()?;
+            tick_agents(TickCliOptions {
+                registry,
+                store,
+                hooks,
+            })
+            .await?;
         }
         Command::Replay {
             trace_file,
@@ -599,6 +624,11 @@ async fn main() -> Result<()> {
                         timeout_seconds: execution.timeout_seconds,
                         max_retries: execution.max_retries,
                         retry_backoff_ms: execution.retry_backoff_ms,
+                        hooks: match mode {
+                            ReplayMode::Live => context.hooks()?,
+                            ReplayMode::Deterministic => HookManager::default(),
+                            ReplayMode::View => unreachable!("view replay does not execute"),
+                        },
                     })
                     .await?;
                 }
@@ -752,6 +782,7 @@ async fn main() -> Result<()> {
                     timeout_seconds,
                     max_retries,
                     retry_backoff_ms,
+                    hooks: context.hooks()?,
                 })
                 .await?;
                 print_json(&report)?;
@@ -782,10 +813,13 @@ async fn main() -> Result<()> {
             let stdio = context.stdio(stdio);
             let host = context.host(host);
             let port = context.port(port);
+            let hooks = context.hooks()?;
             let server = RuntimeServer::new(
                 catalog,
                 store,
                 tool_overrides(tool_host, mock_tool, tool_source).await?,
+                hooks,
+                context.context_policy(),
                 chat::ChatLlmOptions {
                     provider,
                     model,
@@ -813,6 +847,7 @@ async fn main() -> Result<()> {
             tool_host,
             mock_tool,
             tool_source,
+            deny_high_risk_tools,
             provider,
             model,
             mock_response,
@@ -839,6 +874,7 @@ async fn main() -> Result<()> {
                 store_path: store,
                 registry_path: registry,
                 tool_overrides: tool_overrides(tool_host, mock_tool, tool_source).await?,
+                allow_high_risk_tools: !deny_high_risk_tools,
                 chat: chat::ChatLlmOptions {
                     provider,
                     model,
@@ -853,6 +889,8 @@ async fn main() -> Result<()> {
                 timeout_seconds: execution.timeout_seconds,
                 max_retries: execution.max_retries,
                 retry_backoff_ms: execution.retry_backoff_ms,
+                hooks: context.hook_specs(),
+                context_policy: context.context_policy(),
                 mouse_capture,
                 once,
             })
