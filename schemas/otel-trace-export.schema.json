@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-runtime.local/schemas/otel-trace-export.schema.json",
+  "title": "OtlpTraceJsonExport",
+  "type": "object",
+  "required": ["protocol_version", "export_format", "resourceSpans"],
+  "properties": {
+    "protocol_version": { "const": "agent.v1" },
+    "export_format": { "const": "otlp_trace_json.v1" },
+    "resourceSpans": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/resource_spans" }
+    }
+  },
+  "$defs": {
+    "resource_spans": {
+      "type": "object",
+      "required": ["resource", "scopeSpans"],
+      "properties": {
+        "resource": { "$ref": "#/$defs/resource" },
+        "scopeSpans": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scope_spans" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "resource": {
+      "type": "object",
+      "required": ["attributes"],
+      "properties": {
+        "attributes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/attribute" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "scope_spans": {
+      "type": "object",
+      "required": ["scope", "spans"],
+      "properties": {
+        "scope": {
+          "type": "object",
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        "spans": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/span" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "span": {
+      "type": "object",
+      "required": [
+        "traceId",
+        "spanId",
+        "name",
+        "kind",
+        "startTimeUnixNano",
+        "endTimeUnixNano",
+        "attributes",
+        "status"
+      ],
+      "properties": {
+        "traceId": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+        "spanId": { "type": "string", "pattern": "^[a-f0-9]{16}$" },
+        "parentSpanId": { "type": "string", "pattern": "^[a-f0-9]{16}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "const": "SPAN_KIND_INTERNAL" },
+        "startTimeUnixNano": { "type": "string", "pattern": "^-?[0-9]+$" },
+        "endTimeUnixNano": { "type": "string", "pattern": "^-?[0-9]+$" },
+        "attributes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/attribute" }
+        },
+        "status": {
+          "type": "object",
+          "required": ["code"],
+          "properties": {
+            "code": {
+              "enum": [
+                "STATUS_CODE_UNSET",
+                "STATUS_CODE_OK",
+                "STATUS_CODE_ERROR"
+              ]
+            },
+            "message": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "attribute": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "value": { "$ref": "#/$defs/any_value" }
+      },
+      "additionalProperties": false
+    },
+    "any_value": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "stringValue": { "type": "string" },
+        "intValue": { "type": "string", "pattern": "^-?[0-9]+$" },
+        "doubleValue": { "type": "number" },
+        "boolValue": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

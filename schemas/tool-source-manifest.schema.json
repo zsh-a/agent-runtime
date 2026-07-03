@@ -23,6 +23,21 @@
             "type": "array",
             "items": { "type": "string" }
           },
+          "cwd": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "Optional working directory for process and MCP stdio sources."
+          },
+          "env": {
+            "type": "object",
+            "description": "Additional environment variables for process and MCP stdio sources. Values may reference environment variables with ${env:NAME}.",
+            "additionalProperties": { "type": "string" }
+          },
+          "inherit_env": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether process and MCP stdio sources inherit the runtime process environment."
+          },
           "endpoint": {
             "type": "string",
             "format": "uri",
@@ -30,7 +45,29 @@
           },
           "headers": {
             "type": "object",
+            "description": "Static HTTP headers. Values may reference environment variables with ${env:NAME}.",
             "additionalProperties": { "type": "string" }
+          },
+          "timeout_ms": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "description": "Optional timeout applied to each tool call from this source."
+          },
+          "max_retries": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Number of retries for retryable tool-source failures."
+          },
+          "retry_backoff_ms": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": "Delay between retry attempts for retryable failures."
+          },
+          "max_output_bytes": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "description": "Optional maximum serialized JSON output size accepted from each tool call."
           },
           "tools": {
             "type": "array",

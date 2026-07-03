@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agent_core::{
     AgentProposalStore, AgentRunRecord, AgentRunResult, AgentRunStore, AgentSessionStore,
@@ -9,9 +9,10 @@ use agent_runtime::RUNTIME_VERSION;
 use agent_store::{FileProposalStore, FileRunStore, FileSessionStore};
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::catalog::{build_prompt_manifest, read_catalog, string_metadata};
 
@@ -76,6 +77,44 @@ struct DebugReplayConfig {
     run_request: RunRequest,
 }
 
+#[derive(Debug, Serialize)]
+struct ArtifactMaterializationManifest {
+    protocol_version: String,
+    runtime_version: String,
+    materialized_at: String,
+    mode: String,
+    records: Vec<ArtifactMaterializationRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct ArtifactMaterializationRecord {
+    artifact_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundled_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blake3: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DebugArtifactResolverManifest {
+    protocol_version: String,
+    #[serde(default)]
+    resolvers: Vec<ArtifactStoreResolver>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtifactStoreResolver {
+    provider: String,
+    root: Utf8PathBuf,
+}
+
 impl DebugBundleManifest {
     fn new(
         record: &AgentRunRecord,
@@ -104,7 +143,33 @@ pub(crate) async fn export_debug_bundle(
     catalog_path: Option<Utf8PathBuf>,
     trace_path: Option<Utf8PathBuf>,
     timeout_seconds: u64,
+    materialize_artifacts: bool,
+    artifact_resolver_path: Option<Utf8PathBuf>,
 ) -> Result<()> {
+    let manifest = write_debug_bundle(
+        run_id,
+        store_path,
+        out,
+        catalog_path,
+        trace_path,
+        timeout_seconds,
+        materialize_artifacts,
+        artifact_resolver_path,
+    )
+    .await?;
+    crate::print_json(&manifest)
+}
+
+pub(crate) async fn write_debug_bundle(
+    run_id: String,
+    store_path: Utf8PathBuf,
+    out: Utf8PathBuf,
+    catalog_path: Option<Utf8PathBuf>,
+    trace_path: Option<Utf8PathBuf>,
+    timeout_seconds: u64,
+    materialize_artifacts: bool,
+    artifact_resolver_path: Option<Utf8PathBuf>,
+) -> Result<Value> {
     fs_err::tokio::create_dir_all(&out)
         .await
         .into_diagnostic()?;
@@ -141,12 +206,27 @@ pub(crate) async fn export_debug_bundle(
     let run_request = run_request_from_record(&record);
     let run_result = run_result_from_record(&record)?;
     let state_snapshot = build_debug_state_snapshot(&store_path, &record).await?;
+    let artifact_refs = trace
+        .as_ref()
+        .map(artifact_ref_records_from_trace)
+        .unwrap_or_default();
+    let artifact_resolvers = match artifact_resolver_path {
+        Some(path) => Some(read_artifact_resolver_manifest(path).await?),
+        None => None,
+    };
+    let materialization_manifest = if materialize_artifacts && !artifact_refs.is_empty() {
+        Some(materialize_artifact_refs(&out, &artifact_refs, artifact_resolvers.as_ref()).await?)
+    } else {
+        None
+    };
     let replay_config = build_debug_replay_config(
         &store_path,
         catalog_path.as_ref(),
         trace_path.as_ref(),
         timeout_seconds,
         prompt_manifest.is_some(),
+        !artifact_refs.is_empty(),
+        materialization_manifest.is_some(),
         &record,
         &run_request,
     );
@@ -207,6 +287,26 @@ pub(crate) async fn export_debug_bundle(
             )
             .await?;
         }
+        if !artifact_refs.is_empty() {
+            write_redacted_bundle_json(
+                &out,
+                "artifacts.json",
+                &artifact_refs,
+                &mut files,
+                &mut redactions,
+            )
+            .await?;
+        }
+        if let Some(materialization_manifest) = &materialization_manifest {
+            write_redacted_bundle_json(
+                &out,
+                "artifact_materializations.json",
+                materialization_manifest,
+                &mut files,
+                &mut redactions,
+            )
+            .await?;
+        }
     }
     if let Some(spec) = &agent_spec {
         write_redacted_bundle_json(&out, "agent_spec.json", spec, &mut files, &mut redactions)
@@ -239,7 +339,7 @@ pub(crate) async fn export_debug_bundle(
         files,
     );
     write_json_file(out.join("manifest.json"), &manifest).await?;
-    print_json(&manifest)
+    serde_json::to_value(manifest).into_diagnostic()
 }
 
 async fn build_debug_state_snapshot(
@@ -307,6 +407,8 @@ fn build_debug_replay_config(
     trace_path: Option<&Utf8PathBuf>,
     timeout_seconds: u64,
     include_prompt_manifest: bool,
+    include_artifacts: bool,
+    include_artifact_materializations: bool,
     record: &AgentRunRecord,
     run_request: &RunRequest,
 ) -> DebugReplayConfig {
@@ -323,6 +425,15 @@ fn build_debug_replay_config(
         assets.insert(
             "prompt_manifest".to_owned(),
             "prompt_manifest.json".to_owned(),
+        );
+    }
+    if include_artifacts {
+        assets.insert("artifacts".to_owned(), "artifacts.json".to_owned());
+    }
+    if include_artifact_materializations {
+        assets.insert(
+            "artifact_materializations".to_owned(),
+            "artifact_materializations.json".to_owned(),
         );
     }
 
@@ -363,7 +474,10 @@ fn run_request_from_record(record: &AgentRunRecord) -> RunRequest {
         run_id: Some(record.run_id.clone()),
         input: record.input.clone(),
         user: user_from_record(record),
+        scope: Some(record.scope.clone()),
         trigger: TriggerKind::Replay,
+        trigger_envelope: None,
+        workflow: record.workflow.clone(),
         metadata: json!({
             "source": "debug_bundle",
             "reconstructed_from": "run_record"
@@ -393,6 +507,7 @@ fn run_result_from_record(record: &AgentRunRecord) -> Result<AgentRunResult> {
         summary: record.error.as_ref().map(|error| error.message.clone()),
         output: record.output.clone(),
         error: record.error.clone(),
+        workflow: record.workflow.clone(),
     })
 }
 
@@ -488,6 +603,7 @@ fn is_sensitive_key(key: &str) -> bool {
         "jwt",
         "credential",
         "private_key",
+        "local_path",
     ]
     .iter()
     .any(|marker| key == *marker || key.ends_with(marker) || key.contains(&format!("{marker}_")))
@@ -528,6 +644,287 @@ fn tool_call_records_from_trace(trace: &Value) -> Vec<Value> {
         .collect()
 }
 
+fn artifact_ref_records_from_trace(trace: &Value) -> Vec<Value> {
+    let mut artifacts = trace
+        .get("artifact_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if artifacts.is_empty() {
+        artifacts = trace
+            .get("events")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|event| event.get("kind").and_then(Value::as_str) == Some("artifact_published"))
+            .filter_map(|event| {
+                event
+                    .get("payload")
+                    .and_then(|payload| payload.get("artifact_ref"))
+                    .cloned()
+            })
+            .collect();
+    }
+    artifacts
+}
+
+async fn materialize_artifact_refs(
+    bundle_out: &Utf8Path,
+    artifact_refs: &[Value],
+    artifact_resolvers: Option<&DebugArtifactResolverManifest>,
+) -> Result<ArtifactMaterializationManifest> {
+    let artifact_dir = bundle_out.join("artifacts");
+    let mut records = Vec::new();
+    for (index, artifact) in artifact_refs.iter().enumerate() {
+        records.push(
+            materialize_artifact_ref(&artifact_dir, artifact, index, artifact_resolvers).await?,
+        );
+    }
+    let materialized_at = time::OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .into_diagnostic()?;
+    Ok(ArtifactMaterializationManifest {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        runtime_version: RUNTIME_VERSION.to_owned(),
+        materialized_at,
+        mode: if artifact_resolvers.is_some() {
+            "local_files_and_artifact_store_resolvers".to_owned()
+        } else {
+            "local_files_only".to_owned()
+        },
+        records,
+    })
+}
+
+async fn materialize_artifact_ref(
+    artifact_dir: &Utf8Path,
+    artifact: &Value,
+    index: usize,
+    artifact_resolvers: Option<&DebugArtifactResolverManifest>,
+) -> Result<ArtifactMaterializationRecord> {
+    let artifact_id = artifact_id_for_record(artifact, index);
+    let Some((source, source_path)) = artifact_source_path(artifact, artifact_resolvers) else {
+        return Ok(ArtifactMaterializationRecord {
+            artifact_id,
+            status: "skipped".to_owned(),
+            source: None,
+            bundled_path: None,
+            size_bytes: None,
+            blake3: None,
+            reason: Some(
+                "unsupported artifact source; expected file:// uri, metadata.local_path, or configured artifact store resolver"
+                    .to_owned(),
+            ),
+        });
+    };
+
+    let filename = artifact_materialized_filename(&artifact_id, &source_path, index);
+    let bundled_path = format!("artifacts/{filename}");
+    let destination = artifact_dir.join(&filename);
+    match copy_artifact_file(&source_path, &destination).await {
+        Ok((size_bytes, blake3_hash)) => Ok(ArtifactMaterializationRecord {
+            artifact_id,
+            status: "materialized".to_owned(),
+            source: Some(source),
+            bundled_path: Some(bundled_path),
+            size_bytes: Some(size_bytes),
+            blake3: Some(blake3_hash),
+            reason: None,
+        }),
+        Err(error) => Ok(ArtifactMaterializationRecord {
+            artifact_id,
+            status: "failed".to_owned(),
+            source: Some(source),
+            bundled_path: None,
+            size_bytes: None,
+            blake3: None,
+            reason: Some(error.to_string()),
+        }),
+    }
+}
+
+fn artifact_source_path(
+    artifact: &Value,
+    artifact_resolvers: Option<&DebugArtifactResolverManifest>,
+) -> Option<(String, Utf8PathBuf)> {
+    artifact
+        .get("metadata")
+        .and_then(|metadata| metadata.get("local_path"))
+        .and_then(Value::as_str)
+        .map(|path| ("metadata.local_path".to_owned(), Utf8PathBuf::from(path)))
+        .or_else(|| {
+            artifact
+                .get("uri")
+                .and_then(Value::as_str)
+                .and_then(file_uri_path)
+                .map(|path| ("file_uri".to_owned(), path))
+        })
+        .or_else(|| artifact_store_resolver_path(artifact, artifact_resolvers))
+}
+
+fn artifact_store_resolver_path(
+    artifact: &Value,
+    artifact_resolvers: Option<&DebugArtifactResolverManifest>,
+) -> Option<(String, Utf8PathBuf)> {
+    let artifact_resolvers = artifact_resolvers?;
+    let store = artifact.get("store")?;
+    let provider = store.get("provider").and_then(Value::as_str)?;
+    let provider = provider.trim();
+    if provider.is_empty() {
+        return None;
+    }
+    let resolver = artifact_resolvers
+        .resolvers
+        .iter()
+        .find(|resolver| resolver.provider == provider)?;
+    let key = store.get("key").and_then(Value::as_str)?;
+    let bucket = store.get("bucket").and_then(Value::as_str);
+    let path = artifact_store_local_path(&resolver.root, bucket, key)?;
+    Some((format!("artifact_store:{provider}"), path))
+}
+
+fn artifact_store_local_path(
+    root: &Utf8Path,
+    bucket: Option<&str>,
+    key: &str,
+) -> Option<Utf8PathBuf> {
+    let mut path = root.to_path_buf();
+    if let Some(bucket) = bucket.filter(|bucket| !bucket.trim().is_empty()) {
+        push_safe_relative_artifact_path(&mut path, bucket)?;
+    }
+    push_safe_relative_artifact_path(&mut path, key)?;
+    Some(path)
+}
+
+fn push_safe_relative_artifact_path(path: &mut Utf8PathBuf, value: &str) -> Option<()> {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with('/') || value.contains('\\') {
+        return None;
+    }
+    for segment in value.split('/') {
+        if segment.is_empty() || matches!(segment, "." | "..") {
+            return None;
+        }
+        path.push(segment);
+    }
+    Some(())
+}
+
+fn file_uri_path(uri: &str) -> Option<Utf8PathBuf> {
+    let path = uri.strip_prefix("file://")?;
+    let path = path.strip_prefix("localhost").unwrap_or(path);
+    if !path.starts_with('/') {
+        return None;
+    }
+    percent_decode_utf8(path).map(Utf8PathBuf::from)
+}
+
+fn percent_decode_utf8(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hi = *bytes.get(index + 1)?;
+            let lo = *bytes.get(index + 2)?;
+            decoded.push((hex_value(hi)? << 4) | hex_value(lo)?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+async fn copy_artifact_file(source: &Utf8Path, destination: &Utf8Path) -> Result<(u64, String)> {
+    if let Some(parent) = destination.parent() {
+        fs_err::tokio::create_dir_all(parent)
+            .await
+            .into_diagnostic()?;
+    }
+    let mut input = fs_err::tokio::File::open(source)
+        .await
+        .map_err(|e| miette!("failed to open artifact source {source}: {e}"))?;
+    let mut output = fs_err::tokio::File::create(destination)
+        .await
+        .map_err(|e| miette!("failed to create materialized artifact {destination}: {e}"))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .await
+            .map_err(|e| miette!("failed to read artifact source {source}: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .await
+            .map_err(|e| miette!("failed to write materialized artifact {destination}: {e}"))?;
+        hasher.update(&buffer[..read]);
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+    }
+    output
+        .flush()
+        .await
+        .map_err(|e| miette!("failed to flush materialized artifact {destination}: {e}"))?;
+    Ok((total, format!("blake3:{}", hasher.finalize().to_hex())))
+}
+
+fn artifact_id_for_record(artifact: &Value, index: usize) -> String {
+    artifact
+        .get("artifact_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("artifact_{}", index + 1))
+}
+
+fn artifact_materialized_filename(
+    artifact_id: &str,
+    source_path: &Utf8Path,
+    index: usize,
+) -> String {
+    let mut name = sanitize_artifact_filename(artifact_id);
+    if name.is_empty() {
+        name = format!("artifact_{}", index + 1);
+    }
+    if !name.contains('.') {
+        if let Some(extension) = source_path.extension() {
+            name.push('.');
+            name.push_str(extension);
+        }
+    }
+    format!("{:03}_{name}", index + 1)
+}
+
+fn sanitize_artifact_filename(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+                Some(ch)
+            } else if ch.is_whitespace() {
+                Some('_')
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 async fn read_store_trace(store: &Utf8Path, run_id: &RunId) -> Result<Option<Value>> {
     let path = store_trace_path(store, run_id);
     if !path.exists() {
@@ -549,6 +946,52 @@ async fn read_json_file(path: Utf8PathBuf) -> Result<Value> {
     serde_json::from_slice(&bytes).map_err(|e| miette!("failed to parse JSON at {path}: {e}"))
 }
 
+async fn read_artifact_resolver_manifest(
+    path: Utf8PathBuf,
+) -> Result<DebugArtifactResolverManifest> {
+    let value = read_json_file(path.clone()).await?;
+    let mut manifest: DebugArtifactResolverManifest = serde_json::from_value(value)
+        .map_err(|e| miette!("failed to parse artifact resolver manifest at {path}: {e}"))?;
+    if manifest.protocol_version != PROTOCOL_VERSION {
+        return Err(miette!(
+            "artifact resolver manifest at {path} uses unsupported protocol_version '{}'",
+            manifest.protocol_version
+        ));
+    }
+
+    let base_dir = path
+        .parent()
+        .filter(|parent| !parent.as_str().is_empty())
+        .map(Utf8Path::to_path_buf)
+        .unwrap_or_else(|| Utf8PathBuf::from("."));
+    let mut providers = BTreeSet::new();
+    for resolver in &mut manifest.resolvers {
+        resolver.provider = resolver.provider.trim().to_owned();
+        if resolver.provider.is_empty() {
+            return Err(miette!(
+                "artifact resolver manifest at {path} contains an empty provider"
+            ));
+        }
+        if !providers.insert(resolver.provider.clone()) {
+            return Err(miette!(
+                "artifact resolver manifest at {path} contains duplicate provider '{}'",
+                resolver.provider
+            ));
+        }
+        if resolver.root.as_str().trim().is_empty() {
+            return Err(miette!(
+                "artifact resolver manifest at {path} contains an empty root for provider '{}'",
+                resolver.provider
+            ));
+        }
+        if resolver.root.is_relative() {
+            resolver.root = base_dir.join(&resolver.root);
+        }
+    }
+
+    Ok(manifest)
+}
+
 async fn write_json_file(path: Utf8PathBuf, value: &impl Serialize) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs_err::tokio::create_dir_all(parent)
@@ -559,9 +1002,4 @@ async fn write_json_file(path: Utf8PathBuf, value: &impl Serialize) -> Result<()
     fs_err::tokio::write(&path, bytes)
         .await
         .map_err(|e| miette!("failed to write JSON at {path}: {e}"))
-}
-
-fn print_json(value: &impl Serialize) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value).into_diagnostic()?);
-    Ok(())
 }

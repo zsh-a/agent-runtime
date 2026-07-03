@@ -1,7 +1,7 @@
 use std::{convert::Infallible, net::SocketAddr};
 
 use agent_chat::{ChatError, ChatResumeRequest, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest};
-use agent_core::{ProposalId, RunId, SessionId, ToolSpec, TraceEvent};
+use agent_core::{ProposalId, RunId, SessionId, ToolSpec, TraceEvent, WorkflowRunRequest};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -25,6 +25,7 @@ use tracing::{debug, info, warn};
 use crate::{
     catalog::CatalogSummary,
     metrics::event_records_from_trace,
+    proposal::PolicyDeniedError,
     runtime_server::{
         AgentRunParams, HttpAgentRunParams, HttpProposalCreateParams, HttpProposalDecisionParams,
         HttpProposalListParams, HttpRunListParams, HttpToolCallParams, RuntimeServer,
@@ -37,6 +38,8 @@ use crate::{
 struct HttpErrorBody {
     code: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<Value>,
 }
 
 pub(crate) async fn serve_http(server: RuntimeServer, host: String, port: u16) -> Result<()> {
@@ -49,6 +52,7 @@ pub(crate) async fn serve_http(server: RuntimeServer, host: String, port: u16) -
         .route("/metrics/summary", get(http_metrics_summary))
         .route("/chat/turn", post(http_chat_turn))
         .route("/chat/resume", post(http_chat_resume))
+        .route("/workflows/run", post(http_workflow_run))
         .route("/agents/{agent_id}/run", post(http_agent_run))
         .route("/runs", get(http_runs))
         .route("/runs/{run_id}", get(http_run_inspect))
@@ -184,18 +188,29 @@ async fn http_agent_run(
         Err(response) => return response,
     };
 
-    match server
-        .run_agent(
-            agent_id,
-            params.run_id,
-            params.input,
-            params.session_id,
-            params.thread_id,
-        )
-        .await
-    {
+    match server.run_agent(agent_id, params).await {
         Ok(response) => Json(response).into_response(),
         Err(err) => http_error(StatusCode::INTERNAL_SERVER_ERROR, "agent_run_failed", err),
+    }
+}
+
+async fn http_workflow_run(State(server): State<RuntimeServer>, body: Bytes) -> Response {
+    let request = match decode_schema_json::<WorkflowRunRequest>(
+        &body,
+        include_str!("../../../schemas/workflow-run-request.schema.json"),
+        "workflow-run-request",
+    ) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+
+    match server.run_workflow(request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(err) => http_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "workflow_run_failed",
+            err,
+        ),
     }
 }
 
@@ -304,7 +319,7 @@ async fn http_proposal_create(
 ) -> Response {
     match server.create_proposal(params).await {
         Ok(response) => Json(response).into_response(),
-        Err(err) => http_error(
+        Err(err) => http_report_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "proposal_create_failed",
             err,
@@ -346,7 +361,7 @@ async fn http_proposal_decide(
         .await
     {
         Ok(response) => Json(response).into_response(),
-        Err(err) => http_error(
+        Err(err) => http_report_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "proposal_decide_failed",
             err,
@@ -360,7 +375,7 @@ async fn http_proposal_apply(
 ) -> Response {
     match server.apply_proposal(ProposalId(proposal_id)).await {
         Ok(response) => Json(response).into_response(),
-        Err(err) => http_error(
+        Err(err) => http_report_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "proposal_apply_failed",
             err,
@@ -374,7 +389,7 @@ async fn http_proposal_undo(
 ) -> Response {
     match server.undo_proposal(ProposalId(proposal_id)).await {
         Ok(response) => Json(response).into_response(),
-        Err(err) => http_error(
+        Err(err) => http_report_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "proposal_undo_failed",
             err,
@@ -535,6 +550,42 @@ fn http_error(status: StatusCode, code: &str, err: impl std::fmt::Display) -> Re
         Json(HttpErrorBody {
             code: code.to_owned(),
             message: err.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn http_report_error(status: StatusCode, code: &str, err: miette::Report) -> Response {
+    if let Some(error) = err.downcast_ref::<PolicyDeniedError>() {
+        return http_error_body(
+            StatusCode::FORBIDDEN,
+            "policy_denied",
+            error.message.clone(),
+            Some(error.details.clone()),
+        );
+    }
+    http_error(status, code, err)
+}
+
+fn http_error_body(
+    status: StatusCode,
+    code: &str,
+    message: String,
+    details: Option<Value>,
+) -> Response {
+    warn!(
+        status = status.as_u16(),
+        code,
+        error = %message,
+        "HTTP request failed",
+    );
+    (
+        status,
+        Json(HttpErrorBody {
+            code: code.to_owned(),
+            message,
+            details,
         }),
     )
         .into_response()
@@ -581,15 +632,7 @@ async fn handle_stdio_line(server: &RuntimeServer, line: &str) -> StdioResponse 
                     return stdio_error(request.id, -32602, format!("invalid params: {err}"));
                 }
             };
-            let outcome = server
-                .run_agent(
-                    params.agent_id,
-                    params.run_id,
-                    params.input,
-                    params.session_id,
-                    params.thread_id,
-                )
-                .await;
+            let outcome = server.run_agent(params.agent_id, params.run).await;
             match outcome {
                 Ok(outcome) => stdio_result(
                     request.id,
@@ -600,6 +643,27 @@ async fn handle_stdio_line(server: &RuntimeServer, line: &str) -> StdioResponse 
                 ),
                 Err(err) => {
                     warn!(method = %request.method, error = %err, "stdio agent.run failed");
+                    stdio_error(request.id, -32000, err.to_string())
+                }
+            }
+        }
+        "workflow.run" => {
+            let params = match serde_json::from_value::<WorkflowRunRequest>(request.params) {
+                Ok(params) => params,
+                Err(err) => {
+                    warn!(method = %request.method, error = %err, "stdio params invalid");
+                    return stdio_error(request.id, -32602, format!("invalid params: {err}"));
+                }
+            };
+            let outcome = server.run_workflow(params).await;
+            match outcome {
+                Ok(outcome) => stdio_result(
+                    request.id,
+                    serde_json::to_value(outcome)
+                        .unwrap_or_else(|err| json!({"serialization_error": err.to_string()})),
+                ),
+                Err(err) => {
+                    warn!(method = %request.method, error = %err, "stdio workflow.run failed");
                     stdio_error(request.id, -32000, err.to_string())
                 }
             }

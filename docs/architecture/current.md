@@ -26,6 +26,7 @@ crates/
   agent-core/       Stable DTOs, traits, IDs, errors, trace/session/proposal contracts
   agent-runtime/    AgentRunner, scheduler, retry/timeout, lease locking, trace capture
   agent-store/      In-memory and file-backed run/state/proposal/session stores
+  agent-tools/      Reusable process, MCP stdio, HTTP JSON, mock, and builtin tool adapters
   agent-llm/        Provider-neutral LLM DTOs, mock/OpenAI/Anthropic/Ollama providers
   agent-chat/       Shared ChatTurn request/event contract and provider/tool loop
   agent-cli/        Local developer surfaces and host adapters
@@ -61,6 +62,14 @@ crates/agent-store/src/
   util.rs           Shared scope and run sorting helpers
   tests.rs          Store backend tests
 
+crates/agent-tools/src/
+  lib.rs            Public tool override facade, builtin debug tools, schema validation
+  manifest.rs       Tool source manifest loading and protocol dispatch
+  process.rs        JSONL and MCP stdio process tool hosts
+  http.rs           HTTP JSON tool endpoint adapter
+  mcp.rs            Minimal MCP stdio request/response mapping
+  error.rs          Shared ToolError helpers
+
 crates/agent-llm/src/
   lib.rs            Public exports only
   types.rs          Provider-neutral LLM DTOs, stream events, errors, provider trait
@@ -89,8 +98,7 @@ crates/agent-cli/src/
   commands/         Thin command handlers for run/catalog/tool/proposal/session/llm/cmd
   catalog.rs        Catalog loading, prompt manifest, catalog dry-run registry
   registry.rs       YAML registry and local example agent implementations
-  tools.rs          Tool facade and CLI AgentServices
-  tools/            Tool source manifests, process/MCP/HTTP adapters, shared errors
+  tools.rs          CLI AgentServices wrapper around `agent-tools`
   runtime_server.rs HTTP/stdio runtime orchestration, runtime chat tools, agent.run facade
   server.rs         HTTP and stdio server transport handlers
   replay.rs         Trace replay modes and output comparison
@@ -141,15 +149,17 @@ docs/architecture/roadmap.md
 ## Runtime Layers
 
 1. `agent-core` defines protocol shapes and host-facing traits.
-2. `agent-llm` owns provider-neutral request/response/event DTOs and provider
+2. `agent-tools` owns reusable tool-source loading and process/MCP/HTTP tool
+   adapters.
+3. `agent-llm` owns provider-neutral request/response/event DTOs and provider
    clients.
-3. `agent-chat` owns provider-neutral interactive ChatTurn request/event
+4. `agent-chat` owns provider-neutral interactive ChatTurn request/event
    contracts and the LLM/tool continuation loop over `AgentServices`.
-4. `agent-runtime` executes scheduled or explicit `Agent` instances through
+5. `agent-runtime` executes scheduled or explicit `Agent` instances through
    `AgentRunner`.
-5. `agent-store` persists run/state/proposal/session records.
-6. Host adapters implement `AgentServices` and tool/proposal/state behavior.
-7. CLI, HTTP, stdio, and TUI are surfaces over these contracts.
+6. `agent-store` persists run/state/proposal/session records.
+7. Host adapters implement `AgentServices` and tool/proposal/state behavior.
+8. CLI, HTTP, stdio, and TUI are surfaces over these contracts.
 
 `AgentRunner` returns `RunOutcome`, not only `AgentRunResult`, because callers
 need both the final result and the captured `AgentTrace`.
@@ -197,7 +207,7 @@ manifest tools, and `agent.run`.
 | Change ChatTurn behavior | `crates/agent-chat/`, `schemas/chat-turn-*.schema.json`, ChatTurn fixtures | `rtk cargo test -p agent-chat`, `rtk cargo test -p agent-cli --test contracts` |
 | Change HTTP ChatTurn streaming | `crates/agent-cli/src/server.rs`, `crates/agent-cli/src/runtime_server.rs`, `openapi/agent-runtime-api.yaml`, `bindings/ts/` | `rtk cargo test -p agent-cli --test catalog_cli http_server_streams_chat_turn_events`, TS binding tests |
 | Change CLI command behavior | `crates/agent-cli/src/commands/` plus supporting module | focused command test, `rtk cargo test -p agent-cli` |
-| Change tool host behavior | `crates/agent-cli/src/tools.rs`, `crates/agent-cli/src/tools/` | CLI tool tests |
+| Change tool host behavior | `crates/agent-tools/`, `crates/agent-cli/src/tools.rs` | CLI tool tests and focused `agent-tools` tests |
 | Change proposal apply behavior | `crates/agent-cli/src/proposal.rs` | proposal CLI tests |
 
 ## Invariants
@@ -218,22 +228,119 @@ manifest tools, and `agent.run`.
 
 These are intentional or pending differences from the long-term design:
 
-- No standalone `agent-tools` crate exists yet. Tool traits live in
-  `agent-core`; concrete process/MCP/HTTP adapters are isolated under
-  `crates/agent-cli/src/tools/` pending a future crate extraction.
+- `agent-tools` exists and is used by `agent-cli`; it validates declared
+  tool input/output schemas at the dispatch boundary and applies source-level
+  timeout/retry/output-size policy for JSONL process, MCP stdio, and HTTP JSON
+  sources. Process and MCP stdio sources can set `cwd`, explicit `env`, and
+  `inherit_env`; HTTP source headers and process env values can reference
+  environment variables with `${env:NAME}` so manifests do not need to store
+  bearer tokens directly. Its public facade is still oriented around local
+  CLI/server tool overrides rather than a fully stabilized reusable ToolHost API
+  with a host secret manager and sandbox policy.
+- `agent-store` has shared conformance coverage for current file-backed and
+  in-memory run, proposal, and session stores. The suite checks create/update,
+  get/list, scope-aware last-run lookup, proposal filtering, and session
+  thread/step round-trips. Concrete DB store implementations remain future
+  work and should be added to that same behavior suite.
+- `RunRequest.scope` and `WorkflowRunRequest.scope` are first-class run-scope
+  overrides with `global`, `user`, and `tenant` variants. The resolved scope is
+  stored on every `AgentRunRecord`, participates in idempotency material and
+  per-agent lease keys, is exposed to `AgentContext`, and is inherited by
+  `agent.run` subagent calls unless the tool input supplies its own `scope`.
+  Agent and workflow leases are renewed while work is active, then released on
+  success or error.
+  When `scope` is omitted, the runtime preserves the older behavior: `user`
+  creates a user scope, and no user creates a global scope.
 - There is no standalone `bindings/dart` SDK package.
 - Flutter FRB/native bridge guidance exists as documentation only; this
   standalone repository does not contain a generated Flutter package or FRB
   bindings.
-- Trace is event-first (`events`) and does not currently expose a separate
-  `spans` array.
-- `ProposalEnvelope` does not carry a `risk` field; risk is currently expressed
-  through tool/proposal metadata and host-side confirmation.
-- `ScheduleSpec` supports `manual` and `interval`; cron/plugin/HTTP registries
-  remain future work.
-- External cancel/pause/resume is not fully implemented. TUI natural input uses
-  the shared `agent-chat` stream, but terminal redraw/cancel is still not a
-  non-blocking live run loop.
+- Trace remains event-first (`events`) and also exposes optional `spans` for
+  observability. The runtime emits a run-level `agent.run` span, records
+  agent-emitted events through `AgentServices::emit_event`, derives child spans
+  for traced tool calls, state reads/writes, and LLM provider events, and
+  aggregates `AgentTrace.usage_summary` from LLM trace events with token totals,
+  optional cost micros by currency, and provider/model breakdowns.
+  `agent metrics summary` and `GET /metrics/summary` aggregate persisted runs
+  and traces into global counts plus grouped `runs_by_agent`,
+  `tool_calls_by_tool`, and `llm_usage_by_provider` summaries with latency,
+  failure, token, and cost fields.
+  `agent trace export-otel` converts committed `AgentTrace.spans` into a
+  schema-backed OTLP JSON-style `resourceSpans` document for collector or
+  offline pipeline ingestion, and can POST the same payload to an OTLP HTTP
+  traces endpoint with `--endpoint` or standard OTEL exporter environment
+  variables.
+- `ProposalEnvelope` carries `risk`, `approval_policy`, `approval_required`,
+  `required_approval_level`, `required_approver_count`, `approval_decisions`,
+  structured `diffs`, structured `warnings`, `policy_id`, `policy_version`,
+  and `expires_at`. `ApprovalDecision` records the deciding actor when supplied
+  and the approval level used for the decision; approve decisions must satisfy
+  the envelope's required level. Multi-approver proposals can accumulate
+  distinct `single_user` approvals and remain `pending_approval` until the
+  required approver count is reached; `admin` or explicit `multi_approver`
+  decisions can satisfy the requirement directly.
+  `BeforeProposalCreate` policy hooks can deny manual CLI/HTTP proposal
+  creation before persistence, and `BeforeProposalApply` policy hooks can deny
+  proposal apply before the proposal enters `applying`. HTTP proposal policy
+  denials return `403` with the stable error code `policy_denied`. Policy
+  revocation remains future work.
+- `ScheduleSpec` supports `manual`, `interval`, and five-field `cron`
+  expressions for UTC, IANA timezone names, or fixed-offset timezones.
+- `RunRequest` supports `manual`, `scheduled`, `replay`, `webhook`, and
+  `queue` trigger kinds. Webhook and queue deliveries can carry a
+  `trigger_envelope` with `source`, optional event/message `id`, `received_at`,
+  payload, and metadata through HTTP and stdio `agent.run`. Concrete plugin
+  schedules, queue consumers, and HTTP/webhook trigger registries remain future
+  work.
+- `RunRequest`, `AgentRunResult`, `AgentRunRecord`, and `AgentTrace` carry an
+  optional `workflow` object for parent/root run links, dependency edges,
+  fan-out/fan-in ids, compensation metadata, and workflow metadata. The
+  built-in `agent.run` subagent tool populates parent/root links for child
+  runs. `WorkflowRunRequest` / `WorkflowRunResult` define a schema-backed DAG
+  execution contract, and `AgentRunner::run_workflow` schedules ready nodes
+  concurrently in-process while preserving deterministic topological result
+  ordering, fills child run workflow metadata, records dependency edges, and
+  skips nodes whose dependencies failed. Nodes for the same agent are not
+  launched concurrently by the local scheduler, so workflow fan-out does not
+  fight the agent/scope run lease. Workflow nodes can declare a compensation
+  agent; when a later node fails, completed nodes with compensation
+  declarations are compensated in reverse topological result order and the
+  compensation runs carry `workflow.compensation` metadata pointing at the
+  compensated run. The DAG executor acquires and renews a scope-aware workflow
+  lease through the configured `AgentLockStore`, so another worker using the
+  same distributed lock backend will skip a duplicate `workflow_id` / scope
+  while the first execution is active. Nodes can also declare `input_mappings`
+  that copy values from direct dependency outputs into the node input using
+  JSON Pointer paths, with optional defaults for missing source paths and
+  primitive transforms (`string`, `number`, `integer`, `boolean`, or
+  `json_string`). `agent workflow run
+  <workflow.json>`, HTTP `POST /workflows/run`, and stdio `workflow.run` expose
+  the same local DAG executor. Workflow node and compensation results include
+  optional traces, and the CLI/HTTP server write those traces into the normal
+  store trace directory for `/runs/{run_id}/trace`, replay, and debug bundle
+  workflows. Distributed work stealing/execution, expression/template
+  transforms, and durable saga-style compensation recovery remain future work.
+- `AgentTrace.artifact_refs` is a typed artifact reference protocol with
+  `kind`, URI, media type, size, SHA-256, redaction classification, optional
+  host store locator, and metadata. `AgentServices::publish_artifact` is the
+  host-owned hook for registering external blob/document references without
+  embedding raw file contents in runtime JSON. Debug bundles export a redacted
+  `artifacts.json` asset and list it in replay config when a trace has artifact
+  references. `agent debug-bundle export --materialize-artifacts` can copy
+  local artifact bytes referenced by `file://` URIs or `metadata.local_path`,
+  or by a host store locator whose provider is mapped through
+  `--artifact-resolver <manifest.json>`, into an `artifacts/` bundle directory
+  and records the result in `artifact_materializations.json`. Artifact store
+  resolvers are explicit local root mappings for `provider/bucket/key`; the
+  runtime does not fetch remote bytes or own blob-store credentials implicitly.
+- `agent compat check` provides a host integration smoke harness. It validates
+  catalog and tool-source schemas, executes catalog dry-run fixtures, verifies
+  proposal fixture creation, and can export a redacted debug bundle to exercise
+  the trace redaction path.
+- HTTP run cancellation records durable intent on running records under
+  `metadata.control.cancel_requested`; active runners poll the store and convert
+  that intent into their local cancellation token. Full pause/resume and
+  terminal redraw/cancel remain future work.
 
 When code and older handoff notes disagree, use this document and current tests
 as authority.

@@ -52,6 +52,8 @@ Implemented:
 - markdown workflow command generation from persisted runs via
   `agent cmd create --from-run`
 - reusable markdown workflow execution via `agent cmd run`
+- schema-backed workflow DAG execution with concurrent ready-node scheduling via
+  `agent workflow run`, HTTP `POST /workflows/run`, and stdio `workflow.run`
 - session / thread / step DTOs with JSON Schema fixtures
 - file-backed and in-memory session stores for session, thread, and step
   records
@@ -445,6 +447,26 @@ rtk cargo run -p agent-cli -- debug-bundle export \
   --catalog fixtures/contracts/catalog.valid.json
 ```
 
+To include artifact bytes, add `--materialize-artifacts`. Local `file://` and
+`metadata.local_path` references are copied directly. Host-owned store
+references can be copied when an explicit resolver manifest is provided:
+
+```json
+{
+  "protocol_version": "agent.v1",
+  "resolvers": [
+    {
+      "provider": "host_blob_store",
+      "root": "/private/tmp/exported-artifacts"
+    }
+  ]
+}
+```
+
+The resolver maps an artifact store locator to
+`<root>/<bucket>/<key>`; paths containing absolute components or `..` are
+rejected.
+
 The bundle currently writes:
 
 ```text
@@ -456,6 +478,8 @@ replay_config.json
 trace.json
 events.jsonl
 tool_calls.jsonl
+artifacts.json
+artifact_materializations.json
 agent_spec.json
 prompt_manifest.json
 state_snapshot.json
@@ -550,11 +574,32 @@ idempotency key, appends `run_attempt_started`, `run_attempt_finished`, and
 `run_retry_scheduled` trace events, and writes one final run record.
 
 `AgentRunner` also acquires a lease for `agent:{agent_id}:scope:{scope}` before
-writing a running record. The lease window covers timeout plus the configured
-retry/backoff budget. A duplicate run for the same agent/scope returns a
-skipped outcome while the lease is active. The current default lease store is
-in-memory; distributed file/DB/Redis lease stores remain a later backend/worker
-hardening step.
+writing a running record. The initial lease window covers timeout plus the
+configured retry/backoff budget, and the runner renews the lease while work is
+active. A duplicate run for the same agent/scope returns a skipped outcome
+while the lease is active. The current default lease store is in-memory;
+distributed file/DB/Redis lease stores remain a later backend/worker hardening
+step.
+
+Run requests can set an explicit scope:
+
+```bash
+rtk cargo run -p agent-cli -- run execution_review \
+  --catalog fixtures/contracts/catalog.valid.json \
+  --scope tenant:tenant_acme
+```
+
+The JSON protocol uses the same shape as persisted run records, for example
+`"scope": {"type": "tenant", "id": "tenant_acme"}`. Explicit `scope` wins over
+`user`; if `scope` is omitted, a request with `user` uses user scope, and a
+request without `user` uses global scope. Workflow requests propagate their
+top-level scope to node and compensation runs, and the built-in `agent.run`
+tool inherits the parent run scope unless its input supplies a `scope` override.
+
+`agent-store` now has shared behavior tests for the current file-backed and
+in-memory run, proposal, and session stores. These tests establish the
+conformance baseline future DB-backed stores should satisfy before they are used
+by multi-worker deployments.
 
 Recover stale runs after a crash or worker restart:
 
@@ -572,9 +617,12 @@ are left untouched. The same recovery logic is exposed from `agent-runtime` as
 `recover_stale_runs(...)` and `AgentRunner::recover_stale_runs()`.
 
 Every new run record also carries `idempotency_key`, computed as a BLAKE3 hash
-over the agent id, run scope, trigger kind, and `metadata.scheduled_for` value.
-The key is stable for worker retries of the same scheduled fire and is exposed
-through CLI inspect, HTTP `/runs`, debug bundles, and file-store JSON records.
+over the agent id, run scope, trigger kind, `metadata.scheduled_for`, and the
+external `trigger_envelope` source/id when present. If an external trigger has
+no id, the runtime uses a BLAKE3 payload hash as the envelope identity fallback.
+The key is stable for worker retries of the same scheduled fire or external
+delivery and is exposed through CLI inspect, HTTP `/runs`, debug bundles, and
+file-store JSON records.
 
 Tool calls made by catalog dry-run agents are traced as
 `tool_call_started`, `tool_call_finished`, or `tool_call_failed` events. Each
@@ -671,6 +719,15 @@ Load external tool sources from JSON/YAML manifests:
       "id": "local-dev",
       "command": "target/debug/agent",
       "args": ["dev-tool-host"],
+      "cwd": ".",
+      "inherit_env": true,
+      "env": {
+        "AGENT_RUNTIME_TOOL_SOURCE": "local-dev"
+      },
+      "timeout_ms": 5000,
+      "max_retries": 1,
+      "retry_backoff_ms": 25,
+      "max_output_bytes": 65536,
       "tools": [
         {
           "name": "sourced_echo",
@@ -722,7 +779,14 @@ Set `"protocol": "http_json"` to call an HTTP tool endpoint:
       "id": "http-dev",
       "protocol": "http_json",
       "endpoint": "http://127.0.0.1:8766/tools/call",
-      "headers": {"x-agent-runtime-source": "http-dev"},
+      "headers": {
+        "authorization": "Bearer ${env:AGENT_RUNTIME_HTTP_TOOL_TOKEN}",
+        "x-agent-runtime-source": "http-dev"
+      },
+      "timeout_ms": 5000,
+      "max_retries": 1,
+      "retry_backoff_ms": 25,
+      "max_output_bytes": 65536,
       "tools": [
         {
           "name": "http_echo",
@@ -742,9 +806,20 @@ The runtime POSTs `{"protocol_version":"agent.v1","method":"tool.call",
 "tool":"http_echo","input":{...}}` to the endpoint and accepts either
 `{"output": ...}` or `{"result": ...}` as the tool output envelope. Static
 headers are supported for local gateways, IDE integrations, and remote runtime
-adapters. `schemas/tool-source-manifest.schema.json` validates
-JSONL, MCP stdio, and HTTP JSON manifests, including the protocol-specific
-`command`/`endpoint` requirements.
+adapters. Header values may include `${env:NAME}` placeholders for bearer tokens
+or other secrets; the manifest stores only the placeholder, and a missing
+environment variable fails tool-source construction without logging the secret
+value. Process and MCP stdio sources can set `cwd`, add explicit `env` values
+with the same `${env:NAME}` placeholder syntax, and set `inherit_env: false`
+to start from an empty child environment. `timeout_ms`, `max_retries`,
+`retry_backoff_ms`, and
+`max_output_bytes` apply source-level execution policy; retries are attempted
+only for retryable tool errors such as timeouts, retryable JSON-RPC error
+payloads, HTTP 429, HTTP 5xx, or network request failures. Output that exceeds
+`max_output_bytes` is rejected with `tool_source_output_too_large` and is not
+retried. `schemas/tool-source-manifest.schema.json` validates JSONL, MCP stdio,
+and HTTP JSON manifests, including the protocol-specific `command`/`endpoint`
+requirements and execution policy fields.
 
 This keeps Flutter, process tools, MCP servers, and HTTP tool gateways behind
 one runtime dispatch path.
@@ -758,7 +833,9 @@ rtk cargo run -p agent-cli -- proposal create \
   --agent-id execution_review \
   --kind fake \
   --summary 'Review fake proposal' \
-  --payload-json '{"value":7}'
+  --payload-json '{"value":7}' \
+  --diffs-json '[{"path":"/value","operation":"replace","before":6,"after":7}]' \
+  --warnings-json '[{"severity":"warning","code":"review_required","message":"Review value change"}]'
 
 rtk cargo run -p agent-cli -- proposal list \
   --store /private/tmp/agent-runtime-store \
@@ -772,8 +849,20 @@ rtk cargo run -p agent-cli -- proposal decide \
   proposal_01975d8c-72f5-7f1e-9b7e-c7ef3e0a1000 \
   --store /private/tmp/agent-runtime-store \
   --decision approve \
+  --approval-level single_user \
+  --decided-by user_finance_reviewer \
   --comment 'Looks correct'
 ```
+
+For proposal kinds that require `multi_approver`, each `single_user` approval is
+appended to `approval_decisions` and the proposal remains `pending_approval`
+until `required_approver_count` distinct `decided_by` actors have approved.
+An `admin` approval or explicit `multi_approver` decision can approve the
+proposal immediately.
+
+Proposal `diffs` and `warnings` are structured fields on the envelope. Host UIs
+can render them directly, and HTTP proposal creation accepts the same `diffs`
+and `warnings` arrays in the request body.
 
 Apply and undo an approved proposal:
 
@@ -794,6 +883,11 @@ rtk cargo run -p agent-cli -- proposal undo \
 `proposal apply` requires status `approved`; `proposal undo` requires status
 `applied`. The runtime resolves the proposal kind through the active catalog's
 `proposal_kinds` entry and calls that `tool_name` with `{action, proposal}`.
+Configured `BeforeProposalCreate` policy hooks run before manual CLI/HTTP
+proposal create is persisted; a denied decision returns an error and leaves no
+proposal file behind. Configured `BeforeProposalApply` policy hooks run before
+status changes to `applying`; a denied decision leaves the proposal `approved`
+and records the hook invocation in the run trace when that trace exists.
 The host tool performs the domain write or rollback. The runtime only owns the
 protocol and status transitions: `applying -> applied | apply_failed` and
 `undoing -> undone | undo_failed`.
@@ -1008,12 +1102,28 @@ from the same persisted run records, trace events, and proposal files. The MVP
 summary includes run counts by status, completed/skipped/failed/timeout counts,
 run latency totals/averages, tool call counts and latency, replay count,
 proposal counts by status, proposal approved/denied/applied counts, and
-`llm_total_tokens` when LLM trace events expose token usage.
+`llm_total_tokens` when LLM trace events expose token usage. It also includes
+agent/tool/provider grouped summaries through `runs_by_agent`,
+`tool_calls_by_tool`, and `llm_usage_by_provider`, with per-group latency,
+failure, token, and cost fields where the underlying trace data provides them.
 Proposal approved/denied/applied counts are lifecycle operation counts derived
 from trace events when available, so a proposal that is applied and later undone
 still contributes to `proposal_applied_count` while `proposals_by_status`
 reflects the final `undone` state. For older stores without lifecycle trace
 events, the summary falls back to current proposal statuses.
+
+`agent trace export-otel <trace.json>` converts persisted `AgentTrace.spans`
+into a schema-backed OTLP JSON-style `resourceSpans` document for collector or
+offline observability pipelines. Pass `--endpoint` to POST the same JSON payload
+to an OTLP HTTP traces collector endpoint; `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_EXPORTER_OTLP_HEADERS` are also
+honored.
+
+```bash
+agent trace export-otel trace.json \
+  --endpoint http://127.0.0.1:4318/v1/traces \
+  --header authorization=Bearer-token
+```
 
 Example run request:
 
@@ -1278,6 +1388,53 @@ rtk cargo run -p agent-cli -- cmd run \
 new run and trace into the file store, and reports the result plus trace. This
 completes the first trace/run -> eval -> command asset loop from the design
 document.
+
+Run a schema-backed workflow DAG directly:
+
+```bash
+rtk cargo run -p agent-cli -- workflow run workflow.json \
+  --catalog fixtures/contracts/catalog.valid.json \
+  --store .agent-runtime/store
+```
+
+Server-first clients can POST the same `WorkflowRunRequest` body to
+`/workflows/run`; stdio clients can send it as the params for `workflow.run`.
+Node and compensation traces are returned in the workflow result when available
+and persisted under the normal store trace directory.
+Nodes whose dependencies have completed can run concurrently in the local
+executor; nodes targeting the same agent are serialized to avoid fighting the
+agent/scope run lease.
+The executor also acquires a scope-aware workflow lease through the configured
+lock store, so concurrent requests for the same `workflow_id` and scope return
+a skipped workflow result until the active execution releases the lease. The
+workflow lease is renewed while the DAG is active.
+Nodes may declare `input_mappings` to copy values from direct dependency outputs
+into their own input before execution. A mapping can provide `default` and a
+primitive `transform`: `string`, `number`, `integer`, `boolean`, or
+`json_string`.
+
+```json
+{
+  "node_id": "summarize",
+  "agent_id": "summarizer",
+  "depends_on": ["collect"],
+  "input": {"format": "brief"},
+  "input_mappings": [
+    {
+      "from_node": "collect",
+      "from_path": "/account_id",
+      "to_path": "/source/account_id"
+    },
+    {
+      "from_node": "collect",
+      "from_path": "/usage/count",
+      "to_path": "/usage_count",
+      "transform": "integer",
+      "default": 0
+    }
+  ]
+}
+```
 
 Create and inspect a debugging session:
 

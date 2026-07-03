@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use agent_core::{AgentRunRecord, AgentRunStore, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind};
+use agent_core::{
+    AgentRunRecord, AgentRunStore, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind,
+    WorkflowRunRequest, WorkflowRunResult,
+};
 use agent_runtime::{AgentRunner, HookManager};
 use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -9,11 +12,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
 
-use crate::catalog::load_catalog_registry;
+use crate::catalog::{read_catalog, registry_from_catalog};
 use crate::config::execution_policy;
 use crate::registry::load_registry;
 use crate::tools::{CliServices, tool_overrides};
-use crate::trace_store::{write_json, write_store_trace, write_text};
+use crate::trace_store::{
+    read_json, write_json, write_store_trace, write_text, write_workflow_traces,
+};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct CommandCreateReport {
@@ -60,6 +65,20 @@ pub(crate) struct CommandRunOptions {
     pub(crate) hooks: HookManager,
 }
 
+pub(crate) struct WorkflowRunCliOptions {
+    pub(crate) input: Utf8PathBuf,
+    pub(crate) registry: Utf8PathBuf,
+    pub(crate) catalog: Option<Utf8PathBuf>,
+    pub(crate) store: Utf8PathBuf,
+    pub(crate) tool_host: Vec<String>,
+    pub(crate) mock_tool: Vec<String>,
+    pub(crate) tool_source: Vec<Utf8PathBuf>,
+    pub(crate) timeout_seconds: u64,
+    pub(crate) max_retries: u32,
+    pub(crate) retry_backoff_ms: u64,
+    pub(crate) hooks: HookManager,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct CommandRunReport {
     command_file: String,
@@ -72,6 +91,73 @@ pub(crate) struct CommandRunReport {
 enum CommandRegistryPath {
     Catalog(Utf8PathBuf),
     Registry(Utf8PathBuf),
+}
+
+pub(crate) async fn run_workflow_request(
+    options: WorkflowRunCliOptions,
+) -> Result<WorkflowRunResult> {
+    let value = read_json(options.input.clone()).await?;
+    validate_workflow_request(&value)?;
+    let request = serde_json::from_value::<WorkflowRunRequest>(value)
+        .map_err(|e| miette!("failed to parse workflow request at {}: {e}", options.input))?;
+    let mut overrides =
+        tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?;
+    let registry = match options.catalog {
+        Some(path) => {
+            let catalog = read_catalog(path).await?;
+            overrides.extend_tool_specs(catalog.tools.clone());
+            registry_from_catalog(&catalog)
+        }
+        None => load_registry(options.registry).await?.into_agent_registry(),
+    };
+    let store = Arc::new(
+        FileRunStore::new(options.store.clone())
+            .await
+            .into_diagnostic()?,
+    );
+    let lock_store = Arc::new(
+        FileLockStore::new(options.store.clone())
+            .await
+            .into_diagnostic()?,
+    );
+    let proposal_store = Arc::new(
+        FileProposalStore::new(options.store.clone())
+            .await
+            .into_diagnostic()?,
+    );
+    let services = Arc::new(CliServices::with_proposal_store(overrides, proposal_store));
+    let runner = AgentRunner::new(registry, store, services)
+        .with_lock_store(lock_store)
+        .with_hooks(options.hooks)
+        .with_policy(execution_policy(
+            options.timeout_seconds,
+            options.max_retries,
+            options.retry_backoff_ms,
+        ));
+    let result = runner.run_workflow(request).await.into_diagnostic()?;
+    write_workflow_traces(&options.store, &result).await?;
+    Ok(result)
+}
+
+fn validate_workflow_request(value: &Value) -> Result<()> {
+    let schema = serde_json::from_str::<Value>(include_str!(
+        "../../../../schemas/workflow-run-request.schema.json"
+    ))
+    .into_diagnostic()?;
+    let validator = jsonschema::validator_for(&schema)
+        .map_err(|e| miette!("failed to compile workflow-run-request schema: {e}"))?;
+    let errors = validator
+        .iter_errors(value)
+        .map(|error| format!("{}: {}", error.instance_path(), error))
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(miette!(
+            "workflow request failed schema validation: {}",
+            errors.join("; ")
+        ))
+    }
 }
 
 pub(crate) async fn create_command_from_run(
@@ -132,8 +218,14 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
     let template = parse_command_template(&text, &options.command_file)?;
     let registry_path =
         resolve_command_registry_path(&template.frontmatter, options.catalog, options.registry)?;
+    let mut overrides =
+        tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?;
     let registry = match registry_path {
-        CommandRegistryPath::Catalog(path) => load_catalog_registry(path).await?,
+        CommandRegistryPath::Catalog(path) => {
+            let catalog = read_catalog(path).await?;
+            overrides.extend_tool_specs(catalog.tools.clone());
+            registry_from_catalog(&catalog)
+        }
         CommandRegistryPath::Registry(path) => load_registry(path).await?.into_agent_registry(),
     };
     let store = Arc::new(
@@ -151,10 +243,7 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
             .await
             .into_diagnostic()?,
     );
-    let services = Arc::new(CliServices::with_proposal_store(
-        tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?,
-        proposal_store,
-    ));
+    let services = Arc::new(CliServices::with_proposal_store(overrides, proposal_store));
     let runner = AgentRunner::new(registry, store, services)
         .with_lock_store(lock_store)
         .with_hooks(options.hooks)
@@ -171,7 +260,10 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
                 run_id: None,
                 input: template.input,
                 user: None,
+                scope: None,
                 trigger: TriggerKind::Manual,
+                trigger_envelope: None,
+                workflow: None,
                 metadata: json!({
                     "source": "command_template",
                     "command_file": options.command_file.to_string(),

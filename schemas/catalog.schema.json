@@ -88,6 +88,24 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "expression", "timezone"],
+          "properties": {
+            "type": { "const": "cron" },
+            "expression": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Five-field cron expression: minute hour day-of-month month day-of-week."
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "description": "UTC, Z, Etc/UTC, an IANA timezone such as America/New_York, or a fixed offset such as +08:00."
+            }
+          },
+          "additionalProperties": false
         }
       ]
     },
@@ -125,6 +143,22 @@
           "type": "string",
           "enum": ["manual", "auto_approve"],
           "default": "manual"
+        },
+        "required_approval_level": {
+          "type": "string",
+          "enum": ["none", "single_user", "multi_approver", "admin"],
+          "default": "single_user"
+        },
+        "required_approver_count": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1
+        },
+        "policy_id": { "type": ["string", "null"], "minLength": 1 },
+        "policy_version": { "type": ["string", "null"], "minLength": 1 },
+        "expires_after_seconds": {
+          "type": ["integer", "null"],
+          "minimum": 1
         }
       },
       "additionalProperties": false

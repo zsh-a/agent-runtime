@@ -1,0 +1,86 @@
+{
+  "protocol_version": "agent.v1",
+  "workflow_id": "workflow_daily_ops",
+  "status": "failed",
+  "started_at": "2026-06-28T09:12:31Z",
+  "finished_at": "2026-06-28T09:12:34Z",
+  "root_run_id": "run_018f0000-0000-7000-8000-000000000100",
+  "nodes": [
+    {
+      "node_id": "collect",
+      "agent_id": "collector",
+      "status": "completed",
+      "run_id": "run_018f0000-0000-7000-8000-000000000100",
+      "output": {
+        "records": 3
+      },
+      "trace": {
+        "protocol_version": "agent.v1",
+        "runtime_version": "0.1.0",
+        "run_id": "run_018f0000-0000-7000-8000-000000000100",
+        "agent_id": "collector",
+        "agent_version": "0.1.0",
+        "scope": {
+          "type": "tenant",
+          "id": "tenant_acme"
+        },
+        "started_at": "2026-06-28T09:12:31Z",
+        "finished_at": "2026-06-28T09:12:32Z",
+        "input": {
+          "account_id": "acct_001"
+        },
+        "output": {
+          "records": 3
+        },
+        "workflow": {
+          "workflow_id": "workflow_daily_ops",
+          "root_run_id": "run_018f0000-0000-7000-8000-000000000100",
+          "metadata": {
+            "workflow_node_id": "collect"
+          }
+        },
+        "events": []
+      },
+      "compensation": {
+        "agent_id": "collector_compensator",
+        "status": "completed",
+        "run_id": "run_018f0000-0000-7000-8000-000000000102",
+        "output": {
+          "released": true
+        },
+        "metadata": {}
+      },
+      "metadata": {}
+    },
+    {
+      "node_id": "summarize",
+      "agent_id": "summarizer",
+      "status": "failed",
+      "run_id": "run_018f0000-0000-7000-8000-000000000101",
+      "depends_on": ["collect"],
+      "output": {},
+      "error": {
+        "code": "agent_failed",
+        "kind": "internal_error",
+        "message": "summarizer failed",
+        "retryable": true,
+        "details": {}
+      },
+      "metadata": {}
+    },
+    {
+      "node_id": "notify",
+      "agent_id": "notifier",
+      "status": "skipped",
+      "depends_on": ["summarize"],
+      "output": {},
+      "metadata": {
+        "reason": "dependency_not_completed",
+        "blocked_dependencies": ["summarize"]
+      }
+    }
+  ],
+  "metadata": {
+    "tenant_id": "tenant_acme"
+  }
+}

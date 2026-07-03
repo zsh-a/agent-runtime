@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentError, AgentEvent, AgentServices, AgentStateStore, HookEventName, ProposalEnvelope, RunId,
-    ToolContext, ToolError, ToolRegistry, TraceEvent, TraceSink, UserContext,
+    AgentError, AgentEvent, AgentServices, AgentStateStore, ArtifactPublishRequest, HookEventName,
+    ProposalEnvelope, RunId, RunScope, RunWorkflow, ToolContext, ToolError, ToolRegistry,
+    TraceEvent, TraceSink, UserContext,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -28,9 +29,11 @@ pub(crate) struct TracedAgentServices {
     pub(crate) run_id: RunId,
     pub(crate) agent_id: String,
     pub(crate) user: Option<UserContext>,
+    pub(crate) scope: RunScope,
     pub(crate) hooks: HookManager,
     pub(crate) subagent_runner: Option<AgentRunner>,
     pub(crate) cancellation: CancellationToken,
+    pub(crate) workflow: Option<RunWorkflow>,
 }
 
 impl BasicAgentServices {
@@ -273,6 +276,17 @@ impl AgentServices for TracedAgentServices {
             event_kind = %event.kind,
             "agent emitted event",
         );
+        self.trace
+            .emit(TraceEvent {
+                kind: event.kind.clone(),
+                occurred_at: event.occurred_at,
+                payload: trace_agent_event_payload(
+                    event.payload.clone(),
+                    &self.run_id,
+                    &self.agent_id,
+                ),
+            })
+            .await?;
         self.inner.emit_event(event).await
     }
 
@@ -535,6 +549,27 @@ impl AgentServices for TracedAgentServices {
             }
         }
     }
+
+    async fn publish_artifact(
+        &self,
+        request: ArtifactPublishRequest,
+    ) -> Result<agent_core::ArtifactRef, AgentError> {
+        let started_at = std::time::Instant::now();
+        let artifact = self.inner.publish_artifact(request).await?;
+        self.trace
+            .emit(TraceEvent::new(
+                "artifact_published",
+                json!({
+                    "run_id": self.run_id.0.clone(),
+                    "agent_id": self.agent_id.clone(),
+                    "artifact_ref": artifact.clone(),
+                    "duration_ms": started_at.elapsed().as_millis(),
+                    "status": "completed",
+                }),
+            ))
+            .await?;
+        Ok(artifact)
+    }
 }
 
 impl TracedAgentServices {
@@ -561,10 +596,12 @@ impl TracedAgentServices {
                 parent_run_id: Some(self.run_id.clone()),
                 parent_agent_id: Some(self.agent_id.clone()),
                 user: self.user.clone(),
+                scope: Some(self.scope.clone()),
                 metadata: json!({}),
                 trace: Some(self.trace.clone()),
                 hooks: self.hooks.clone(),
                 cancellation,
+                workflow: self.workflow.clone(),
             },
         )
         .await
@@ -580,4 +617,20 @@ fn serialized_value_len(value: &Value) -> usize {
     serde_json::to_vec(value)
         .map(|bytes| bytes.len())
         .unwrap_or(0)
+}
+
+fn trace_agent_event_payload(payload: Value, run_id: &RunId, agent_id: &str) -> Value {
+    let mut payload = match payload {
+        Value::Object(_) => payload,
+        other => json!({ "value": other }),
+    };
+    if let Some(object) = payload.as_object_mut() {
+        object
+            .entry("run_id".to_owned())
+            .or_insert_with(|| json!(run_id.0.clone()));
+        object
+            .entry("agent_id".to_owned())
+            .or_insert_with(|| json!(agent_id));
+    }
+    payload
 }

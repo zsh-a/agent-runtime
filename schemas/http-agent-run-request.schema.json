@@ -7,7 +7,102 @@
     "run_id": { "type": ["string", "null"], "minLength": 1 },
     "input": { "type": "object", "default": {} },
     "session_id": { "type": ["string", "null"], "minLength": 1 },
-    "thread_id": { "type": ["string", "null"], "minLength": 1 }
+    "thread_id": { "type": ["string", "null"], "minLength": 1 },
+    "trigger": {
+      "type": "string",
+      "enum": ["manual", "scheduled", "replay", "webhook", "queue"],
+      "default": "manual"
+    },
+    "trigger_envelope": {
+      "type": ["object", "null"],
+      "required": ["source"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "id": { "type": ["string", "null"], "minLength": 1 },
+        "received_at": { "type": ["string", "null"], "format": "date-time" },
+        "payload": { "default": {} },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "user": {
+      "type": ["object", "null"],
+      "required": ["user_id"],
+      "properties": {
+        "user_id": { "type": "string", "minLength": 1 },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "scope": {
+      "anyOf": [{ "$ref": "#/$defs/run_scope" }, { "type": "null" }]
+    },
+    "workflow": {
+      "anyOf": [{ "$ref": "#/$defs/run_workflow" }, { "type": "null" }]
+    },
+    "metadata": { "type": "object", "default": {} }
+  },
+  "$defs": {
+    "run_scope": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["global", "user", "tenant"] },
+        "id": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "global" } } },
+          "then": { "not": { "required": ["id"] } }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["user", "tenant"] } } },
+          "then": { "required": ["id"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "run_workflow": {
+      "type": "object",
+      "properties": {
+        "workflow_id": { "type": ["string", "null"], "minLength": 1 },
+        "root_run_id": { "type": ["string", "null"], "minLength": 1 },
+        "parent_run_id": { "type": ["string", "null"], "minLength": 1 },
+        "parent_agent_id": { "type": ["string", "null"], "minLength": 1 },
+        "dependencies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/run_dependency" },
+          "default": []
+        },
+        "fanout_id": { "type": ["string", "null"], "minLength": 1 },
+        "fanin_id": { "type": ["string", "null"], "minLength": 1 },
+        "compensation": {
+          "anyOf": [{ "$ref": "#/$defs/run_compensation" }, { "type": "null" }]
+        },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "run_dependency": {
+      "type": "object",
+      "required": ["run_id"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "edge": { "type": ["string", "null"], "minLength": 1 },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "run_compensation": {
+      "type": "object",
+      "required": ["compensates_run_id"],
+      "properties": {
+        "compensates_run_id": { "type": "string", "minLength": 1 },
+        "strategy": { "type": ["string", "null"], "minLength": 1 },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

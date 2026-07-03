@@ -1,7 +1,5 @@
-use agent_core::{
-    AgentProposalStore, ApprovalDecision, ApprovalDecisionKind, PROTOCOL_VERSION, ProposalEnvelope,
-    ProposalId, ProposalStatus, RunId,
-};
+use agent_core::{AgentProposalStore, ProposalEnvelope, ProposalId, RunId};
+use agent_runtime::HookManager;
 use agent_store::FileProposalStore;
 use camino::Utf8PathBuf;
 use clap::Subcommand;
@@ -12,10 +10,12 @@ use crate::{
     cli_input::read_command_input,
     print_json,
     proposal::{
-        ProposalAction, ProposalActionResponse, ProposalDecisionResponse,
+        ProposalAction, ProposalActionResponse, ProposalDecisionInput,
         append_proposal_action_trace_event, append_proposal_created_trace_event,
-        append_proposal_decision_trace_event, execute_proposal_action_with_store,
-        parse_approval_decision, proposal_action_tool,
+        append_proposal_decision_trace_event, authorize_proposal_apply_policy,
+        authorize_proposal_create_policy, decide_proposal_with_store,
+        execute_proposal_action_with_store, parse_approval_decision, parse_approval_level,
+        proposal_action_tool,
     },
     tools::{CliServices, ToolOverrides, tool_overrides},
 };
@@ -35,6 +35,10 @@ pub(crate) enum ProposalCommand {
         payload: Option<Utf8PathBuf>,
         #[arg(long)]
         payload_json: Option<String>,
+        #[arg(long)]
+        diffs_json: Option<String>,
+        #[arg(long)]
+        warnings_json: Option<String>,
         #[arg(long, default_value = ".agent-runtime/store")]
         store: Utf8PathBuf,
     },
@@ -55,6 +59,10 @@ pub(crate) enum ProposalCommand {
         store: Utf8PathBuf,
         #[arg(long)]
         decision: String,
+        #[arg(long)]
+        approval_level: Option<String>,
+        #[arg(long, alias = "actor")]
+        decided_by: Option<String>,
         #[arg(long)]
         comment: Option<String>,
     },
@@ -86,7 +94,10 @@ pub(crate) enum ProposalCommand {
     },
 }
 
-pub(crate) async fn run_proposal_command(command: ProposalCommand) -> Result<()> {
+pub(crate) async fn run_proposal_command(
+    command: ProposalCommand,
+    hooks: HookManager,
+) -> Result<()> {
     match command {
         ProposalCommand::Create {
             run_id,
@@ -95,14 +106,20 @@ pub(crate) async fn run_proposal_command(command: ProposalCommand) -> Result<()>
             summary,
             payload,
             payload_json,
+            diffs_json,
+            warnings_json,
             store,
         } => {
             let payload = read_command_input(payload, payload_json).await?;
-            let proposal = ProposalEnvelope::new(RunId(run_id), agent_id, kind, summary, payload);
+            let mut proposal =
+                ProposalEnvelope::new(RunId(run_id), agent_id, kind, summary, payload);
+            proposal.diffs = parse_json_vec("diffs-json", diffs_json)?;
+            proposal.warnings = parse_json_vec("warnings-json", warnings_json)?;
             let store_path = store;
             let store = FileProposalStore::new(store_path.clone())
                 .await
                 .into_diagnostic()?;
+            authorize_proposal_create_policy(&hooks, &store_path, &proposal).await?;
             store
                 .create_proposal(proposal.clone())
                 .await
@@ -132,6 +149,8 @@ pub(crate) async fn run_proposal_command(command: ProposalCommand) -> Result<()>
             proposal_id,
             store,
             decision,
+            approval_level,
+            decided_by,
             comment,
         } => {
             let store_path = store;
@@ -145,24 +164,21 @@ pub(crate) async fn run_proposal_command(command: ProposalCommand) -> Result<()>
                 .into_diagnostic()?
                 .ok_or_else(|| miette!("proposal '{}' was not found", proposal_id.0))?;
             let decision = parse_approval_decision(&decision)?;
-            proposal.status = match decision {
-                ApprovalDecisionKind::Approve => ProposalStatus::Approved,
-                ApprovalDecisionKind::Deny => ProposalStatus::Denied,
-            };
-            store
-                .update_proposal(proposal.clone())
-                .await
-                .into_diagnostic()?;
-            let response = ProposalDecisionResponse {
-                decision: ApprovalDecision {
-                    protocol_version: PROTOCOL_VERSION.to_owned(),
-                    proposal_id,
+            let approval_level = approval_level
+                .as_deref()
+                .map(parse_approval_level)
+                .transpose()?;
+            let response = decide_proposal_with_store(
+                &store,
+                &mut proposal,
+                ProposalDecisionInput {
                     decision,
-                    decided_at: time::OffsetDateTime::now_utc(),
+                    approval_level,
+                    decided_by,
                     comment,
                 },
-                proposal,
-            };
+            )
+            .await?;
             append_proposal_decision_trace_event(&store_path, &response).await?;
             print_json(&response)
         }
@@ -179,6 +195,7 @@ pub(crate) async fn run_proposal_command(command: ProposalCommand) -> Result<()>
                 store,
                 catalog,
                 tool_overrides(tool_host, mock_tool, tool_source).await?,
+                hooks,
                 ProposalAction::Apply,
             )
             .await?;
@@ -197,6 +214,7 @@ pub(crate) async fn run_proposal_command(command: ProposalCommand) -> Result<()>
                 store,
                 catalog,
                 tool_overrides(tool_host, mock_tool, tool_source).await?,
+                hooks,
                 ProposalAction::Undo,
             )
             .await?;
@@ -205,17 +223,30 @@ pub(crate) async fn run_proposal_command(command: ProposalCommand) -> Result<()>
     }
 }
 
+fn parse_json_vec<T>(name: &str, value: Option<String>) -> Result<Vec<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match value {
+        Some(value) => serde_json::from_str(&value)
+            .map_err(|e| miette!("failed to parse --{name} as JSON array: {e}")),
+        None => Ok(Vec::new()),
+    }
+}
+
 async fn execute_proposal_action(
     proposal_id: ProposalId,
     store_path: Utf8PathBuf,
     catalog_path: Utf8PathBuf,
-    tool_overrides: ToolOverrides,
+    mut tool_overrides: ToolOverrides,
+    hooks: HookManager,
     action: ProposalAction,
 ) -> Result<ProposalActionResponse> {
     let catalog = read_catalog(catalog_path).await?;
     let store = FileProposalStore::new(store_path.clone())
         .await
         .into_diagnostic()?;
+    tool_overrides.extend_tool_specs(catalog.tools.clone());
     let services = CliServices::new(tool_overrides);
     let mut proposal = store
         .get_proposal(&proposal_id)
@@ -223,6 +254,7 @@ async fn execute_proposal_action(
         .into_diagnostic()?
         .ok_or_else(|| miette!("proposal '{}' was not found", proposal_id.0))?;
     let tool = proposal_action_tool(&catalog, &proposal.kind)?;
+    authorize_proposal_apply_policy(&hooks, &store_path, &proposal, &tool, action).await?;
     let response =
         execute_proposal_action_with_store(&store, &services, &mut proposal, tool, action).await?;
     append_proposal_action_trace_event(&store_path, &response).await?;

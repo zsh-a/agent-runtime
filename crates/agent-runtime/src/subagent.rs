@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use agent_core::{
-    HookEventName, PROTOCOL_VERSION, RunId, RunRequest, ToolError, ToolRisk, ToolSpec, TraceEvent,
-    TraceSink, TriggerKind, UserContext,
+    HookEventName, PROTOCOL_VERSION, RunId, RunRequest, RunScope, RunWorkflow, ToolError, ToolRisk,
+    ToolSpec, TraceEvent, TraceSink, TriggerKind, UserContext,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -42,6 +42,26 @@ pub fn agent_run_tool_spec() -> ToolSpec {
                 "metadata": {
                     "type": "object",
                     "description": "Optional metadata merged into the child run metadata."
+                },
+                "workflow": {
+                    "type": "object",
+                    "description": "Optional workflow graph fields merged into the child run workflow."
+                },
+                "scope": {
+                    "type": "object",
+                    "required": ["type"],
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["global", "user", "tenant"]
+                        },
+                        "id": {
+                            "type": "string",
+                            "minLength": 1
+                        }
+                    },
+                    "additionalProperties": false,
+                    "description": "Optional run scope override. Defaults to the parent run scope."
                 }
             },
             "additionalProperties": false
@@ -65,6 +85,8 @@ pub struct AgentRunToolContext {
     pub parent_run_id: Option<RunId>,
     pub parent_agent_id: Option<String>,
     pub user: Option<UserContext>,
+    pub scope: Option<RunScope>,
+    pub workflow: Option<RunWorkflow>,
     pub metadata: Value,
     pub trace: Option<Arc<dyn TraceSink>>,
     pub hooks: HookManager,
@@ -77,6 +99,8 @@ impl Default for AgentRunToolContext {
             parent_run_id: None,
             parent_agent_id: None,
             user: None,
+            scope: None,
+            workflow: None,
             metadata: json!({}),
             trace: None,
             hooks: HookManager::default(),
@@ -107,7 +131,9 @@ pub async fn call_agent_run_tool(
         .and_then(Value::as_str)
         .map(|value| RunId(value.to_owned()));
     let child_input = input.get("input").cloned().unwrap_or_else(|| json!({}));
+    let scope = child_scope(&input, &context)?;
     let metadata = child_metadata(&input, &context);
+    let workflow = child_workflow(&input, &context);
     let trace = context
         .trace
         .clone()
@@ -117,6 +143,7 @@ pub async fn call_agent_run_tool(
         "agent_id": context.parent_agent_id,
         "subagent_id": agent_id,
         "input": child_input,
+        "workflow": workflow.clone(),
         "metadata": metadata,
     });
     let decision = context
@@ -173,7 +200,10 @@ pub async fn call_agent_run_tool(
                 run_id,
                 input: child_input,
                 user: context.user,
+                scope,
                 trigger: TriggerKind::Manual,
+                trigger_envelope: None,
+                workflow,
                 metadata,
             },
             RunControl {
@@ -243,4 +273,68 @@ fn child_metadata(input: &Value, context: &AgentRunToolContext) -> Value {
         }
     }
     metadata
+}
+
+fn child_scope(
+    input: &Value,
+    context: &AgentRunToolContext,
+) -> Result<Option<RunScope>, ToolError> {
+    match input.get("scope") {
+        Some(value) => serde_json::from_value::<RunScope>(value.clone())
+            .map(Some)
+            .map_err(|error| {
+                ToolError::policy_denied(
+                    format!("agent.run scope must be a valid RunScope: {error}"),
+                    json!({"tool_name": AGENT_RUN_TOOL_NAME}),
+                )
+            }),
+        None => Ok(context.scope.clone()),
+    }
+}
+
+fn child_workflow(input: &Value, context: &AgentRunToolContext) -> Option<RunWorkflow> {
+    let mut workflow = input
+        .get("workflow")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<RunWorkflow>(value).ok())
+        .or_else(|| context.workflow.clone())
+        .unwrap_or_else(|| RunWorkflow {
+            workflow_id: None,
+            root_run_id: None,
+            parent_run_id: None,
+            parent_agent_id: None,
+            dependencies: Vec::new(),
+            fanout_id: None,
+            fanin_id: None,
+            compensation: None,
+            metadata: json!({}),
+        });
+
+    if let Some(parent_run_id) = &context.parent_run_id {
+        workflow.parent_run_id = Some(parent_run_id.clone());
+        if workflow.root_run_id.is_none() {
+            workflow.root_run_id = context
+                .workflow
+                .as_ref()
+                .and_then(|workflow| workflow.root_run_id.clone())
+                .or_else(|| Some(parent_run_id.clone()));
+        }
+    }
+    if workflow.parent_agent_id.is_none() {
+        workflow.parent_agent_id = context.parent_agent_id.clone();
+    }
+
+    if workflow.workflow_id.is_some()
+        || workflow.root_run_id.is_some()
+        || workflow.parent_run_id.is_some()
+        || workflow.parent_agent_id.is_some()
+        || !workflow.dependencies.is_empty()
+        || workflow.fanout_id.is_some()
+        || workflow.fanin_id.is_some()
+        || workflow.compensation.is_some()
+    {
+        Some(workflow)
+    } else {
+        None
+    }
 }

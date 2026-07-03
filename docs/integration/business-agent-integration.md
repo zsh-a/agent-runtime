@@ -100,6 +100,8 @@ Feature 代码依赖业务语义接口，例如 `CustomerSummaryAgent`、`Portfo
 8. 加 contract tests。
 
    至少覆盖 catalog schema、tool schema、tool golden request/response、proposal confirmation、trace redaction、provider profile secret leakage。
+   对 catalog dry-run 集成，可以先用 `agent compat check --catalog ... --tool-source ... --run-input ... --proposal-input ...`
+   做 CI smoke test，再补业务 repository 自己的更细测试。
 
 ## RunRequest 和 ChatTurnRequest 的选择
 

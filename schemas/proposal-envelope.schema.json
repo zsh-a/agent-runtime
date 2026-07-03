@@ -33,6 +33,33 @@
       "default": "manual"
     },
     "approval_required": { "type": "boolean", "default": true },
+    "required_approval_level": {
+      "type": "string",
+      "enum": ["none", "single_user", "multi_approver", "admin"],
+      "default": "single_user"
+    },
+    "required_approver_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 1
+    },
+    "approval_decisions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/approval_decision" },
+      "default": []
+    },
+    "diffs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/proposal_diff" },
+      "default": []
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/proposal_warning" },
+      "default": []
+    },
+    "policy_id": { "type": ["string", "null"], "minLength": 1 },
+    "policy_version": { "type": ["string", "null"], "minLength": 1 },
     "status": {
       "type": "string",
       "enum": [
@@ -51,6 +78,65 @@
     },
     "created_at": { "type": "string", "format": "date-time" },
     "expires_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "$defs": {
+    "proposal_diff": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "operation": {
+          "type": "string",
+          "enum": ["add", "remove", "replace"],
+          "default": "replace"
+        },
+        "before": {},
+        "after": {},
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "proposal_warning": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "severity": {
+          "type": "string",
+          "enum": ["info", "warning", "danger"],
+          "default": "warning"
+        },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "approval_decision": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "proposal_id",
+        "decision",
+        "decided_at"
+      ],
+      "properties": {
+        "protocol_version": { "const": "agent.v1" },
+        "proposal_id": { "type": "string", "minLength": 1 },
+        "decision": {
+          "type": "string",
+          "enum": ["approve", "deny"]
+        },
+        "approval_level": {
+          "type": "string",
+          "enum": ["none", "single_user", "multi_approver", "admin"],
+          "default": "single_user"
+        },
+        "decided_by": { "type": ["string", "null"], "minLength": 1 },
+        "decided_at": { "type": "string", "format": "date-time" },
+        "comment": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

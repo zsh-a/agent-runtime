@@ -1,16 +1,35 @@
 use agent_core::{
-    AgentProposalStore, AgentRuntimeCatalog, AgentServices, ApprovalDecision, ApprovalDecisionKind,
-    ProposalEnvelope, ProposalKindSpec, ProposalStatus, RunId, TraceEvent,
+    AgentError, AgentProposalStore, AgentRuntimeCatalog, AgentServices, ApprovalDecision,
+    ApprovalDecisionKind, ApprovalLevel, HookEventName, PROTOCOL_VERSION, ProposalEnvelope,
+    ProposalKindSpec, ProposalStatus, RunId, TraceEvent, TraceSink,
+    normalized_required_approver_count,
 };
+use agent_runtime::HookManager;
+use async_trait::async_trait;
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+#[derive(Debug, miette::Diagnostic, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct PolicyDeniedError {
+    pub(crate) message: String,
+    pub(crate) details: Value,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct ProposalDecisionResponse {
     pub(crate) decision: ApprovalDecision,
     pub(crate) proposal: ProposalEnvelope,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProposalDecisionInput {
+    pub(crate) decision: ApprovalDecisionKind,
+    pub(crate) approval_level: Option<ApprovalLevel>,
+    pub(crate) decided_by: Option<String>,
+    pub(crate) comment: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,6 +83,285 @@ impl ProposalAction {
     }
 }
 
+pub(crate) async fn decide_proposal_with_store(
+    store: &dyn AgentProposalStore,
+    proposal: &mut ProposalEnvelope,
+    input: ProposalDecisionInput,
+) -> Result<ProposalDecisionResponse> {
+    let now = time::OffsetDateTime::now_utc();
+    if proposal.mark_expired_if_needed(now) {
+        store
+            .update_proposal(proposal.clone())
+            .await
+            .into_diagnostic()?;
+        return Err(miette!(
+            "proposal '{}' expired before decision and was marked expired",
+            proposal.proposal_id.0
+        ));
+    }
+
+    if !matches!(
+        proposal.status,
+        ProposalStatus::Created | ProposalStatus::PendingApproval
+    ) {
+        return Err(miette!(
+            "proposal '{}' must be pending approval before decision but is {:?}",
+            proposal.proposal_id.0,
+            proposal.status
+        ));
+    }
+
+    proposal.required_approver_count = normalized_required_approver_count(
+        proposal.required_approval_level,
+        proposal.required_approver_count,
+    );
+    let approval_level = input.approval_level.unwrap_or_else(|| {
+        if proposal.approval_required {
+            ApprovalLevel::SingleUser
+        } else {
+            ApprovalLevel::None
+        }
+    });
+    let decision = ApprovalDecision {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        proposal_id: proposal.proposal_id.clone(),
+        decision: input.decision,
+        approval_level,
+        decided_by: input.decided_by,
+        decided_at: now,
+        comment: input.comment,
+    };
+    apply_approval_decision(proposal, decision.clone())?;
+    store
+        .update_proposal(proposal.clone())
+        .await
+        .into_diagnostic()?;
+
+    Ok(ProposalDecisionResponse {
+        decision,
+        proposal: proposal.clone(),
+    })
+}
+
+fn apply_approval_decision(
+    proposal: &mut ProposalEnvelope,
+    decision: ApprovalDecision,
+) -> Result<()> {
+    match decision.decision {
+        ApprovalDecisionKind::Deny => {
+            proposal.approval_decisions.push(decision);
+            proposal.status = ProposalStatus::Denied;
+            Ok(())
+        }
+        ApprovalDecisionKind::Approve => apply_approval(proposal, decision),
+    }
+}
+
+fn apply_approval(proposal: &mut ProposalEnvelope, decision: ApprovalDecision) -> Result<()> {
+    if proposal.required_approval_level == ApprovalLevel::MultiApprover
+        && !decision
+            .approval_level
+            .satisfies(ApprovalLevel::MultiApprover)
+    {
+        if !decision.approval_level.satisfies(ApprovalLevel::SingleUser) {
+            return Err(insufficient_approval_level_error(
+                proposal,
+                decision.approval_level,
+            ));
+        }
+        let actor = decision.decided_by.as_deref().ok_or_else(|| {
+            miette!(
+                "multi-approver proposal '{}' requires decided_by for single-user approvals",
+                proposal.proposal_id.0
+            )
+        })?;
+        if proposal.approval_decisions.iter().any(|existing| {
+            existing.decision == ApprovalDecisionKind::Approve
+                && existing.decided_by.as_deref() == Some(actor)
+        }) {
+            return Err(miette!(
+                "actor '{}' has already approved proposal '{}'",
+                actor,
+                proposal.proposal_id.0
+            ));
+        }
+        proposal.approval_decisions.push(decision);
+        let approved_count = distinct_approver_count(&proposal.approval_decisions);
+        proposal.status = if approved_count >= proposal.required_approver_count as usize {
+            ProposalStatus::Approved
+        } else {
+            ProposalStatus::PendingApproval
+        };
+        return Ok(());
+    }
+
+    if !decision
+        .approval_level
+        .satisfies(proposal.required_approval_level)
+    {
+        return Err(insufficient_approval_level_error(
+            proposal,
+            decision.approval_level,
+        ));
+    }
+    proposal.approval_decisions.push(decision);
+    proposal.status = ProposalStatus::Approved;
+    Ok(())
+}
+
+fn insufficient_approval_level_error(
+    proposal: &ProposalEnvelope,
+    approval_level: ApprovalLevel,
+) -> miette::Report {
+    miette!(
+        "approval level {:?} does not satisfy required level {:?} for proposal '{}'",
+        approval_level,
+        proposal.required_approval_level,
+        proposal.proposal_id.0
+    )
+}
+
+fn distinct_approver_count(decisions: &[ApprovalDecision]) -> usize {
+    let mut actors = std::collections::BTreeSet::new();
+    for decision in decisions {
+        if decision.decision == ApprovalDecisionKind::Approve
+            && let Some(actor) = decision.decided_by.as_deref()
+        {
+            actors.insert(actor.to_owned());
+        }
+    }
+    actors.len()
+}
+
+pub(crate) async fn authorize_proposal_apply_policy(
+    hooks: &HookManager,
+    store_path: &Utf8Path,
+    proposal: &ProposalEnvelope,
+    tool: &str,
+    action: ProposalAction,
+) -> Result<()> {
+    if !matches!(action, ProposalAction::Apply)
+        || proposal.status != ProposalStatus::Approved
+        || proposal.is_expired_at(time::OffsetDateTime::now_utc())
+    {
+        return Ok(());
+    }
+
+    let trace = StoreTraceSink {
+        store_path: store_path.to_owned(),
+        run_id: proposal.run_id.clone(),
+    };
+    let input = json!({
+        "run_id": proposal.run_id.0.clone(),
+        "agent_id": proposal.agent_id.clone(),
+        "proposal_id": proposal.proposal_id.0.clone(),
+        "kind": proposal.kind.clone(),
+        "action": action.as_str(),
+        "tool": tool,
+        "proposal": proposal.clone(),
+    });
+    let decision = hooks
+        .authorize(
+            HookEventName::BeforeProposalApply,
+            Some(proposal.run_id.clone()),
+            Some(proposal.agent_id.clone()),
+            input.clone(),
+            &trace,
+        )
+        .await
+        .into_diagnostic()?;
+    if decision.is_denied() {
+        let message = decision.reason.clone().unwrap_or_else(|| {
+            format!(
+                "proposal '{}' apply denied by policy hook",
+                proposal.proposal_id.0
+            )
+        });
+        return Err(PolicyDeniedError {
+            message,
+            details: json!({
+                "decision": decision,
+                "event": "BeforeProposalApply",
+                "proposal_id": proposal.proposal_id.0.clone(),
+                "run_id": proposal.run_id.0.clone(),
+                "agent_id": proposal.agent_id.clone(),
+                "kind": proposal.kind.clone(),
+                "action": action.as_str(),
+                "tool": tool,
+            }),
+        }
+        .into());
+    }
+    hooks
+        .observe(
+            HookEventName::BeforeProposalApply,
+            Some(proposal.run_id.clone()),
+            Some(proposal.agent_id.clone()),
+            input,
+            &trace,
+        )
+        .await
+        .into_diagnostic()
+}
+
+pub(crate) async fn authorize_proposal_create_policy(
+    hooks: &HookManager,
+    store_path: &Utf8Path,
+    proposal: &ProposalEnvelope,
+) -> Result<()> {
+    let trace = StoreTraceSink {
+        store_path: store_path.to_owned(),
+        run_id: proposal.run_id.clone(),
+    };
+    let input = json!({
+        "run_id": proposal.run_id.0.clone(),
+        "agent_id": proposal.agent_id.clone(),
+        "proposal_id": proposal.proposal_id.0.clone(),
+        "kind": proposal.kind.clone(),
+        "proposal": proposal.clone(),
+    });
+    let decision = hooks
+        .authorize(
+            HookEventName::BeforeProposalCreate,
+            Some(proposal.run_id.clone()),
+            Some(proposal.agent_id.clone()),
+            input.clone(),
+            &trace,
+        )
+        .await
+        .into_diagnostic()?;
+    if decision.is_denied() {
+        let message = decision.reason.clone().unwrap_or_else(|| {
+            format!(
+                "proposal '{}' creation denied by policy hook",
+                proposal.proposal_id.0
+            )
+        });
+        return Err(PolicyDeniedError {
+            message,
+            details: json!({
+                "decision": decision,
+                "event": "BeforeProposalCreate",
+                "proposal_id": proposal.proposal_id.0.clone(),
+                "run_id": proposal.run_id.0.clone(),
+                "agent_id": proposal.agent_id.clone(),
+                "kind": proposal.kind.clone(),
+            }),
+        }
+        .into());
+    }
+    hooks
+        .observe(
+            HookEventName::BeforeProposalCreate,
+            Some(proposal.run_id.clone()),
+            Some(proposal.agent_id.clone()),
+            input,
+            &trace,
+        )
+        .await
+        .into_diagnostic()
+}
+
 pub(crate) async fn execute_proposal_action_with_store(
     store: &dyn AgentProposalStore,
     services: &dyn AgentServices,
@@ -71,6 +369,19 @@ pub(crate) async fn execute_proposal_action_with_store(
     tool: String,
     action: ProposalAction,
 ) -> Result<ProposalActionResponse> {
+    if matches!(action, ProposalAction::Apply)
+        && proposal.mark_expired_if_needed(time::OffsetDateTime::now_utc())
+    {
+        store
+            .update_proposal(proposal.clone())
+            .await
+            .into_diagnostic()?;
+        return Err(miette!(
+            "proposal '{}' expired before apply and was marked expired",
+            proposal.proposal_id.0
+        ));
+    }
+
     let required = action.required_status();
     if proposal.status != required {
         return Err(miette!(
@@ -117,6 +428,20 @@ pub(crate) async fn execute_proposal_action_with_store(
     })
 }
 
+struct StoreTraceSink {
+    store_path: Utf8PathBuf,
+    run_id: RunId,
+}
+
+#[async_trait]
+impl TraceSink for StoreTraceSink {
+    async fn emit(&self, event: TraceEvent) -> Result<(), AgentError> {
+        append_store_trace_event(&self.store_path, &self.run_id, event)
+            .await
+            .map_err(|error| AgentError::internal(error.to_string()))
+    }
+}
+
 pub(crate) fn proposal_action_tool(catalog: &AgentRuntimeCatalog, kind: &str) -> Result<String> {
     Ok(proposal_kind_spec(catalog, kind)?.tool_name.clone())
 }
@@ -150,6 +475,13 @@ pub(crate) async fn append_proposal_created_trace_event(
                 "risk": proposal.risk.clone(),
                 "approval_policy": proposal.approval_policy,
                 "approval_required": proposal.approval_required,
+                "required_approval_level": proposal.required_approval_level,
+                "required_approver_count": proposal.required_approver_count,
+                "approval_decision_count": proposal.approval_decisions.len(),
+                "diff_count": proposal.diffs.len(),
+                "warning_count": proposal.warnings.len(),
+                "policy_id": proposal.policy_id.clone(),
+                "policy_version": proposal.policy_version.clone(),
                 "status": proposal.status.clone(),
             }),
         ),
@@ -174,7 +506,16 @@ pub(crate) async fn append_proposal_decision_trace_event(
                 "risk": response.proposal.risk.clone(),
                 "approval_policy": response.proposal.approval_policy,
                 "approval_required": response.proposal.approval_required,
+                "required_approval_level": response.proposal.required_approval_level,
+                "required_approver_count": response.proposal.required_approver_count,
+                "approval_decision_count": response.proposal.approval_decisions.len(),
+                "diff_count": response.proposal.diffs.len(),
+                "warning_count": response.proposal.warnings.len(),
+                "policy_id": response.proposal.policy_id.clone(),
+                "policy_version": response.proposal.policy_version.clone(),
                 "decision": response.decision.decision.clone(),
+                "approval_level": response.decision.approval_level,
+                "decided_by": response.decision.decided_by.clone(),
                 "status": response.proposal.status.clone(),
                 "comment": response.decision.comment.clone(),
             }),
@@ -205,6 +546,13 @@ pub(crate) async fn append_proposal_action_trace_event(
                 "risk": response.proposal.risk.clone(),
                 "approval_policy": response.proposal.approval_policy,
                 "approval_required": response.proposal.approval_required,
+                "required_approval_level": response.proposal.required_approval_level,
+                "required_approver_count": response.proposal.required_approver_count,
+                "approval_decision_count": response.proposal.approval_decisions.len(),
+                "diff_count": response.proposal.diffs.len(),
+                "warning_count": response.proposal.warnings.len(),
+                "policy_id": response.proposal.policy_id.clone(),
+                "policy_version": response.proposal.policy_version.clone(),
                 "action": response.action,
                 "status": response.proposal.status.clone(),
                 "tool": response.tool.clone(),
@@ -221,6 +569,18 @@ pub(crate) fn parse_approval_decision(value: &str) -> Result<ApprovalDecisionKin
         "deny" | "denied" => Ok(ApprovalDecisionKind::Deny),
         other => Err(miette!(
             "unsupported approval decision '{other}', expected approve or deny"
+        )),
+    }
+}
+
+pub(crate) fn parse_approval_level(value: &str) -> Result<ApprovalLevel> {
+    match value {
+        "none" => Ok(ApprovalLevel::None),
+        "single_user" | "single-user" | "single" => Ok(ApprovalLevel::SingleUser),
+        "multi_approver" | "multi-approver" | "multi" => Ok(ApprovalLevel::MultiApprover),
+        "admin" => Ok(ApprovalLevel::Admin),
+        other => Err(miette!(
+            "unsupported approval level '{other}', expected none, single_user, multi_approver, or admin"
         )),
     }
 }

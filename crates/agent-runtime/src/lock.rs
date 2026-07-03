@@ -62,6 +62,10 @@ pub(crate) fn lock_key(agent_id: &str, scope: &RunScope) -> String {
     format!("agent:{agent_id}:scope:{}", scope_key(scope))
 }
 
+pub(crate) fn workflow_lock_key(workflow_id: &str, scope: &RunScope) -> String {
+    format!("workflow:{workflow_id}:scope:{}", scope_key(scope))
+}
+
 fn scope_key(scope: &RunScope) -> String {
     match scope {
         RunScope::Global => "global".to_owned(),

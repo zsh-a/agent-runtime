@@ -33,6 +33,8 @@
         "trace": { "const": "trace.json" },
         "events": { "const": "events.jsonl" },
         "tool_calls": { "const": "tool_calls.jsonl" },
+        "artifacts": { "const": "artifacts.json" },
+        "artifact_materializations": { "const": "artifact_materializations.json" },
         "state_snapshot": { "const": "state_snapshot.json" },
         "prompt_manifest": { "const": "prompt_manifest.json" }
       },

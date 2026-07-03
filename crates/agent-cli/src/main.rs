@@ -17,6 +17,7 @@ mod debug_bundle;
 mod dev_stdio;
 mod eval;
 mod metrics;
+mod otel_export;
 mod proposal;
 mod registry;
 mod replay;
@@ -30,17 +31,22 @@ mod trace_store;
 mod tui;
 
 use commands::catalog::{CatalogCommand, run_catalog_command};
+use commands::compat::{CompatCommand, run_compat_command};
 use commands::llm::{LlmCompleteOptions, run_llm_complete};
 use commands::proposal::{ProposalCommand, run_proposal_command};
 use commands::run::{RunCliOptions, TickCliOptions, run_agent_once, tick_agents};
 use commands::session::{SessionCommand, run_session_command};
 use commands::tool::{ToolCommand, run_tool_command};
-use commands::workflow::{CommandRunOptions, create_command_from_run, run_command_template};
+use commands::workflow::{
+    CommandRunOptions, WorkflowRunCliOptions, create_command_from_run, run_command_template,
+    run_workflow_request,
+};
 use config::load_agent_config;
 use debug_bundle::export_debug_bundle;
 use dev_stdio::{run_dev_mcp_server, run_dev_tool_host};
 use eval::{create_eval_from_run, run_dev_score_hook, run_eval_path};
 use metrics::build_metrics_summary;
+use otel_export::{DEFAULT_OTLP_TIMEOUT_SECONDS, ExportOtelTraceOptions, export_otel_trace_file};
 use registry::load_registry;
 use replay::{ReplayMode, ReplayTraceOptions, replay_trace};
 use runtime_server::RuntimeServer;
@@ -203,6 +209,8 @@ enum Command {
         session: Option<String>,
         #[arg(long)]
         thread: Option<String>,
+        #[arg(long, value_name = "global|user:ID|tenant:ID")]
+        scope: Option<String>,
         #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECONDS)]
@@ -262,6 +270,14 @@ enum Command {
         #[command(subcommand)]
         command: MetricsCommand,
     },
+    Trace {
+        #[command(subcommand)]
+        command: TraceCommand,
+    },
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCommand,
+    },
     Tool {
         #[command(subcommand)]
         command: ToolCommand,
@@ -281,6 +297,10 @@ enum Command {
     Catalog {
         #[command(subcommand)]
         command: CatalogCommand,
+    },
+    Compat {
+        #[command(subcommand)]
+        command: CompatCommand,
     },
     Config {
         #[command(subcommand)]
@@ -477,6 +497,10 @@ enum DebugBundleCommand {
         trace: Option<Utf8PathBuf>,
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECONDS)]
         timeout_seconds: u64,
+        #[arg(long)]
+        materialize_artifacts: bool,
+        #[arg(long, value_name = "PATH")]
+        artifact_resolver: Option<Utf8PathBuf>,
     },
 }
 
@@ -485,6 +509,46 @@ enum MetricsCommand {
     Summary {
         #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkflowCommand {
+    Run {
+        input: Utf8PathBuf,
+        #[arg(long, default_value = DEFAULT_REGISTRY)]
+        registry: Utf8PathBuf,
+        #[arg(long)]
+        catalog: Option<Utf8PathBuf>,
+        #[arg(long, default_value = DEFAULT_STORE)]
+        store: Utf8PathBuf,
+        #[arg(long, num_args = 1.., value_name = "COMMAND")]
+        tool_host: Vec<String>,
+        #[arg(long, value_name = "NAME=JSON_OR_@PATH")]
+        mock_tool: Vec<String>,
+        #[arg(long)]
+        tool_source: Vec<Utf8PathBuf>,
+        #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECONDS)]
+        timeout_seconds: u64,
+        #[arg(long, default_value_t = 0)]
+        max_retries: u32,
+        #[arg(long, default_value_t = 0)]
+        retry_backoff_ms: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TraceCommand {
+    ExportOtel {
+        trace_file: Utf8PathBuf,
+        #[arg(long)]
+        out: Option<Utf8PathBuf>,
+        #[arg(long, env = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")]
+        endpoint: Option<String>,
+        #[arg(long = "header", value_name = "NAME=VALUE")]
+        header: Vec<String>,
+        #[arg(long, default_value_t = DEFAULT_OTLP_TIMEOUT_SECONDS)]
+        timeout_seconds: u64,
     },
 }
 
@@ -540,6 +604,7 @@ async fn main() -> Result<()> {
             trace_out,
             session,
             thread,
+            scope,
             store,
             timeout_seconds,
             max_retries,
@@ -560,6 +625,7 @@ async fn main() -> Result<()> {
                 trace_out,
                 session,
                 thread,
+                scope,
                 store,
                 timeout_seconds: execution.timeout_seconds,
                 max_retries: execution.max_retries,
@@ -666,8 +732,20 @@ async fn main() -> Result<()> {
                 catalog,
                 trace,
                 timeout_seconds,
+                materialize_artifacts,
+                artifact_resolver,
             } => {
-                export_debug_bundle(run_id, store, out, catalog, trace, timeout_seconds).await?;
+                export_debug_bundle(
+                    run_id,
+                    store,
+                    out,
+                    catalog,
+                    trace,
+                    timeout_seconds,
+                    materialize_artifacts,
+                    artifact_resolver,
+                )
+                .await?;
             }
         },
         Command::Metrics { command } => match command {
@@ -680,11 +758,60 @@ async fn main() -> Result<()> {
                 print_json(&summary)?;
             }
         },
+        Command::Trace { command } => match command {
+            TraceCommand::ExportOtel {
+                trace_file,
+                out,
+                endpoint,
+                header,
+                timeout_seconds,
+            } => {
+                export_otel_trace_file(ExportOtelTraceOptions {
+                    trace_file,
+                    out,
+                    endpoint,
+                    header,
+                    timeout_seconds,
+                })
+                .await?;
+            }
+        },
+        Command::Workflow { command } => match command {
+            WorkflowCommand::Run {
+                input,
+                registry,
+                catalog,
+                store,
+                tool_host,
+                mock_tool,
+                tool_source,
+                timeout_seconds,
+                max_retries,
+                retry_backoff_ms,
+            } => {
+                let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
+                let result = run_workflow_request(WorkflowRunCliOptions {
+                    input,
+                    registry: context.registry(registry),
+                    catalog: context.catalog(catalog),
+                    store: context.store(store),
+                    tool_host,
+                    mock_tool,
+                    tool_source: context.tool_sources(tool_source),
+                    timeout_seconds: execution.timeout_seconds,
+                    max_retries: execution.max_retries,
+                    retry_backoff_ms: execution.retry_backoff_ms,
+                    hooks: context.hooks()?,
+                })
+                .await?;
+                print_json(&result)?;
+            }
+        },
         Command::Tool { command } => {
             run_tool_command(command).await?;
         }
         Command::Proposal { command } => {
-            run_proposal_command(command).await?;
+            run_proposal_command(command, context.hooks()?).await?;
         }
         Command::Session { command } => {
             run_session_command(command).await?;
@@ -717,6 +844,9 @@ async fn main() -> Result<()> {
         },
         Command::Catalog { command } => {
             run_catalog_command(command).await?;
+        }
+        Command::Compat { command } => {
+            run_compat_command(command).await?;
         }
         Command::Config { command } => match command {
             ConfigCommand::Show => {

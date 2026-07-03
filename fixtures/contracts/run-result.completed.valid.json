@@ -6,6 +6,22 @@
   "started_at": "2026-06-28T09:12:31Z",
   "finished_at": "2026-06-28T09:12:32Z",
   "summary": "echoed input",
+  "workflow": {
+    "workflow_id": "workflow_daily_ops",
+    "root_run_id": "run_018f0000-0000-7000-8000-000000000010",
+    "parent_run_id": "run_018f0000-0000-7000-8000-000000000011",
+    "parent_agent_id": "coordinator_agent",
+    "dependencies": [
+      {
+        "run_id": "run_018f0000-0000-7000-8000-000000000012",
+        "edge": "requires",
+        "metadata": {}
+      }
+    ],
+    "metadata": {
+      "lane": "research"
+    }
+  },
   "output": {
     "message": "hello runtime"
   }

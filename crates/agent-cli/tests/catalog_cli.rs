@@ -141,6 +141,71 @@ fn validate_rejects_invalid_schema_fixture() {
 }
 
 #[test]
+fn compat_check_runs_business_integration_smoke() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("compat-store");
+    let bundle = dir.path().join("compat-bundle");
+    let output = agent_cmd()
+        .args([
+            "compat",
+            "check",
+            "--catalog",
+            "../../examples/business-integration/catalog.json",
+            "--tool-source",
+            "../../examples/business-integration/tool-source.json",
+            "--agent-id",
+            "customer_summary_agent",
+            "--run-input",
+            "../../examples/business-integration/run-customer-summary.json",
+            "--proposal-input",
+            "../../examples/business-integration/run-followup-proposal.json",
+            "--schema-root",
+            "../../schemas",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--debug-bundle-out",
+            bundle.to_str().expect("utf8 bundle path"),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).expect("compat report is JSON");
+    assert_eq!(report["status"], "passed");
+    let steps = report["steps"].as_array().expect("steps array");
+    for expected in [
+        "catalog_schema",
+        "tool_source_schema",
+        "catalog_agent",
+        "run_fixture",
+        "proposal_fixture",
+        "trace_redaction",
+    ] {
+        assert!(
+            steps
+                .iter()
+                .any(|step| step["name"] == expected && step["status"] == "passed"),
+            "step {expected} passed"
+        );
+    }
+    assert_eq!(report["run"]["agent_id"], "customer_summary_agent");
+    assert_eq!(report["proposal_run"]["agent_id"], "customer_summary_agent");
+    assert!(
+        steps
+            .iter()
+            .find(|step| step["name"] == "proposal_fixture")
+            .expect("proposal step exists")["details"]["proposal_count"]
+            .as_u64()
+            .expect("proposal count")
+            > 0
+    );
+    assert!(bundle.join("redactions.json").exists());
+    assert!(bundle.join("manifest.json").exists());
+}
+
+#[test]
 fn config_profile_drives_run_defaults() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = dir.path().join("configured-run-store");
@@ -272,6 +337,8 @@ fn run_can_use_catalog_backed_dry_run_registry() {
             store.to_str().expect("utf8 store path"),
             "--trace-out",
             trace.to_str().expect("utf8 trace path"),
+            "--scope",
+            "tenant:tenant_cli",
         ])
         .assert()
         .success()
@@ -286,12 +353,157 @@ fn run_can_use_catalog_backed_dry_run_registry() {
     assert_eq!(result["output"]["mode"], "catalog_dry_run");
     assert_eq!(result["output"]["agent"]["id"], "execution_review");
     assert_eq!(result["output"]["input"]["protocol_version"], "agent.v1");
+    let run_id = result["run_id"].as_str().expect("run id is string");
+    let inspected = agent_cmd()
+        .args([
+            "inspect",
+            run_id,
+            "--store",
+            store.to_str().expect("utf8 store path"),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected: Value = serde_json::from_slice(&inspected).expect("inspect result is JSON");
+    assert_eq!(inspected["scope"]["type"], "tenant");
+    assert_eq!(inspected["scope"]["id"], "tenant_cli");
 
     let trace: Value =
         serde_json::from_slice(&std::fs::read(trace).expect("trace file was written"))
             .expect("trace is JSON");
     assert_eq!(trace["agent_id"], "execution_review");
     assert_eq!(trace["events"][1]["kind"], "catalog_dry_run.agent_selected");
+}
+
+#[test]
+fn workflow_cli_runs_dag_and_persists_node_traces() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("workflow-store");
+    let input = dir.path().join("workflow.json");
+    std::fs::write(
+        &input,
+        r#"{
+  "protocol_version": "agent.v1",
+  "workflow_id": "workflow_cli_test",
+  "scope": {"type": "tenant", "id": "tenant_workflow_cli"},
+  "nodes": [
+    {
+      "node_id": "collect",
+      "agent_id": "execution_review",
+      "input": {"message": "collect"}
+    },
+    {
+      "node_id": "summarize",
+      "agent_id": "execution_review",
+      "depends_on": ["collect"],
+      "input": {"message": "summarize"},
+      "input_mappings": [
+        {
+          "from_node": "collect",
+          "from_path": "/input/message",
+          "to_path": "/from_collect"
+        }
+      ]
+    }
+  ],
+  "metadata": {"case": "catalog_cli"}
+}"#,
+    )
+    .expect("workflow writes");
+
+    let output = agent_cmd()
+        .args([
+            "workflow",
+            "run",
+            input.to_str().expect("utf8 workflow path"),
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let result: Value = serde_json::from_slice(&output).expect("workflow result is JSON");
+    assert_eq!(result["protocol_version"], "agent.v1");
+    assert_eq!(result["workflow_id"], "workflow_cli_test");
+    assert_eq!(result["status"], "completed");
+    let nodes = result["nodes"].as_array().expect("workflow nodes");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["node_id"], "collect");
+    assert_eq!(
+        nodes[0]["trace"]["workflow"]["workflow_id"],
+        "workflow_cli_test"
+    );
+    assert_eq!(nodes[1]["depends_on"], serde_json::json!(["collect"]));
+    assert_eq!(nodes[1]["output"]["input"]["from_collect"], "collect");
+    assert_eq!(
+        nodes[1]["trace"]["workflow"]["dependencies"][0]["run_id"],
+        nodes[0]["run_id"]
+    );
+
+    for node in nodes {
+        let run_id = node["run_id"].as_str().expect("node run id");
+        let stored_run = agent_cmd()
+            .args([
+                "inspect",
+                run_id,
+                "--store",
+                store.to_str().expect("utf8 store path"),
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stored_run: Value = serde_json::from_slice(&stored_run).expect("run record is JSON");
+        assert_eq!(stored_run["scope"]["type"], "tenant");
+        assert_eq!(stored_run["scope"]["id"], "tenant_workflow_cli");
+        let stored_trace = read_json(store.join("traces").join(format!("{run_id}.trace.json")));
+        assert_eq!(stored_trace["run_id"], run_id);
+        assert_eq!(stored_trace["workflow"]["workflow_id"], "workflow_cli_test");
+        assert_eq!(
+            stored_trace["events"][1]["kind"],
+            "catalog_dry_run.agent_selected"
+        );
+    }
+}
+
+#[test]
+fn workflow_cli_validates_request_schema() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let input = dir.path().join("invalid-workflow.json");
+    std::fs::write(
+        &input,
+        r#"{"protocol_version":"agent.v1","workflow_id":"workflow_invalid"}"#,
+    )
+    .expect("workflow writes");
+
+    let stderr = agent_cmd()
+        .args([
+            "workflow",
+            "run",
+            input.to_str().expect("utf8 workflow path"),
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--store",
+            dir.path()
+                .join("workflow-store")
+                .to_str()
+                .expect("utf8 store path"),
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr).expect("stderr is utf8");
+    assert!(stderr.contains("workflow request failed schema validation"));
 }
 
 #[test]
@@ -348,6 +560,104 @@ fn replay_can_execute_from_trace() {
         replay_trace["events"][1]["kind"],
         "catalog_dry_run.agent_selected"
     );
+}
+
+#[test]
+fn trace_export_otel_converts_trace_spans() {
+    let output = agent_cmd()
+        .args([
+            "trace",
+            "export-otel",
+            "../../fixtures/contracts/trace.valid.json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let export: Value = serde_json::from_slice(&output).expect("otel export is JSON");
+    assert_eq!(export["protocol_version"], "agent.v1");
+    assert_eq!(export["export_format"], "otlp_trace_json.v1");
+    let resource = &export["resourceSpans"][0]["resource"]["attributes"];
+    assert!(
+        resource
+            .as_array()
+            .expect("resource attrs")
+            .iter()
+            .any(|attr| {
+                attr["key"] == "service.name" && attr["value"]["stringValue"] == "agent-runtime"
+            })
+    );
+    assert!(
+        resource
+            .as_array()
+            .expect("resource attrs")
+            .iter()
+            .any(|attr| {
+                attr["key"] == "run.scope.type" && attr["value"]["stringValue"] == "tenant"
+            })
+    );
+    let spans = export["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        .as_array()
+        .expect("spans array");
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0]["name"], "agent.run");
+    assert_eq!(spans[0]["kind"], "SPAN_KIND_INTERNAL");
+    assert_eq!(spans[0]["status"]["code"], "STATUS_CODE_OK");
+    assert!(
+        spans[0]["traceId"]
+            .as_str()
+            .is_some_and(|value| value.len() == 32)
+    );
+    assert!(
+        spans[0]["spanId"]
+            .as_str()
+            .is_some_and(|value| value.len() == 16)
+    );
+    assert_eq!(spans[1]["name"], "llm.openai");
+    assert_eq!(spans[1]["parentSpanId"], spans[0]["spanId"]);
+    assert!(
+        spans[1]["attributes"]
+            .as_array()
+            .expect("attrs")
+            .iter()
+            .any(|attr| { attr["key"] == "total_tokens" && attr["value"]["intValue"] == "18" })
+    );
+}
+
+#[test]
+fn trace_export_otel_pushes_otlp_http_json() {
+    let (port, request_handle) = spawn_otlp_trace_collector();
+    let endpoint = format!("http://127.0.0.1:{port}/v1/traces");
+    let output = agent_cmd()
+        .args([
+            "trace",
+            "export-otel",
+            "../../fixtures/contracts/trace.valid.json",
+            "--endpoint",
+            &endpoint,
+            "--header",
+            "x-otlp-test=true",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).expect("push report is JSON");
+    assert_eq!(report["protocol_version"], "agent.v1");
+    assert_eq!(report["export_format"], "otlp_trace_json.v1");
+    assert_eq!(report["endpoint"], endpoint);
+    assert_eq!(report["status_code"], 200);
+    assert_eq!(report["span_count"], 2);
+
+    let request = request_handle.join().expect("request captured");
+    assert!(request.starts_with("POST /v1/traces HTTP/1.1"));
+    assert!(request.contains("content-type: application/json"));
+    assert!(request.contains("x-otlp-test: true"));
+    assert!(request.contains(r#""resourceSpans""#));
+    assert!(request.contains(r#""name":"agent.run""#));
 }
 
 #[test]
@@ -530,6 +840,80 @@ fn inspect_and_debug_bundle_export_use_file_store() {
         .as_str()
         .expect("proposal id is string");
 
+    let trace_path = store.join("traces").join(format!("{run_id}.trace.json"));
+    let local_artifact_source = store.join("debug-artifact.txt");
+    std::fs::write(&local_artifact_source, "artifact bytes\n").expect("local artifact writes");
+    let artifact_resolver_root = dir.path().join("artifact-store");
+    let remote_artifact_source = artifact_resolver_root
+        .join("debug-bucket")
+        .join("reports")
+        .join("report.pdf");
+    std::fs::create_dir_all(
+        remote_artifact_source
+            .parent()
+            .expect("remote artifact has parent"),
+    )
+    .expect("remote artifact parent writes");
+    std::fs::write(&remote_artifact_source, "remote artifact bytes\n")
+        .expect("remote artifact writes");
+    let artifact_resolver_path = dir.path().join("debug-artifact-resolvers.json");
+    std::fs::write(
+        &artifact_resolver_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "protocol_version": "agent.v1",
+            "resolvers": [
+                {
+                    "provider": "host_blob_store",
+                    "root": artifact_resolver_root.to_str().expect("utf8 resolver root")
+                }
+            ]
+        }))
+        .expect("artifact resolver encodes"),
+    )
+    .expect("artifact resolver writes");
+    let mut stored_trace = read_json(&trace_path);
+    stored_trace["artifact_refs"] = serde_json::json!([
+        {
+            "artifact_id": "artifact_debug_report",
+            "kind": "document",
+            "uri": "artifact://debug/report.pdf",
+            "media_type": "application/pdf",
+            "size_bytes": 2048,
+            "sha256": "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            "redaction_classification": "confidential",
+            "store": {
+                "provider": "host_blob_store",
+                "bucket": "debug-bucket",
+                "key": "reports/report.pdf",
+                "version": "v1",
+                "metadata": {
+                    "api_key": "artifact-store-secret"
+                }
+            },
+            "metadata": {
+                "safe": "visible",
+                "api_key": "artifact-secret"
+            }
+        },
+        {
+            "artifact_id": "artifact_local_report",
+            "kind": "log",
+            "uri": "artifact://debug/local-report.txt",
+            "media_type": "text/plain",
+            "size_bytes": 15,
+            "redaction_classification": "internal",
+            "metadata": {
+                "local_path": local_artifact_source.to_str().expect("utf8 artifact path"),
+                "safe": "visible"
+            }
+        }
+    ]);
+    std::fs::write(
+        &trace_path,
+        serde_json::to_vec_pretty(&stored_trace).expect("trace encodes"),
+    )
+    .expect("trace writes");
+
     let manifest = agent_cmd()
         .args([
             "debug-bundle",
@@ -541,6 +925,11 @@ fn inspect_and_debug_bundle_export_use_file_store() {
             bundle.to_str().expect("utf8 bundle path"),
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
+            "--materialize-artifacts",
+            "--artifact-resolver",
+            artifact_resolver_path
+                .to_str()
+                .expect("utf8 artifact resolver path"),
         ])
         .assert()
         .success()
@@ -559,6 +948,11 @@ fn inspect_and_debug_bundle_export_use_file_store() {
     assert_eq!(manifest["files"]["agent_spec"], "agent_spec.json");
     assert_eq!(manifest["files"]["prompt_manifest"], "prompt_manifest.json");
     assert_eq!(manifest["files"]["tool_calls"], "tool_calls.jsonl");
+    assert_eq!(manifest["files"]["artifacts"], "artifacts.json");
+    assert_eq!(
+        manifest["files"]["artifact_materializations"],
+        "artifact_materializations.json"
+    );
     assert_eq!(manifest["files"]["state_snapshot"], "state_snapshot.json");
     assert_eq!(manifest["files"]["redactions"], "redactions.json");
 
@@ -623,6 +1017,11 @@ fn inspect_and_debug_bundle_export_use_file_store() {
     assert_eq!(replay_config["assets"]["trace"], "trace.json");
     assert_eq!(replay_config["assets"]["events"], "events.jsonl");
     assert_eq!(replay_config["assets"]["tool_calls"], "tool_calls.jsonl");
+    assert_eq!(replay_config["assets"]["artifacts"], "artifacts.json");
+    assert_eq!(
+        replay_config["assets"]["artifact_materializations"],
+        "artifact_materializations.json"
+    );
     assert_eq!(
         replay_config["assets"]["prompt_manifest"],
         "prompt_manifest.json"
@@ -673,6 +1072,76 @@ fn inspect_and_debug_bundle_export_use_file_store() {
     );
     assert_eq!(bundled_tool_calls[0]["output"]["echo"]["value"], 7);
 
+    let bundled_artifacts = read_json(bundle.join("artifacts.json"));
+    assert_eq!(bundled_artifacts[0]["artifact_id"], "artifact_debug_report");
+    assert_eq!(bundled_artifacts[0]["kind"], "document");
+    assert_eq!(
+        bundled_artifacts[0]["redaction_classification"],
+        "confidential"
+    );
+    assert_eq!(bundled_artifacts[0]["metadata"]["safe"], "visible");
+    assert_eq!(bundled_artifacts[0]["metadata"]["api_key"], "[REDACTED]");
+    assert_eq!(
+        bundled_artifacts[0]["store"]["metadata"]["api_key"],
+        "[REDACTED]"
+    );
+    assert_eq!(bundled_artifacts[1]["artifact_id"], "artifact_local_report");
+    assert_eq!(bundled_artifacts[1]["kind"], "log");
+    assert_eq!(bundled_artifacts[1]["metadata"]["local_path"], "[REDACTED]");
+
+    let materializations = read_json(bundle.join("artifact_materializations.json"));
+    assert_eq!(materializations["protocol_version"], "agent.v1");
+    assert_eq!(
+        materializations["mode"],
+        "local_files_and_artifact_store_resolvers"
+    );
+    assert_eq!(
+        materializations["records"][0]["artifact_id"],
+        "artifact_debug_report"
+    );
+    assert_eq!(materializations["records"][0]["status"], "materialized");
+    assert_eq!(
+        materializations["records"][0]["source"],
+        "artifact_store:host_blob_store"
+    );
+    assert_eq!(materializations["records"][0]["size_bytes"], 22);
+    assert!(
+        materializations["records"][0]["blake3"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("blake3:"))
+    );
+    let remote_materialized_path = materializations["records"][0]["bundled_path"]
+        .as_str()
+        .expect("remote materialized path is string");
+    assert_eq!(
+        std::fs::read_to_string(bundle.join(remote_materialized_path))
+            .expect("remote materialized artifact reads"),
+        "remote artifact bytes\n"
+    );
+    assert_eq!(
+        materializations["records"][1]["artifact_id"],
+        "artifact_local_report"
+    );
+    assert_eq!(materializations["records"][1]["status"], "materialized");
+    assert_eq!(
+        materializations["records"][1]["source"],
+        "metadata.local_path"
+    );
+    assert_eq!(materializations["records"][1]["size_bytes"], 15);
+    assert!(
+        materializations["records"][1]["blake3"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("blake3:"))
+    );
+    let materialized_path = materializations["records"][1]["bundled_path"]
+        .as_str()
+        .expect("materialized path is string");
+    assert_eq!(
+        std::fs::read_to_string(bundle.join(materialized_path))
+            .expect("materialized artifact reads"),
+        "artifact bytes\n"
+    );
+
     let state_snapshot = read_json(bundle.join("state_snapshot.json"));
     assert_eq!(state_snapshot["run_id"], run_id);
     assert_eq!(state_snapshot["agent_id"], "execution_review");
@@ -702,6 +1171,10 @@ fn inspect_and_debug_bundle_export_use_file_store() {
     assert!(redacted_paths.iter().any(|path| {
         path.as_str()
             .is_some_and(|path| path.contains("access_token"))
+    }));
+    assert!(redacted_paths.iter().any(|path| {
+        path.as_str()
+            .is_some_and(|path| path.contains("local_path"))
     }));
 
     let agent_spec = read_json(bundle.join("agent_spec.json"));
@@ -844,6 +1317,26 @@ fn catalog_dry_run_can_call_process_tool_host() {
     assert_eq!(finished["payload"]["status"], "completed");
     assert!(finished["payload"]["duration_ms"].is_number());
     assert_eq!(finished["payload"]["output"]["input"]["value"], 7);
+
+    let spans = trace["spans"].as_array().expect("trace spans is array");
+    let tool_spans = spans
+        .iter()
+        .filter(|span| span["name"] == "tool.echo_external")
+        .collect::<Vec<_>>();
+    assert_eq!(tool_spans.len(), 1);
+    assert_eq!(
+        tool_spans[0]["parent_span_id"], spans[0]["span_id"],
+        "tool span is nested under the run span",
+    );
+    assert_eq!(tool_spans[0]["status"], "completed");
+    assert_eq!(
+        tool_spans[0]["attributes"]["tool_call_id"],
+        started["payload"]["tool_call_id"]
+    );
+    assert_eq!(
+        tool_spans[0]["attributes"]["input_hash"],
+        started["payload"]["input_hash"]
+    );
 }
 
 #[test]
@@ -946,7 +1439,7 @@ fn metrics_summary_counts_runs_tools_and_proposals() {
     )
     .expect("input writes");
 
-    agent_cmd()
+    let run_output = agent_cmd()
         .args([
             "run",
             "execution_review",
@@ -958,7 +1451,56 @@ fn metrics_summary_counts_runs_tools_and_proposals() {
             store.to_str().expect("utf8 store path"),
         ])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_result: Value = serde_json::from_slice(&run_output).expect("run result is JSON");
+    let run_id = run_result["run_id"].as_str().expect("run id is string");
+    let trace_path = store.join("traces").join(format!("{run_id}.trace.json"));
+    let mut trace = read_json(&trace_path);
+    let events = trace["events"]
+        .as_array_mut()
+        .expect("trace events are array");
+    events.push(serde_json::json!({
+        "kind": "llm_response",
+        "occurred_at": "2026-06-28T09:12:31Z",
+        "payload": {
+            "provider": "openai",
+            "model": "gpt-test",
+            "duration_ms": 25,
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 3,
+                "total_tokens": 8,
+                "cost_micros": 42,
+                "cost_currency": "USD"
+            }
+        }
+    }));
+    events.push(serde_json::json!({
+        "kind": "proposal_decided",
+        "occurred_at": "2026-06-28T09:12:32Z",
+        "payload": {
+            "proposal_id": "proposal_metrics",
+            "decision": "approve",
+            "status": "pending_approval"
+        }
+    }));
+    events.push(serde_json::json!({
+        "kind": "proposal_decided",
+        "occurred_at": "2026-06-28T09:12:33Z",
+        "payload": {
+            "proposal_id": "proposal_metrics",
+            "decision": "approve",
+            "status": "approved"
+        }
+    }));
+    std::fs::write(
+        &trace_path,
+        serde_json::to_vec_pretty(&trace).expect("trace encodes"),
+    )
+    .expect("trace writes");
 
     let output = agent_cmd()
         .args([
@@ -979,14 +1521,54 @@ fn metrics_summary_counts_runs_tools_and_proposals() {
     assert_eq!(metrics["runs_by_status"]["completed"], 1);
     assert_eq!(metrics["tool_call_count"], 1);
     assert_eq!(metrics["failed_tool_call_count"], 0);
+    assert_eq!(metrics["runs_by_agent"]["execution_review"]["run_count"], 1);
+    assert_eq!(
+        metrics["runs_by_agent"]["execution_review"]["successful_run_count"],
+        1
+    );
+    assert_eq!(
+        metrics["runs_by_agent"]["execution_review"]["runs_by_status"]["completed"],
+        1
+    );
+    assert_eq!(metrics["tool_calls_by_tool"]["echo"]["tool_call_count"], 1);
+    assert_eq!(
+        metrics["tool_calls_by_tool"]["echo"]["failed_tool_call_count"],
+        0
+    );
     assert!(metrics["average_run_latency_ms"].is_number());
     assert!(metrics["average_tool_call_latency_ms"].is_number());
     assert_eq!(metrics["proposal_count"], 1);
     assert_eq!(metrics["proposal_created_count"], 1);
+    assert_eq!(metrics["proposal_approved_count"], 1);
     assert_eq!(metrics["proposals_by_status"]["pending_approval"], 1);
     assert_eq!(metrics["artifact_ref_count"], 0);
     assert_eq!(metrics["replay_count"], 0);
-    assert_eq!(metrics["llm_total_tokens"], 0);
+    assert_eq!(metrics["llm_total_tokens"], 8);
+    assert_eq!(
+        metrics["llm_usage_by_provider"]["openai"]["request_count"],
+        1
+    );
+    assert_eq!(
+        metrics["llm_usage_by_provider"]["openai"]["input_tokens"],
+        5
+    );
+    assert_eq!(
+        metrics["llm_usage_by_provider"]["openai"]["output_tokens"],
+        3
+    );
+    assert_eq!(
+        metrics["llm_usage_by_provider"]["openai"]["total_tokens"],
+        8
+    );
+    assert_eq!(
+        metrics["llm_usage_by_provider"]["openai"]["cost_micros_by_currency"]["USD"],
+        42
+    );
+    assert_eq!(
+        metrics["llm_usage_by_provider"]["openai"]["total_latency_ms"],
+        25
+    );
+    assert!(metrics["llm_usage_by_provider"]["openai"]["average_latency_ms"].is_number());
 }
 
 #[test]
@@ -1113,6 +1695,30 @@ fn tool_cli_can_call_inline_mock_tool() {
 }
 
 #[test]
+fn tool_cli_validates_catalog_tool_input_schema_for_inline_mock() {
+    let stderr = agent_cmd()
+        .args([
+            "tool",
+            "call",
+            "propose_fake",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--input-json",
+            r#""not an object""#,
+            "--mock-tool",
+            r#"propose_fake={"mocked":true}"#,
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr).expect("stderr is utf8");
+
+    assert!(stderr.contains("tool 'propose_fake' input failed schema validation"));
+}
+
+#[test]
 fn tool_cli_lists_and_calls_tool_source_manifest() {
     let dir = tempfile::tempdir().expect("temp dir");
     let source_path = dir.path().join("tool-source.json");
@@ -1179,6 +1785,60 @@ fn tool_cli_lists_and_calls_tool_source_manifest() {
     assert_eq!(output["host"], "dev-tool-host");
     assert_eq!(output["tool"], "sourced_echo");
     assert_eq!(output["input"]["value"], 77);
+}
+
+#[test]
+fn tool_cli_validates_tool_source_input_schema() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source_path = dir.path().join("tool-source.json");
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    std::fs::write(
+        &source_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": "tool_source.v1",
+            "sources": [{
+                "id": "dev",
+                "command": agent_bin.to_str().expect("utf8 agent bin"),
+                "args": ["dev-tool-host"],
+                "tools": [{
+                    "name": "strict_echo",
+                    "description": "Echo through a configured tool source with strict input.",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["value"],
+                        "properties": {
+                            "value": {"type": "string"}
+                        },
+                        "additionalProperties": false
+                    },
+                    "output_schema": {"type": "object"},
+                    "risk": "read_only",
+                    "metadata": {"source": "test"}
+                }]
+            }]
+        }))
+        .expect("manifest encodes"),
+    )
+    .expect("manifest writes");
+
+    let stderr = agent_cmd()
+        .args([
+            "tool",
+            "call",
+            "strict_echo",
+            "--tool-source",
+            source_path.to_str().expect("utf8 source path"),
+            "--input-json",
+            r#"{"value":77}"#,
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr).expect("stderr is utf8");
+
+    assert!(stderr.contains("tool 'strict_echo' input failed schema validation"));
 }
 
 #[test]
@@ -1488,11 +2148,26 @@ fn http_server_handles_catalog_summary_and_agent_run() {
         port,
         "POST",
         "/agents/execution_review/run",
-        Some(r#"{"input":{"message":"via http"}}"#),
+        Some(
+            r#"{"input":{"message":"via http"},"trigger":"webhook","trigger_envelope":{"source":"github.webhook","id":"evt_http_1","payload":{"action":"opened"}},"user":{"user_id":"user_http_1"},"scope":{"type":"tenant","id":"tenant_http_1"},"workflow":{"workflow_id":"workflow_http_test","root_run_id":"run_http_root","dependencies":[{"run_id":"run_http_dependency","edge":"after","metadata":{"fixture":"catalog_cli"}}],"metadata":{"case":"catalog_cli"}},"metadata":{"delivery_attempt":1}}"#,
+        ),
     );
     assert_eq!(run["result"]["agent_id"], "execution_review");
     assert_eq!(run["result"]["status"], "completed");
     assert_eq!(run["result"]["output"]["mode"], "catalog_dry_run");
+    assert_eq!(
+        run["result"]["workflow"]["workflow_id"],
+        "workflow_http_test"
+    );
+    assert_eq!(
+        run["trace"]["workflow"]["workflow_id"],
+        "workflow_http_test"
+    );
+    assert_eq!(run["trace"]["events"][0]["payload"]["trigger"], "webhook");
+    assert_eq!(
+        run["trace"]["events"][0]["payload"]["trigger_envelope"]["source"],
+        "github.webhook"
+    );
     assert_eq!(
         run["trace"]["events"][1]["kind"],
         "catalog_dry_run.agent_selected"
@@ -1507,10 +2182,37 @@ fn http_server_handles_catalog_summary_and_agent_run() {
     assert_eq!(inspected_run["run_id"], run_id);
     assert_eq!(inspected_run["agent_id"], "execution_review");
     assert_eq!(inspected_run["status"], "completed");
+    assert_eq!(inspected_run["scope"]["type"], "tenant");
+    assert_eq!(inspected_run["scope"]["id"], "tenant_http_1");
+    assert_eq!(inspected_run["metadata"]["delivery_attempt"], 1);
+    assert_eq!(
+        inspected_run["workflow"]["dependencies"][0]["run_id"],
+        "run_http_dependency"
+    );
+    assert_eq!(
+        inspected_run["metadata"]["session_id"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        inspected_run["metadata"]["thread_id"],
+        serde_json::Value::Null
+    );
 
     let inspected_trace = http_json_request(port, "GET", &format!("/runs/{run_id}/trace"), None);
     assert_eq!(inspected_trace["run_id"], run_id);
     assert_eq!(inspected_trace["agent_id"], "execution_review");
+    assert_eq!(
+        inspected_trace["workflow"]["metadata"]["case"],
+        "catalog_cli"
+    );
+    assert_eq!(
+        inspected_trace["events"][0]["payload"]["trigger"],
+        "webhook"
+    );
+    assert_eq!(
+        inspected_trace["events"][0]["payload"]["trigger_envelope"]["id"],
+        "evt_http_1"
+    );
     assert_eq!(
         inspected_trace["events"][1]["kind"],
         "catalog_dry_run.agent_selected"
@@ -1544,6 +2246,68 @@ fn http_server_handles_catalog_summary_and_agent_run() {
     assert!(
         persisted_trace.exists(),
         "HTTP agent.run persists trace for debug bundle export"
+    );
+}
+
+#[test]
+fn http_server_runs_workflow_dag_and_persists_node_traces() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("http-workflow-store");
+    let port = reserve_local_port();
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let child = std::process::Command::new(agent_bin)
+        .args([
+            "serve",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("HTTP server starts");
+    let _server = ChildGuard(child);
+    wait_for_http_server(port);
+
+    let workflow = http_json_request(
+        port,
+        "POST",
+        "/workflows/run",
+        Some(
+            r#"{"protocol_version":"agent.v1","workflow_id":"workflow_http_dag","nodes":[{"node_id":"collect","agent_id":"execution_review","input":{"message":"collect"}},{"node_id":"summarize","agent_id":"execution_review","depends_on":["collect"],"input":{"message":"summarize"},"input_mappings":[{"from_node":"collect","from_path":"/input/message","to_path":"/from_collect"}]}],"metadata":{"case":"http_workflow"}}"#,
+        ),
+    );
+
+    assert_eq!(workflow["protocol_version"], "agent.v1");
+    assert_eq!(workflow["workflow_id"], "workflow_http_dag");
+    assert_eq!(workflow["status"], "completed");
+    let nodes = workflow["nodes"].as_array().expect("workflow nodes");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(
+        nodes[0]["trace"]["workflow"]["workflow_id"],
+        "workflow_http_dag"
+    );
+    assert_eq!(
+        nodes[1]["trace"]["workflow"]["dependencies"][0]["run_id"],
+        nodes[0]["run_id"]
+    );
+    assert_eq!(nodes[1]["output"]["input"]["from_collect"], "collect");
+    let first_run_id = nodes[0]["run_id"].as_str().expect("first run id");
+    let inspected_trace =
+        http_json_request(port, "GET", &format!("/runs/{first_run_id}/trace"), None);
+    assert_eq!(inspected_trace["run_id"], first_run_id);
+    assert_eq!(
+        inspected_trace["workflow"]["metadata"]["workflow_node_id"],
+        "collect"
+    );
+    assert_eq!(
+        inspected_trace["events"][1]["kind"],
+        "catalog_dry_run.agent_selected"
     );
 }
 
@@ -1608,6 +2372,11 @@ fn http_server_can_cancel_active_run_and_stream_live_events() {
 
     let inspected = http_json_request(port, "GET", &format!("/runs/{run_id}"), None);
     assert_eq!(inspected["status"], "cancelled");
+    assert_eq!(inspected["metadata"]["control"]["cancel_requested"], true);
+    assert_eq!(
+        inspected["metadata"]["control"]["cancel_requested_by"],
+        "http"
+    );
     let trace = http_json_request(port, "GET", &format!("/runs/{run_id}/trace"), None);
     let event_kinds = trace["events"]
         .as_array()
@@ -1618,6 +2387,70 @@ fn http_server_can_cancel_active_run_and_stream_live_events() {
     assert!(event_kinds.contains(&"run_cancel_requested"));
     assert!(event_kinds.contains(&"run_cancelled"));
     assert!(event_kinds.contains(&"run_finished"));
+}
+
+#[test]
+fn http_server_persists_cancel_intent_for_running_run_record() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("http-remote-cancel-store");
+    let port = reserve_local_port();
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let child = std::process::Command::new(agent_bin)
+        .args([
+            "serve",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("HTTP server starts");
+    let _server = ChildGuard(child);
+    wait_for_http_server(port);
+
+    let run_id = "run_remote_cancel";
+    std::fs::write(
+        store.join("runs").join(format!("{run_id}.json")),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "protocol_version": "agent.v1",
+            "run_id": run_id,
+            "agent_id": "execution_review",
+            "status": "running",
+            "scope": {"type": "global"},
+            "started_at": "2026-07-03T00:00:00Z",
+            "finished_at": null,
+            "input": {},
+            "output": {},
+            "metadata": {}
+        }))
+        .expect("run record encodes"),
+    )
+    .expect("run record writes");
+
+    let cancelled = http_json_request(port, "POST", &format!("/runs/{run_id}/cancel"), Some("{}"));
+    assert_eq!(cancelled["run_id"], run_id);
+    assert_eq!(cancelled["cancellation_requested"], true);
+    assert_eq!(cancelled["status"], "running");
+
+    let inspected = http_json_request(port, "GET", &format!("/runs/{run_id}"), None);
+    assert_eq!(inspected["status"], "running");
+    assert_eq!(inspected["metadata"]["control"]["cancel_requested"], true);
+    assert_eq!(
+        inspected["metadata"]["control"]["cancel_requested_by"],
+        "http"
+    );
+    assert!(
+        inspected["metadata"]["control"]["cancel_requested_at"]
+            .as_str()
+            .unwrap_or_default()
+            .contains('T')
+    );
 }
 
 #[test]
@@ -1674,6 +2507,16 @@ fn http_server_validates_json_request_schemas() {
     .expect_err("chat resume without state is rejected");
     assert!(resume_error.contains("HTTP/1.1 400"));
     assert!(resume_error.contains("schema_validation_failed"));
+
+    let workflow_error = try_http_text_request(
+        port,
+        "POST",
+        "/workflows/run",
+        Some(r#"{"protocol_version":"agent.v1","workflow_id":"workflow_invalid"}"#),
+    )
+    .expect_err("workflow without nodes is rejected");
+    assert!(workflow_error.contains("HTTP/1.1 400"));
+    assert!(workflow_error.contains("schema_validation_failed"));
 }
 
 #[test]
@@ -1957,7 +2800,7 @@ fn http_server_persists_and_decides_proposals() {
         "POST",
         "/proposals",
         Some(&format!(
-            r#"{{"run_id":"{run_id}","agent_id":"execution_review","kind":"fake","summary":"HTTP proposal","payload":{{"value":11}}}}"#
+            r#"{{"run_id":"{run_id}","agent_id":"execution_review","kind":"fake","summary":"HTTP proposal","payload":{{"value":11}},"diffs":[{{"path":"/value","operation":"replace","before":10,"after":11}}],"warnings":[{{"severity":"danger","code":"http_review","message":"HTTP proposal needs review"}}]}}"#
         )),
     );
     let proposal_id = created["proposal_id"]
@@ -1965,20 +2808,41 @@ fn http_server_persists_and_decides_proposals() {
         .expect("proposal id is string");
     assert_eq!(created["status"], "pending_approval");
     assert_eq!(created["payload"]["value"], 11);
+    assert_eq!(created["diffs"][0]["path"], "/value");
+    assert_eq!(created["diffs"][0]["before"], 10);
+    assert_eq!(created["diffs"][0]["after"], 11);
+    assert_eq!(created["warnings"][0]["severity"], "danger");
+    assert_eq!(created["warnings"][0]["code"], "http_review");
+    assert_eq!(created["risk"], "medium");
+    assert_eq!(created["approval_policy"], "manual");
+    assert_eq!(created["approval_required"], true);
+    assert_eq!(created["required_approval_level"], "single_user");
+    assert_eq!(created["policy_id"], "finance.proposal.default");
+    assert_eq!(created["policy_version"], "2026-06-28");
+    assert!(created["expires_at"].as_str().is_some());
 
     let listed = http_json_request(port, "GET", &format!("/proposals?run_id={run_id}"), None);
     assert_eq!(listed[0]["proposal_id"], proposal_id);
 
     let inspected = http_json_request(port, "GET", &format!("/proposals/{proposal_id}"), None);
     assert_eq!(inspected["proposal_id"], proposal_id);
+    assert_eq!(inspected["diffs"][0]["operation"], "replace");
+    assert_eq!(
+        inspected["warnings"][0]["message"],
+        "HTTP proposal needs review"
+    );
 
     let decided = http_json_request(
         port,
         "POST",
         &format!("/proposals/{proposal_id}/decision"),
-        Some(r#"{"decision":"approve","comment":"approved over HTTP"}"#),
+        Some(
+            r#"{"decision":"approve","approval_level":"single_user","decided_by":"user_http_reviewer","comment":"approved over HTTP"}"#,
+        ),
     );
     assert_eq!(decided["decision"]["decision"], "approve");
+    assert_eq!(decided["decision"]["approval_level"], "single_user");
+    assert_eq!(decided["decision"]["decided_by"], "user_http_reviewer");
     assert_eq!(decided["decision"]["comment"], "approved over HTTP");
     assert_eq!(decided["proposal"]["status"], "approved");
 
@@ -2084,6 +2948,9 @@ fn http_server_applies_proposal_kind_policy() {
     assert_eq!(created["risk"], "low");
     assert_eq!(created["approval_policy"], "auto_approve");
     assert_eq!(created["approval_required"], false);
+    assert_eq!(created["required_approval_level"], "none");
+    assert_eq!(created["policy_id"], "finance.proposal.default");
+    assert_eq!(created["policy_version"], "2026-06-28");
     assert_eq!(created["status"], "approved");
 
     let applied = http_json_request(
@@ -2094,6 +2961,189 @@ fn http_server_applies_proposal_kind_policy() {
     );
     assert_eq!(applied["proposal"]["status"], "applied");
     assert_eq!(applied["tool_output"]["policy_action"], true);
+}
+
+#[test]
+fn http_server_create_policy_hook_can_deny_proposal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("http-proposal-create-policy-store");
+    let config_path = dir.path().join("agent-runtime.toml");
+    std::fs::write(
+        &config_path,
+        r#"[runtime]
+hooks = [
+  { name = "deny_http_create", event = "BeforeProposalCreate", kind = "process", effect = "policy", command = ["sh", "-c", "cat >/dev/null; printf '{\"decision\":\"deny\",\"reason\":\"http create blocked by policy\"}'"], timeout_ms = 1000 },
+]
+"#,
+    )
+    .expect("config written");
+    let port = reserve_local_port();
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let child = std::process::Command::new(agent_bin)
+        .args([
+            "--config",
+            config_path.to_str().expect("utf8 config path"),
+            "serve",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--mock-tool",
+            r#"propose_fake={"policy_action":true}"#,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("HTTP server starts");
+    let _server = ChildGuard(child);
+    wait_for_http_server(port);
+
+    let run = http_json_request(
+        port,
+        "POST",
+        "/agents/execution_review/run",
+        Some(r#"{"input":{"message":"proposal create policy trace seed"}}"#),
+    );
+    let run_id = run["result"]["run_id"].as_str().expect("run_id is string");
+
+    let (status, error) = http_json_status_request(
+        port,
+        "POST",
+        "/proposals",
+        Some(&format!(
+            r#"{{"run_id":"{run_id}","agent_id":"execution_review","kind":"fake","summary":"Denied HTTP proposal","payload":{{"value":17}}}}"#
+        )),
+    );
+    assert_eq!(status, 403);
+    assert_eq!(error["code"], "policy_denied");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("http create blocked by policy")
+    );
+    assert_eq!(error["details"]["event"], "BeforeProposalCreate");
+    assert_eq!(error["details"]["run_id"], run_id);
+
+    let proposal_count = std::fs::read_dir(store.join("proposals"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(proposal_count, 0);
+    let trace = http_json_request(port, "GET", &format!("/runs/{run_id}/trace"), None);
+    let hook = trace["events"]
+        .as_array()
+        .expect("trace events")
+        .iter()
+        .find(|event| {
+            event["kind"] == "hook_invocation"
+                && event["payload"]["hook_event"] == "BeforeProposalCreate"
+        })
+        .expect("proposal create policy hook invocation is traced");
+    assert_eq!(hook["payload"]["hook_name"], "deny_http_create");
+    assert_eq!(hook["payload"]["output"]["decision"], "deny");
+}
+
+#[test]
+fn http_server_apply_policy_hook_can_deny_proposal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("http-proposal-apply-policy-store");
+    let config_path = dir.path().join("agent-runtime.toml");
+    std::fs::write(
+        &config_path,
+        r#"[runtime]
+hooks = [
+  { name = "deny_http_apply", event = "BeforeProposalApply", kind = "process", effect = "policy", command = ["sh", "-c", "cat >/dev/null; printf '{\"decision\":\"deny\",\"reason\":\"http apply blocked by policy\"}'"], timeout_ms = 1000 },
+]
+"#,
+    )
+    .expect("config written");
+    let port = reserve_local_port();
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let child = std::process::Command::new(agent_bin)
+        .args([
+            "--config",
+            config_path.to_str().expect("utf8 config path"),
+            "serve",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--mock-tool",
+            r#"propose_fake={"policy_action":true}"#,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("HTTP server starts");
+    let _server = ChildGuard(child);
+    wait_for_http_server(port);
+
+    let run = http_json_request(
+        port,
+        "POST",
+        "/agents/execution_review/run",
+        Some(r#"{"input":{"message":"proposal apply policy trace seed"}}"#),
+    );
+    let run_id = run["result"]["run_id"].as_str().expect("run_id is string");
+
+    let created = http_json_request(
+        port,
+        "POST",
+        "/proposals",
+        Some(&format!(
+            r#"{{"run_id":"{run_id}","agent_id":"execution_review","kind":"fake","summary":"HTTP apply denied proposal","payload":{{"value":19}}}}"#
+        )),
+    );
+    let proposal_id = created["proposal_id"]
+        .as_str()
+        .expect("proposal id is string");
+    http_json_request(
+        port,
+        "POST",
+        &format!("/proposals/{proposal_id}/decision"),
+        Some(r#"{"decision":"approve","approval_level":"single_user"}"#),
+    );
+
+    let (status, error) = http_json_status_request(
+        port,
+        "POST",
+        &format!("/proposals/{proposal_id}/apply"),
+        Some("{}"),
+    );
+    assert_eq!(status, 403);
+    assert_eq!(error["code"], "policy_denied");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("http apply blocked by policy")
+    );
+    assert_eq!(error["details"]["event"], "BeforeProposalApply");
+    assert_eq!(error["details"]["proposal_id"], proposal_id);
+    assert_eq!(error["details"]["tool"], "propose_fake");
+
+    let stored = read_json(store.join("proposals").join(format!("{proposal_id}.json")));
+    assert_eq!(stored["status"], "approved");
+    let trace = http_json_request(port, "GET", &format!("/runs/{run_id}/trace"), None);
+    let hook = trace["events"]
+        .as_array()
+        .expect("trace events")
+        .iter()
+        .find(|event| {
+            event["kind"] == "hook_invocation"
+                && event["payload"]["hook_event"] == "BeforeProposalApply"
+        })
+        .expect("proposal apply policy hook invocation is traced");
+    assert_eq!(hook["payload"]["hook_name"], "deny_http_apply");
+    assert_eq!(hook["payload"]["output"]["decision"], "deny");
 }
 
 #[test]
@@ -2627,6 +3677,10 @@ fn proposal_cli_persists_and_decides_proposals() {
             "Review fake proposal",
             "--payload-json",
             r#"{"value":7}"#,
+            "--diffs-json",
+            r#"[{"path":"/value","operation":"replace","before":6,"after":7,"metadata":{"field":"value"}}]"#,
+            "--warnings-json",
+            r#"[{"severity":"warning","code":"review_required","message":"Review value change","metadata":{"field":"value"}}]"#,
         ])
         .assert()
         .success()
@@ -2641,6 +3695,11 @@ fn proposal_cli_persists_and_decides_proposals() {
     assert_eq!(created["run_id"], "run_test");
     assert_eq!(created["status"], "pending_approval");
     assert_eq!(created["payload"]["value"], 7);
+    assert_eq!(created["diffs"][0]["path"], "/value");
+    assert_eq!(created["diffs"][0]["before"], 6);
+    assert_eq!(created["diffs"][0]["after"], 7);
+    assert_eq!(created["warnings"][0]["severity"], "warning");
+    assert_eq!(created["warnings"][0]["code"], "review_required");
 
     let listed = agent_cmd()
         .args([
@@ -2674,6 +3733,8 @@ fn proposal_cli_persists_and_decides_proposals() {
         .clone();
     let inspected: Value = serde_json::from_slice(&inspected).expect("proposal is JSON");
     assert_eq!(inspected["proposal_id"], proposal_id);
+    assert_eq!(inspected["diffs"][0]["metadata"]["field"], "value");
+    assert_eq!(inspected["warnings"][0]["message"], "Review value change");
 
     let decided = agent_cmd()
         .args([
@@ -2684,6 +3745,10 @@ fn proposal_cli_persists_and_decides_proposals() {
             store.to_str().expect("utf8 store path"),
             "--decision",
             "approve",
+            "--approval-level",
+            "single_user",
+            "--decided-by",
+            "user_cli_reviewer",
             "--comment",
             "approved in test",
         ])
@@ -2694,6 +3759,8 @@ fn proposal_cli_persists_and_decides_proposals() {
         .clone();
     let decided: Value = serde_json::from_slice(&decided).expect("decision is JSON");
     assert_eq!(decided["decision"]["decision"], "approve");
+    assert_eq!(decided["decision"]["approval_level"], "single_user");
+    assert_eq!(decided["decision"]["decided_by"], "user_cli_reviewer");
     assert_eq!(decided["decision"]["comment"], "approved in test");
     assert_eq!(decided["proposal"]["status"], "approved");
 
@@ -2745,6 +3812,481 @@ fn proposal_cli_persists_and_decides_proposals() {
 
     let stored = read_json(store.join("proposals").join(format!("{proposal_id}.json")));
     assert_eq!(stored["status"], "undone");
+}
+
+#[test]
+fn proposal_cli_apply_policy_hook_can_deny() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("proposal-policy-store");
+    let config_path = dir.path().join("agent-runtime.toml");
+    std::fs::write(
+        &config_path,
+        r#"[runtime]
+hooks = [
+  { name = "deny_apply", event = "BeforeProposalApply", kind = "process", effect = "policy", command = ["sh", "-c", "cat >/dev/null; printf '{\"decision\":\"deny\",\"reason\":\"blocked by apply policy\"}'"], timeout_ms = 1000 },
+]
+"#,
+    )
+    .expect("config written");
+
+    let run = agent_cmd()
+        .args([
+            "run",
+            "execution_review",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--input",
+            "../../fixtures/contracts/run-request.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run: Value = serde_json::from_slice(&run).expect("run is JSON");
+    let run_id = run["run_id"].as_str().expect("run_id is string");
+
+    let created = agent_cmd()
+        .args([
+            "proposal",
+            "create",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--run-id",
+            run_id,
+            "--agent-id",
+            "execution_review",
+            "--kind",
+            "fake",
+            "--summary",
+            "Policy guarded proposal",
+            "--payload-json",
+            r#"{"value":7}"#,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created: Value = serde_json::from_slice(&created).expect("proposal is JSON");
+    let proposal_id = created["proposal_id"]
+        .as_str()
+        .expect("proposal_id is string");
+
+    agent_cmd()
+        .args([
+            "proposal",
+            "decide",
+            proposal_id,
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--decision",
+            "approve",
+        ])
+        .assert()
+        .success();
+
+    let stderr = agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().expect("utf8 config path"),
+            "proposal",
+            "apply",
+            proposal_id,
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--mock-tool",
+            r#"propose_fake={"applied":true}"#,
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        String::from_utf8_lossy(&stderr).contains("blocked by apply policy"),
+        "stderr should explain policy denial"
+    );
+
+    let stored = read_json(store.join("proposals").join(format!("{proposal_id}.json")));
+    assert_eq!(stored["status"], "approved");
+    let trace = read_json(store.join("traces").join(format!("{run_id}.trace.json")));
+    let hook = trace["events"]
+        .as_array()
+        .expect("trace events")
+        .iter()
+        .find(|event| {
+            event["kind"] == "hook_invocation"
+                && event["payload"]["hook_event"] == "BeforeProposalApply"
+        })
+        .expect("proposal apply policy hook invocation is traced");
+    assert_eq!(hook["payload"]["hook_name"], "deny_apply");
+    assert_eq!(hook["payload"]["output"]["decision"], "deny");
+}
+
+#[test]
+fn proposal_cli_create_policy_hook_can_deny() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("proposal-create-policy-store");
+    let config_path = dir.path().join("agent-runtime.toml");
+    std::fs::write(
+        &config_path,
+        r#"[runtime]
+hooks = [
+  { name = "deny_create", event = "BeforeProposalCreate", kind = "process", effect = "policy", command = ["sh", "-c", "cat >/dev/null; printf '{\"decision\":\"deny\",\"reason\":\"blocked by create policy\"}'"], timeout_ms = 1000 },
+]
+"#,
+    )
+    .expect("config written");
+
+    let run = agent_cmd()
+        .args([
+            "run",
+            "execution_review",
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--input",
+            "../../fixtures/contracts/run-request.valid.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run: Value = serde_json::from_slice(&run).expect("run is JSON");
+    let run_id = run["run_id"].as_str().expect("run_id is string");
+
+    let stderr = agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().expect("utf8 config path"),
+            "proposal",
+            "create",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--run-id",
+            run_id,
+            "--agent-id",
+            "execution_review",
+            "--kind",
+            "fake",
+            "--summary",
+            "Policy guarded create",
+            "--payload-json",
+            r#"{"value":7}"#,
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        String::from_utf8_lossy(&stderr).contains("blocked by create policy"),
+        "stderr should explain policy denial"
+    );
+
+    let proposal_count = std::fs::read_dir(store.join("proposals"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(proposal_count, 0);
+    let trace = read_json(store.join("traces").join(format!("{run_id}.trace.json")));
+    let hook = trace["events"]
+        .as_array()
+        .expect("trace events")
+        .iter()
+        .find(|event| {
+            event["kind"] == "hook_invocation"
+                && event["payload"]["hook_event"] == "BeforeProposalCreate"
+        })
+        .expect("proposal create policy hook invocation is traced");
+    assert_eq!(hook["payload"]["hook_name"], "deny_create");
+    assert_eq!(hook["payload"]["output"]["decision"], "deny");
+}
+
+#[test]
+fn proposal_cli_requires_sufficient_approval_level() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("proposal-level-store");
+
+    let created = agent_cmd()
+        .args([
+            "proposal",
+            "create",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--run-id",
+            "run_test",
+            "--agent-id",
+            "execution_review",
+            "--kind",
+            "fake",
+            "--summary",
+            "Admin fake proposal",
+            "--payload-json",
+            r#"{"value":7}"#,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created: Value = serde_json::from_slice(&created).expect("proposal is JSON");
+    let proposal_id = created["proposal_id"]
+        .as_str()
+        .expect("proposal_id is string");
+    let proposal_path = store.join("proposals").join(format!("{proposal_id}.json"));
+    let mut stored = read_json(&proposal_path);
+    stored["required_approval_level"] = serde_json::json!("admin");
+    std::fs::write(
+        &proposal_path,
+        serde_json::to_vec_pretty(&stored).expect("proposal encodes"),
+    )
+    .expect("proposal writes");
+
+    let stderr = agent_cmd()
+        .args([
+            "proposal",
+            "decide",
+            proposal_id,
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--decision",
+            "approve",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&stderr);
+    assert!(
+        stderr.contains("does not satisfy required level"),
+        "stderr should explain insufficient approval level"
+    );
+    assert_eq!(read_json(&proposal_path)["status"], "pending_approval");
+
+    let decided = agent_cmd()
+        .args([
+            "proposal",
+            "decide",
+            proposal_id,
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--decision",
+            "approve",
+            "--approval-level",
+            "admin",
+            "--actor",
+            "user_admin_reviewer",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let decided: Value = serde_json::from_slice(&decided).expect("decision is JSON");
+    assert_eq!(decided["decision"]["approval_level"], "admin");
+    assert_eq!(decided["decision"]["decided_by"], "user_admin_reviewer");
+    assert_eq!(decided["proposal"]["status"], "approved");
+}
+
+#[test]
+fn proposal_cli_accumulates_multi_approver_decisions() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("proposal-chain-store");
+
+    let created = agent_cmd()
+        .args([
+            "proposal",
+            "create",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--run-id",
+            "run_test",
+            "--agent-id",
+            "execution_review",
+            "--kind",
+            "fake",
+            "--summary",
+            "Multi approver fake proposal",
+            "--payload-json",
+            r#"{"value":7}"#,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created: Value = serde_json::from_slice(&created).expect("proposal is JSON");
+    let proposal_id = created["proposal_id"]
+        .as_str()
+        .expect("proposal_id is string");
+    let proposal_path = store.join("proposals").join(format!("{proposal_id}.json"));
+    let mut stored = read_json(&proposal_path);
+    stored["required_approval_level"] = serde_json::json!("multi_approver");
+    stored["required_approver_count"] = serde_json::json!(2);
+    std::fs::write(
+        &proposal_path,
+        serde_json::to_vec_pretty(&stored).expect("proposal encodes"),
+    )
+    .expect("proposal writes");
+
+    let first = agent_cmd()
+        .args([
+            "proposal",
+            "decide",
+            proposal_id,
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--decision",
+            "approve",
+            "--approval-level",
+            "single_user",
+            "--actor",
+            "user_reviewer_one",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first: Value = serde_json::from_slice(&first).expect("decision is JSON");
+    assert_eq!(first["proposal"]["status"], "pending_approval");
+    assert_eq!(
+        first["proposal"]["approval_decisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let duplicate = agent_cmd()
+        .args([
+            "proposal",
+            "decide",
+            proposal_id,
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--decision",
+            "approve",
+            "--approval-level",
+            "single_user",
+            "--actor",
+            "user_reviewer_one",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let duplicate = String::from_utf8_lossy(&duplicate);
+    assert!(duplicate.contains("has already approved"));
+    assert_eq!(read_json(&proposal_path)["status"], "pending_approval");
+
+    let second = agent_cmd()
+        .args([
+            "proposal",
+            "decide",
+            proposal_id,
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--decision",
+            "approve",
+            "--approval-level",
+            "single_user",
+            "--actor",
+            "user_reviewer_two",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second: Value = serde_json::from_slice(&second).expect("decision is JSON");
+    assert_eq!(second["proposal"]["status"], "approved");
+    assert_eq!(
+        second["proposal"]["approval_decisions"][0]["decided_by"],
+        "user_reviewer_one"
+    );
+    assert_eq!(
+        second["proposal"]["approval_decisions"][1]["decided_by"],
+        "user_reviewer_two"
+    );
+    assert_eq!(second["proposal"]["required_approver_count"], 2);
+}
+
+#[test]
+fn proposal_cli_rejects_expired_apply() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("expired-proposal-store");
+
+    let created = agent_cmd()
+        .args([
+            "proposal",
+            "create",
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--run-id",
+            "run_test",
+            "--agent-id",
+            "execution_review",
+            "--kind",
+            "fake",
+            "--summary",
+            "Expired fake proposal",
+            "--payload-json",
+            r#"{"value":7}"#,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let created: Value = serde_json::from_slice(&created).expect("proposal is JSON");
+    let proposal_id = created["proposal_id"]
+        .as_str()
+        .expect("proposal_id is string");
+    let proposal_path = store.join("proposals").join(format!("{proposal_id}.json"));
+    let mut stored = read_json(&proposal_path);
+    stored["status"] = serde_json::json!("approved");
+    stored["expires_at"] = serde_json::json!("2000-01-01T00:00:00Z");
+    std::fs::write(
+        &proposal_path,
+        serde_json::to_vec_pretty(&stored).expect("proposal encodes"),
+    )
+    .expect("proposal writes");
+
+    let stderr = agent_cmd()
+        .args([
+            "proposal",
+            "apply",
+            proposal_id,
+            "--store",
+            store.to_str().expect("utf8 store path"),
+            "--catalog",
+            "../../fixtures/contracts/catalog.valid.json",
+            "--mock-tool",
+            r#"propose_fake={"applied":true}"#,
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&stderr);
+    assert!(
+        stderr.contains("expired before") && stderr.contains("marked expired"),
+        "stderr should explain expired apply rejection"
+    );
+
+    let stored = read_json(proposal_path);
+    assert_eq!(stored["status"], "expired");
 }
 
 #[test]
@@ -2979,6 +4521,25 @@ fn spawn_ollama_server() -> (u16, std::thread::JoinHandle<String>) {
     (port, handle)
 }
 
+fn spawn_otlp_trace_collector() -> (u16, std::thread::JoinHandle<String>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("server binds");
+    let port = listener.local_addr().expect("local addr").port();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("request accepted");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout set");
+        let request = read_http_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )
+        .expect("response writes");
+        request
+    });
+    (port, handle)
+}
+
 fn spawn_http_tool_source_server() -> (u16, std::thread::JoinHandle<String>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("server binds");
     let port = listener.local_addr().expect("local addr").port();
@@ -3065,6 +4626,27 @@ fn http_json_request(port: u16, method: &str, path: &str, body: Option<&str>) ->
     }
 }
 
+fn http_json_status_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, Value) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match try_http_json_status_request(port, method, path, body) {
+            Ok(value) => return value,
+            Err(err) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "HTTP request {method} {path} did not complete: {err}"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+}
+
 fn http_text_request(port: u16, method: &str, path: &str, body: Option<&str>) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -3108,6 +4690,41 @@ fn try_http_json_request(
         return Err(format!("unexpected HTTP response: {response}"));
     }
     serde_json::from_str(body).map_err(|err| format!("decode JSON: {err}; body: {body}"))
+}
+
+fn try_http_json_status_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> Result<(u16, Value), String> {
+    let body = body.unwrap_or("");
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", port)).map_err(|err| format!("connect: {err}"))?;
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .map_err(|err| format!("write: {err}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|err| format!("read: {err}"))?;
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| format!("malformed HTTP response: {response}"))?;
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| format!("malformed HTTP status line: {head}"))?
+        .parse::<u16>()
+        .map_err(|err| format!("parse status: {err}"))?;
+    let value =
+        serde_json::from_str(body).map_err(|err| format!("decode JSON: {err}; body: {body}"))?;
+    Ok((status, value))
 }
 
 fn try_http_text_request(

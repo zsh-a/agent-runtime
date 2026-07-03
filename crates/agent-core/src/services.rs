@@ -8,8 +8,8 @@ use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentError, AgentEvent, AgentRunResult, AgentSpec, ProposalEnvelope, RunId, ToolError,
-    ToolSpec, TraceEvent, UserContext,
+    AgentError, AgentEvent, AgentRunResult, AgentSpec, ArtifactKind, ArtifactRef, ProposalEnvelope,
+    RedactionClassification, RunId, RunScope, ToolError, ToolSpec, TraceEvent, UserContext,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -19,11 +19,31 @@ pub struct ToolContext {
     pub user: Option<UserContext>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ArtifactPublishRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default)]
+    pub kind: Option<ArtifactKind>,
+    pub uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub redaction_classification: Option<RedactionClassification>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
 #[derive(Clone)]
 pub struct AgentContext {
     pub run_id: RunId,
     pub now: OffsetDateTime,
     pub user: Option<UserContext>,
+    pub scope: RunScope,
     pub input: Value,
     pub services: Arc<dyn AgentServices>,
     pub cancellation: CancellationToken,
@@ -60,6 +80,15 @@ pub trait AgentServices: Send + Sync {
         let _ = proposal;
         Err(AgentError::validation(
             "proposal creation is not supported by this AgentServices implementation",
+        ))
+    }
+    async fn publish_artifact(
+        &self,
+        request: ArtifactPublishRequest,
+    ) -> Result<ArtifactRef, AgentError> {
+        let _ = request;
+        Err(AgentError::validation(
+            "artifact publishing is not supported by this AgentServices implementation",
         ))
     }
 }

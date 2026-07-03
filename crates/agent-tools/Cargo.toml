@@ -11,6 +11,7 @@ agent-core.workspace = true
 blake3.workspace = true
 camino.workspace = true
 fs-err.workspace = true
+jsonschema.workspace = true
 miette.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -18,3 +19,6 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

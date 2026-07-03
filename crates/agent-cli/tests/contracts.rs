@@ -4,8 +4,9 @@ use agent_chat::{
     ChatResumeRequest, ChatToolResult, ChatTurnEvent, ChatTurnRequest, ChatTurnState,
 };
 use agent_core::{
-    AgentRunResult, AgentRuntimeCatalog, AgentTrace, ApprovalDecision, HookEvent, HookSpec,
-    PromptManifest, ProposalEnvelope, RunRequest, SessionRecord, StepRecord, ThreadRecord,
+    AgentRunResult, AgentRuntimeCatalog, AgentSpec, AgentTrace, ApprovalDecision, HookEvent,
+    HookSpec, PromptManifest, ProposalEnvelope, RunRequest, SessionRecord, StepRecord,
+    ThreadRecord, WorkflowRunRequest, WorkflowRunResult,
 };
 use agent_llm::{LlmRequest, LlmResponse};
 use agent_runtime::RecoveryReport;
@@ -18,8 +19,24 @@ fn committed_fixtures_match_json_schemas() {
         "fixtures/contracts/run-request.valid.json",
     );
     assert_valid(
+        "schemas/run-request.schema.json",
+        "fixtures/contracts/run-request.webhook.valid.json",
+    );
+    assert_valid(
+        "schemas/workflow-run-request.schema.json",
+        "fixtures/contracts/workflow-run-request.valid.json",
+    );
+    assert_valid(
+        "schemas/workflow-run-result.schema.json",
+        "fixtures/contracts/workflow-run-result.valid.json",
+    );
+    assert_valid(
         "schemas/http-agent-run-request.schema.json",
         "fixtures/contracts/http-agent-run-request.valid.json",
+    );
+    assert_valid(
+        "schemas/http-agent-run-request.schema.json",
+        "fixtures/contracts/http-agent-run-request.queue.valid.json",
     );
     assert_invalid(
         "schemas/run-request.schema.json",
@@ -74,6 +91,10 @@ fn committed_fixtures_match_json_schemas() {
         "fixtures/contracts/catalog.valid.json",
     );
     assert_valid(
+        "schemas/agent-spec.schema.json",
+        "fixtures/contracts/agent-spec.cron.valid.json",
+    );
+    assert_valid(
         "schemas/debug-bundle-manifest.schema.json",
         "fixtures/contracts/debug-bundle-manifest.valid.json",
     );
@@ -84,6 +105,18 @@ fn committed_fixtures_match_json_schemas() {
     assert_valid(
         "schemas/debug-replay-config.schema.json",
         "fixtures/contracts/debug-replay-config.valid.json",
+    );
+    assert_valid(
+        "schemas/debug-artifact-materializations.schema.json",
+        "fixtures/contracts/debug-artifact-materializations.valid.json",
+    );
+    assert_valid(
+        "schemas/debug-artifact-resolvers.schema.json",
+        "fixtures/contracts/debug-artifact-resolvers.valid.json",
+    );
+    assert_valid(
+        "schemas/otel-trace-export.schema.json",
+        "fixtures/contracts/otel-trace-export.valid.json",
     );
     assert_valid(
         "schemas/recovery-report.schema.json",
@@ -108,6 +141,10 @@ fn committed_fixtures_match_json_schemas() {
     assert_valid(
         "schemas/tool-source-manifest.schema.json",
         "fixtures/contracts/http-tool-source.example.json",
+    );
+    assert_valid(
+        "schemas/tool-source-manifest.schema.json",
+        "fixtures/contracts/http-tool-source.secret-header.example.json",
     );
     assert_valid(
         "schemas/tool-source-manifest.schema.json",
@@ -186,10 +223,14 @@ fn committed_fixtures_match_json_schemas() {
 #[test]
 fn committed_valid_fixtures_deserialize_to_runtime_types() {
     assert_deserializes::<RunRequest>("fixtures/contracts/run-request.valid.json");
+    assert_deserializes::<RunRequest>("fixtures/contracts/run-request.webhook.valid.json");
+    assert_deserializes::<WorkflowRunRequest>("fixtures/contracts/workflow-run-request.valid.json");
+    assert_deserializes::<WorkflowRunResult>("fixtures/contracts/workflow-run-result.valid.json");
     assert_deserializes::<AgentRunResult>("fixtures/contracts/run-result.completed.valid.json");
     assert_deserializes::<AgentTrace>("fixtures/contracts/trace.valid.json");
     assert_deserializes::<AgentTrace>("fixtures/contracts/trace.valid.closed-early-step.json");
     assert_deserializes::<AgentRuntimeCatalog>("fixtures/contracts/catalog.valid.json");
+    assert_deserializes::<AgentSpec>("fixtures/contracts/agent-spec.cron.valid.json");
     assert_deserializes::<RecoveryReport>("fixtures/contracts/recovery-report.valid.json");
     assert_deserializes::<PromptManifest>("fixtures/contracts/prompt-manifest.valid.json");
     assert_deserializes::<HookEvent>("fixtures/contracts/hook-event.valid.json");
@@ -258,6 +299,7 @@ fn openapi_contract_documents_http_server_routes() {
     assert!(openapi["paths"]["/metrics/summary"]["get"].is_object());
     assert!(openapi["paths"]["/chat/turn"]["post"].is_object());
     assert!(openapi["paths"]["/chat/resume"]["post"].is_object());
+    assert!(openapi["paths"]["/workflows/run"]["post"].is_object());
     assert!(openapi["paths"]["/tools"]["get"].is_object());
     assert!(openapi["paths"]["/runs"]["get"].is_object());
     assert!(openapi["paths"]["/runs/{run_id}"]["get"].is_object());
@@ -288,9 +330,32 @@ fn openapi_contract_documents_http_server_routes() {
         "../schemas/http-agent-run-request.schema.json"
     );
     assert_eq!(
+        openapi["paths"]["/workflows/run"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+            ["$ref"],
+        "../schemas/workflow-run-request.schema.json"
+    );
+    assert_eq!(
+        openapi["paths"]["/workflows/run"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "../schemas/workflow-run-result.schema.json"
+    );
+    assert_eq!(
         openapi["paths"]["/runs/{run_id}/cancel"]["post"]["responses"]["200"]["content"]["application/json"]
             ["schema"]["$ref"],
         "#/components/schemas/CancelRunResponse"
+    );
+    assert!(
+        openapi["paths"]["/runs/{run_id}/cancel"]["post"]["responses"]["200"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("persist")
+    );
+    assert!(
+        openapi["components"]["schemas"]["CancelRunResponse"]["properties"]
+            ["cancellation_requested"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("persisted running record")
     );
     assert_eq!(
         openapi["paths"]["/tools/{tool_name}/call"]["post"]["responses"]["200"]["content"]["application/json"]
@@ -311,6 +376,21 @@ fn openapi_contract_documents_http_server_routes() {
         openapi["components"]["schemas"]["RuntimeMetricsSummary"]["properties"]["artifact_ref_count"]
             ["minimum"],
         0
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["RuntimeMetricsSummary"]["properties"]["runs_by_agent"]["additionalProperties"]
+            ["$ref"],
+        "#/components/schemas/RuntimeAgentMetrics"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["RuntimeMetricsSummary"]["properties"]["tool_calls_by_tool"]
+            ["additionalProperties"]["$ref"],
+        "#/components/schemas/RuntimeToolMetrics"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["RuntimeMetricsSummary"]["properties"]["llm_usage_by_provider"]
+            ["additionalProperties"]["$ref"],
+        "#/components/schemas/RuntimeLlmProviderMetrics"
     );
     assert_eq!(
         openapi["components"]["schemas"]["HookEvent"]["$ref"],
@@ -377,6 +457,20 @@ fn openapi_contract_documents_http_server_routes() {
         openapi["paths"]["/proposals/{proposal_id}/apply"]["post"]["responses"]["200"]["content"]["application/json"]
             ["schema"]["$ref"],
         "#/components/schemas/ProposalActionResponse"
+    );
+    assert_eq!(
+        openapi["paths"]["/proposals"]["post"]["responses"]["403"]["content"]["application/json"]["schema"]
+            ["$ref"],
+        "#/components/schemas/ErrorResponse"
+    );
+    assert_eq!(
+        openapi["paths"]["/proposals/{proposal_id}/apply"]["post"]["responses"]["403"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/ErrorResponse"
+    );
+    assert_eq!(
+        openapi["components"]["schemas"]["ErrorResponse"]["properties"]["details"]["type"],
+        "object"
     );
     assert_eq!(
         openapi["paths"]["/proposals/{proposal_id}/undo"]["post"]["responses"]["200"]["content"]["application/json"]

@@ -1,0 +1,53 @@
+{
+  "run_id": "run_http_queue_1",
+  "input": {
+    "message": "queued delivery"
+  },
+  "session_id": "session_http_1",
+  "thread_id": "thread_http_1",
+  "trigger": "queue",
+  "trigger_envelope": {
+    "source": "billing.reconciliation",
+    "id": "msg_01HQUEUE",
+    "received_at": "2026-07-03T01:45:00Z",
+    "payload": {
+      "batch_id": "batch_2026_07_03"
+    },
+    "metadata": {
+      "attempt": 2
+    }
+  },
+  "user": {
+    "user_id": "worker:billing",
+    "metadata": {
+      "tenant_id": "tenant_acme"
+    }
+  },
+  "scope": {
+    "type": "tenant",
+    "id": "tenant_acme"
+  },
+  "workflow": {
+    "workflow_id": "workflow_billing_reconciliation",
+    "root_run_id": "run_billing_root",
+    "parent_run_id": "run_billing_parent",
+    "parent_agent_id": "billing_coordinator",
+    "fanout_id": "fanout_billing_batches",
+    "fanin_id": "fanin_billing_batches",
+    "dependencies": [
+      {
+        "run_id": "run_billing_extract",
+        "edge": "after",
+        "metadata": {
+          "table": "billing_events"
+        }
+      }
+    ],
+    "metadata": {
+      "batch_id": "batch_2026_07_03"
+    }
+  },
+  "metadata": {
+    "delivery_attempt": 2
+  }
+}

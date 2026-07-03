@@ -1,0 +1,24 @@
+{
+  "protocol_version": "agent.v1",
+  "runtime_version": "0.1.0",
+  "materialized_at": "2026-06-28T09:12:31Z",
+  "mode": "local_files_and_artifact_store_resolvers",
+  "records": [
+    {
+      "artifact_id": "artifact_local_report",
+      "status": "materialized",
+      "source": "metadata.local_path",
+      "bundled_path": "artifacts/001_artifact_local_report.txt",
+      "size_bytes": 14,
+      "blake3": "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "artifact_id": "artifact_remote_report",
+      "status": "materialized",
+      "source": "artifact_store:host_blob_store",
+      "bundled_path": "artifacts/002_artifact_remote_report.pdf",
+      "size_bytes": 14,
+      "blake3": "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ]
+}

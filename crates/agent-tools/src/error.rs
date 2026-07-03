@@ -13,6 +13,38 @@ pub(crate) fn tool_error(code: &str, message: impl Into<String>) -> ToolError {
     }
 }
 
+pub(crate) fn retryable_tool_error(
+    code: &str,
+    message: impl Into<String>,
+    details: Value,
+) -> ToolError {
+    ToolError {
+        record: AgentErrorRecord {
+            kind: AgentErrorKind::ToolError,
+            code: code.to_owned(),
+            message: message.into(),
+            retryable: true,
+            details,
+        },
+    }
+}
+
+pub(crate) fn tool_error_with_details(
+    code: &str,
+    message: impl Into<String>,
+    details: Value,
+) -> ToolError {
+    ToolError {
+        record: AgentErrorRecord {
+            kind: AgentErrorKind::ToolError,
+            code: code.to_owned(),
+            message: message.into(),
+            retryable: false,
+            details,
+        },
+    }
+}
+
 pub(crate) fn tool_error_from_json(default_code: &str, error: &Value) -> ToolError {
     let code = error
         .get("code")

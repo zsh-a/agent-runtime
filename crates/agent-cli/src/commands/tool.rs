@@ -63,22 +63,20 @@ pub(crate) async fn run_tool_command(command: ToolCommand) -> Result<()> {
             let input = read_command_input(input, input_json).await?;
             let sources = load_tool_sources(tool_source.clone()).await?;
             let has_catalog = catalog.is_some();
-            let in_catalog = match catalog {
-                Some(path) => read_catalog(path)
-                    .await?
-                    .tools
-                    .iter()
-                    .any(|tool| tool.name == name),
-                None => false,
+            let catalog_tools = match catalog {
+                Some(path) => read_catalog(path).await?.tools,
+                None => Vec::new(),
             };
+            let in_catalog = catalog_tools.iter().any(|tool| tool.name == name);
             let in_sources = source_has_tool(&sources, &name);
             if !in_catalog && !in_sources && (has_catalog || !sources.is_empty()) {
                 return Err(miette!(
                     "tool '{name}' is not present in the active catalog or configured tool sources"
                 ));
             }
-            let services =
-                CliServices::new(tool_overrides(tool_host, mock_tool, tool_source).await?);
+            let mut overrides = tool_overrides(tool_host, mock_tool, tool_source).await?;
+            overrides.extend_tool_specs(catalog_tools);
+            let services = CliServices::new(overrides);
             let output = services
                 .call_tool(&name, input)
                 .await

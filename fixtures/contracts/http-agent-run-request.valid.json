@@ -4,5 +4,21 @@
     "message": "hello"
   },
   "session_id": "session_http_1",
-  "thread_id": "thread_http_1"
+  "thread_id": "thread_http_1",
+  "workflow": {
+    "workflow_id": "workflow_http_demo",
+    "root_run_id": "run_http_root_1",
+    "parent_run_id": "run_http_parent_1",
+    "parent_agent_id": "http_parent",
+    "dependencies": [
+      {
+        "run_id": "run_http_dependency_1",
+        "edge": "after",
+        "metadata": {}
+      }
+    ],
+    "metadata": {
+      "surface": "http"
+    }
+  }
 }

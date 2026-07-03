@@ -100,11 +100,6 @@ pub(crate) fn string_metadata(metadata: &Value, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-pub(crate) async fn load_catalog_registry(path: Utf8PathBuf) -> Result<Arc<InMemoryAgentRegistry>> {
-    let catalog = read_catalog(path).await?;
-    Ok(registry_from_catalog(&catalog))
-}
-
 pub(crate) fn registry_from_catalog(catalog: &AgentRuntimeCatalog) -> Arc<InMemoryAgentRegistry> {
     let agents = catalog
         .agents

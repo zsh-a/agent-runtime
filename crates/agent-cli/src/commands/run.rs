@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agent_core::{PROTOCOL_VERSION, RunRequest};
+use agent_core::{PROTOCOL_VERSION, RunRequest, RunScope};
 use agent_runtime::{AgentRunner, HookManager};
 use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use camino::Utf8PathBuf;
@@ -9,7 +9,7 @@ use serde_json::json;
 use tracing::info;
 
 use crate::{
-    catalog::load_catalog_registry,
+    catalog::{read_catalog, registry_from_catalog},
     config::execution_policy,
     print_json,
     registry::load_registry,
@@ -27,6 +27,7 @@ pub(crate) struct RunCliOptions {
     pub(crate) trace_out: Option<Utf8PathBuf>,
     pub(crate) session: Option<String>,
     pub(crate) thread: Option<String>,
+    pub(crate) scope: Option<String>,
     pub(crate) store: Utf8PathBuf,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_retries: u32,
@@ -51,12 +52,18 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
         Some(path) => read_json(path).await?,
         None => json!({}),
     };
+    let mut tool_overrides = options.tool_overrides;
     let registry = match options.catalog {
-        Some(path) => load_catalog_registry(path).await?,
+        Some(path) => {
+            let catalog = read_catalog(path).await?;
+            tool_overrides.extend_tool_specs(catalog.tools.clone());
+            registry_from_catalog(&catalog)
+        }
         None => load_registry(options.registry).await?.into_agent_registry(),
     };
     let store_path = options.store;
     let metadata = run_metadata(options.session.as_deref(), options.thread.as_deref());
+    let scope = parse_run_scope(options.scope.as_deref())?;
     let store = Arc::new(
         FileRunStore::new(store_path.clone())
             .await
@@ -73,7 +80,7 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
             .into_diagnostic()?,
     );
     let services = Arc::new(CliServices::with_proposal_store(
-        options.tool_overrides,
+        tool_overrides,
         proposal_store,
     ));
     let runner = AgentRunner::new(registry, store, services)
@@ -92,7 +99,10 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
                 run_id: None,
                 input,
                 user: None,
+                scope,
                 trigger: agent_core::TriggerKind::Manual,
+                trigger_envelope: None,
+                workflow: None,
                 metadata,
             },
         )
@@ -155,7 +165,10 @@ pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
             run_id: None,
             input: json!({}),
             user: None,
+            scope: None,
             trigger: agent_core::TriggerKind::Scheduled,
+            trigger_envelope: None,
+            workflow: None,
             metadata: json!({}),
         })
         .await
@@ -172,4 +185,31 @@ pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
         "scheduler tick artifacts written"
     );
     print_json(&results)
+}
+
+fn parse_run_scope(value: Option<&str>) -> Result<Option<RunScope>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("global") {
+        return Ok(Some(RunScope::Global));
+    }
+    if let Some(user_id) = value.strip_prefix("user:") {
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return Err(miette::miette!("--scope user:ID requires a non-empty ID"));
+        }
+        return Ok(Some(RunScope::User(user_id.to_owned())));
+    }
+    if let Some(tenant_id) = value.strip_prefix("tenant:") {
+        let tenant_id = tenant_id.trim();
+        if tenant_id.is_empty() {
+            return Err(miette::miette!("--scope tenant:ID requires a non-empty ID"));
+        }
+        return Ok(Some(RunScope::Tenant(tenant_id.to_owned())));
+    }
+    Err(miette::miette!(
+        "--scope must be one of: global, user:ID, tenant:ID"
+    ))
 }

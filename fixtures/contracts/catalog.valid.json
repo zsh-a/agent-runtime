@@ -48,7 +48,12 @@
       "kind": "fake",
       "tool_name": "propose_fake",
       "risk": "medium",
-      "approval_policy": "manual"
+      "approval_policy": "manual",
+      "required_approval_level": "single_user",
+      "required_approver_count": 1,
+      "policy_id": "finance.proposal.default",
+      "policy_version": "2026-06-28",
+      "expires_after_seconds": 86400
     }
   ],
   "prompt_blocks": [

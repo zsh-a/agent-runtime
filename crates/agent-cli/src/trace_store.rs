@@ -11,6 +11,28 @@ pub(crate) async fn write_store_trace(
     write_json(store_trace_path(store, &trace.run_id), trace).await
 }
 
+pub(crate) async fn write_workflow_traces(
+    store: &Utf8Path,
+    result: &agent_core::WorkflowRunResult,
+) -> Result<usize> {
+    let mut written = 0;
+    for node in &result.nodes {
+        if let Some(trace) = node.trace.as_ref() {
+            write_store_trace(store, trace).await?;
+            written += 1;
+        }
+        if let Some(trace) = node
+            .compensation
+            .as_ref()
+            .and_then(|compensation| compensation.trace.as_ref())
+        {
+            write_store_trace(store, trace).await?;
+            written += 1;
+        }
+    }
+    Ok(written)
+}
+
 pub(crate) async fn read_store_trace(store: &Utf8Path, run_id: &RunId) -> Result<Option<Value>> {
     let path = store_trace_path(store, run_id);
     if !path.exists() {

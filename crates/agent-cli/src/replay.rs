@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::{
-    catalog::load_catalog_registry,
+    catalog::{read_catalog, registry_from_catalog},
     config::execution_policy,
     print_json,
     registry::load_registry,
@@ -62,8 +62,14 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
         }
         return print_json(&report);
     }
+    let mut overrides =
+        tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?;
     let registry = match options.catalog {
-        Some(path) => load_catalog_registry(path).await?,
+        Some(path) => {
+            let catalog = read_catalog(path).await?;
+            overrides.extend_tool_specs(catalog.tools.clone());
+            registry_from_catalog(&catalog)
+        }
         None => load_registry(options.registry).await?.into_agent_registry(),
     };
     let store = Arc::new(
@@ -81,10 +87,7 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
             .await
             .into_diagnostic()?,
     );
-    let services = Arc::new(CliServices::with_proposal_store(
-        tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?,
-        proposal_store,
-    ));
+    let services = Arc::new(CliServices::with_proposal_store(overrides, proposal_store));
     let runner = AgentRunner::new(registry, store, services)
         .with_lock_store(lock_store)
         .with_hooks(options.hooks)
@@ -137,6 +140,7 @@ fn deterministic_replay_report(source_trace: agent_core::AgentTrace) -> ReplayEx
         summary: Some("deterministic replay reused source trace output".to_owned()),
         output: source_trace.output.clone(),
         error: None,
+        workflow: source_trace.workflow.clone(),
     };
     ReplayExecutionReport {
         mode: ReplayMode::Deterministic,
@@ -155,7 +159,10 @@ fn run_request_from_trace(trace: &agent_core::AgentTrace) -> RunRequest {
         run_id: None,
         input: trace.input.clone(),
         user: None,
+        scope: Some(trace.scope.clone()),
         trigger: TriggerKind::Replay,
+        trigger_envelope: None,
+        workflow: trace.workflow.clone(),
         metadata: json!({
             "source": "trace_replay",
             "source_run_id": trace.run_id.0

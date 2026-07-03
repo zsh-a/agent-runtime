@@ -28,6 +28,9 @@
   ],
   "agent_id": "execution_review",
   "agent_version": "0.1.0",
+  "scope": {
+    "type": "global"
+  },
   "output": {
     "mode": "catalog_dry_run",
     "agent": {

@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-runtime.local/schemas/workflow-run-request.schema.json",
+  "title": "WorkflowRunRequest",
+  "type": "object",
+  "required": ["protocol_version", "workflow_id", "nodes"],
+  "properties": {
+    "protocol_version": { "const": "agent.v1" },
+    "workflow_id": { "type": "string", "minLength": 1 },
+    "root_run_id": { "type": ["string", "null"], "minLength": 1 },
+    "user": {
+      "anyOf": [{ "$ref": "#/$defs/user_context" }, { "type": "null" }]
+    },
+    "scope": {
+      "anyOf": [{ "$ref": "#/$defs/run_scope" }, { "type": "null" }]
+    },
+    "trigger": {
+      "enum": ["manual", "scheduled", "replay", "webhook", "queue"],
+      "default": "manual"
+    },
+    "trigger_envelope": {
+      "anyOf": [{ "$ref": "#/$defs/trigger_envelope" }, { "type": "null" }]
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/workflow_run_node" }
+    },
+    "metadata": { "type": "object", "default": {} }
+  },
+  "$defs": {
+    "run_scope": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["global", "user", "tenant"] },
+        "id": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "global" } } },
+          "then": { "not": { "required": ["id"] } }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["user", "tenant"] } } },
+          "then": { "required": ["id"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "workflow_run_node": {
+      "type": "object",
+      "required": ["node_id", "agent_id"],
+      "properties": {
+        "node_id": { "type": "string", "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": ["string", "null"], "minLength": 1 },
+        "input": { "type": "object", "default": {} },
+        "input_mappings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/workflow_input_mapping" },
+          "default": []
+        },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        },
+        "compensation": {
+          "anyOf": [
+            { "$ref": "#/$defs/workflow_run_node_compensation" },
+            { "type": "null" }
+          ]
+        },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "workflow_input_mapping": {
+      "type": "object",
+      "required": ["from_node", "to_path"],
+      "properties": {
+        "from_node": { "type": "string", "minLength": 1 },
+        "from_path": {
+          "type": "string",
+          "pattern": "^($|/)",
+          "default": ""
+        },
+        "to_path": {
+          "type": "string",
+          "pattern": "^($|/)"
+        },
+        "transform": {
+          "type": "string",
+          "enum": ["none", "string", "number", "integer", "boolean", "json_string"],
+          "default": "none"
+        },
+        "default": {}
+      },
+      "additionalProperties": false
+    },
+    "workflow_run_node_compensation": {
+      "type": "object",
+      "required": ["agent_id"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": ["string", "null"], "minLength": 1 },
+        "strategy": { "type": ["string", "null"], "minLength": 1 },
+        "input": { "type": "object", "default": {} },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "user_context": {
+      "type": "object",
+      "required": ["user_id"],
+      "properties": {
+        "user_id": { "type": "string", "minLength": 1 },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "trigger_envelope": {
+      "type": "object",
+      "required": ["source"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "id": { "type": ["string", "null"], "minLength": 1 },
+        "received_at": { "type": ["string", "null"], "format": "date-time" },
+        "payload": { "default": {} },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

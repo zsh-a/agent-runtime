@@ -4,6 +4,10 @@
   "run_id": "run_018f0000-0000-7000-8000-000000000000",
   "agent_id": "echo_agent",
   "agent_version": "0.1.0",
+  "scope": {
+    "type": "tenant",
+    "id": "tenant_acme"
+  },
   "started_at": "2026-06-28T09:12:31Z",
   "finished_at": "2026-06-28T09:12:32Z",
   "input": {
@@ -12,12 +16,127 @@
   "output": {
     "message": "hello runtime"
   },
+  "workflow": {
+    "workflow_id": "workflow_daily_ops",
+    "root_run_id": "run_018f0000-0000-7000-8000-000000000010",
+    "parent_run_id": "run_018f0000-0000-7000-8000-000000000011",
+    "parent_agent_id": "coordinator_agent",
+    "dependencies": [
+      {
+        "run_id": "run_018f0000-0000-7000-8000-000000000012",
+        "edge": "requires",
+        "metadata": {}
+      }
+    ],
+    "metadata": {
+      "lane": "research"
+    }
+  },
+  "usage_summary": {
+    "llm_request_count": 1,
+    "input_tokens": 11,
+    "output_tokens": 7,
+    "total_tokens": 18,
+    "cost_micros_by_currency": {
+      "USD": 123
+    },
+    "by_provider": [
+      {
+        "provider": "openai",
+        "model": "gpt-test",
+        "request_count": 1,
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "total_tokens": 18,
+        "cost_micros_by_currency": {
+          "USD": 123
+        }
+      }
+    ]
+  },
+  "artifact_refs": [
+    {
+      "artifact_id": "artifact_daily_briefing_pdf",
+      "kind": "document",
+      "uri": "artifact://tenant_acme/daily_briefing.pdf",
+      "media_type": "application/pdf",
+      "size_bytes": 24576,
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "redaction_classification": "confidential",
+      "store": {
+        "provider": "host_blob_store",
+        "bucket": "tenant-acme-artifacts",
+        "key": "daily/2026-06-28/briefing.pdf",
+        "version": "v1",
+        "metadata": {
+          "region": "local"
+        }
+      },
+      "metadata": {
+        "title": "Daily briefing"
+      }
+    }
+  ],
+  "spans": [
+    {
+      "span_id": "span_9dbce05c6c23f5ec91d3fbe141e42851d7048b712b5b174c0cf0db2527eafaf4",
+      "name": "agent.run",
+      "started_at": "2026-06-28T09:12:31Z",
+      "finished_at": "2026-06-28T09:12:32Z",
+      "duration_ms": 1000,
+      "status": "completed",
+      "attributes": {
+        "run_id": "run_018f0000-0000-7000-8000-000000000000",
+        "agent_id": "echo_agent",
+        "status": "completed"
+      }
+    },
+    {
+      "span_id": "span_6a3a9a6a026e63663f5a249c152b9888b02f7b985cd55f0243cb78dc7b4f1ed9",
+      "parent_span_id": "span_9dbce05c6c23f5ec91d3fbe141e42851d7048b712b5b174c0cf0db2527eafaf4",
+      "name": "llm.openai",
+      "started_at": "2026-06-28T09:12:31Z",
+      "finished_at": "2026-06-28T09:12:31Z",
+      "duration_ms": 42,
+      "status": "completed",
+      "attributes": {
+        "run_id": "run_018f0000-0000-7000-8000-000000000000",
+        "agent_id": "echo_agent",
+        "status": "completed",
+        "provider": "openai",
+        "model": "gpt-test",
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "total_tokens": 18,
+        "cost_currency": "USD",
+        "cost_micros": 123
+      }
+    }
+  ],
   "events": [
     {
       "kind": "run_started",
       "occurred_at": "2026-06-28T09:12:31Z",
       "payload": {
         "agent_id": "echo_agent"
+      }
+    },
+    {
+      "kind": "llm_response",
+      "occurred_at": "2026-06-28T09:12:31Z",
+      "payload": {
+        "run_id": "run_018f0000-0000-7000-8000-000000000000",
+        "agent_id": "echo_agent",
+        "provider": "openai",
+        "model": "gpt-test",
+        "duration_ms": 42,
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "total_tokens": 18,
+          "cost_micros": 123,
+          "cost_currency": "USD"
+        }
       }
     },
     {

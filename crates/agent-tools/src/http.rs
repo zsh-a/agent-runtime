@@ -5,7 +5,7 @@ use miette::{Result, miette};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
-use crate::error::tool_error;
+use crate::error::{retryable_tool_error, tool_error};
 
 #[derive(Debug, Clone)]
 pub(crate) struct HttpToolEndpoint {
@@ -14,8 +14,15 @@ pub(crate) struct HttpToolEndpoint {
 }
 
 impl HttpToolEndpoint {
-    pub(crate) fn new(endpoint: String, headers: BTreeMap<String, String>) -> Self {
-        Self { endpoint, headers }
+    pub(crate) fn new(
+        source_id: &str,
+        endpoint: String,
+        headers: BTreeMap<String, String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            endpoint,
+            headers: resolve_headers(source_id, headers)?,
+        })
     }
 
     pub(crate) async fn call(
@@ -41,10 +48,13 @@ impl HttpToolEndpoint {
         for (key, value) in &self.headers {
             request = request.header(key, value);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| tool_error("http_tool_request_failed", e.to_string()))?;
+        let response = request.send().await.map_err(|e| {
+            retryable_tool_error(
+                "http_tool_request_failed",
+                e.to_string(),
+                json!({"endpoint": self.endpoint}),
+            )
+        })?;
         let status = response.status();
         let body = response
             .text()
@@ -67,6 +77,16 @@ impl HttpToolEndpoint {
                 duration_ms = started_at.elapsed().as_millis(),
                 "HTTP tool call failed with non-success status",
             );
+            if status.is_server_error() || status.as_u16() == 429 {
+                return Err(retryable_tool_error(
+                    "http_tool_status_failed",
+                    format!("HTTP tool endpoint returned {status}: {body}"),
+                    json!({
+                        "endpoint": self.endpoint,
+                        "status": status.as_u16(),
+                    }),
+                ));
+            }
             return Err(tool_error(
                 "http_tool_status_failed",
                 format!("HTTP tool endpoint returned {status}: {body}"),
@@ -101,6 +121,54 @@ impl HttpToolEndpoint {
     }
 }
 
+fn resolve_headers(
+    source_id: &str,
+    headers: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    headers
+        .into_iter()
+        .map(|(key, value)| {
+            let resolved =
+                resolve_header_value(source_id, &key, &value, |name| std::env::var(name).ok())?;
+            Ok((key, resolved))
+        })
+        .collect()
+}
+
+fn resolve_header_value(
+    source_id: &str,
+    header_name: &str,
+    raw: &str,
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> Result<String> {
+    let mut resolved = String::new();
+    let mut remaining = raw;
+    while let Some(start) = remaining.find("${env:") {
+        resolved.push_str(&remaining[..start]);
+        let after_start = &remaining[start + "${env:".len()..];
+        let Some(end) = after_start.find('}') else {
+            return Err(miette!(
+                "tool source '{source_id}' header '{header_name}' has an unterminated environment placeholder"
+            ));
+        };
+        let env_name = &after_start[..end];
+        if env_name.trim().is_empty() {
+            return Err(miette!(
+                "tool source '{source_id}' header '{header_name}' has an empty environment variable placeholder"
+            ));
+        }
+        let env_value = lookup(env_name).ok_or_else(|| {
+            miette!(
+                "tool source '{source_id}' header '{header_name}' references missing environment variable '{env_name}'"
+            )
+        })?;
+        resolved.push_str(&env_value);
+        remaining = &after_start[end + 1..];
+    }
+    resolved.push_str(remaining);
+    Ok(resolved)
+}
+
 pub(crate) fn validate_http_tool_endpoint(source_id: &str, endpoint: &str) -> Result<()> {
     if endpoint.trim().is_empty() {
         return Err(miette!(
@@ -114,6 +182,41 @@ pub(crate) fn validate_http_tool_endpoint(source_id: &str, endpoint: &str) -> Re
         scheme => Err(miette!(
             "tool source '{source_id}' endpoint must use http or https, got '{scheme}'"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_header_environment_placeholders() {
+        let resolved = resolve_header_value(
+            "http-dev",
+            "authorization",
+            "Bearer ${env:TOOL_TOKEN}",
+            |name| (name == "TOOL_TOKEN").then(|| "secret-token".to_owned()),
+        )
+        .expect("placeholder resolves");
+
+        assert_eq!(resolved, "Bearer secret-token");
+    }
+
+    #[test]
+    fn rejects_missing_header_environment_placeholders() {
+        let error = resolve_header_value(
+            "http-dev",
+            "authorization",
+            "Bearer ${env:MISSING_TOKEN}",
+            |_| None,
+        )
+        .expect_err("missing env var fails");
+
+        assert!(
+            error
+                .to_string()
+                .contains("references missing environment variable 'MISSING_TOKEN'")
+        );
     }
 }
 

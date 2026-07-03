@@ -8,9 +8,25 @@ import type {
   ChatTurnEvent,
   ChatTurnRequest,
   JsonObject,
+  ProposalActionResponse,
+  ProposalDecisionRequest,
   ProposalEnvelope,
+  ReplayExecutionResponse,
   RuntimeMetricsSummary,
+  SessionCreateRequest,
+  SessionCreateResponse,
+  SessionRecord,
+  SessionShowResponse,
+  ThreadForkRequest,
+  ThreadForkResponse,
   ToolSpec,
+  TriggerEnvelope,
+  TriggerKind,
+  UserContext,
+  RunScope,
+  RunWorkflow,
+  WorkflowRunRequest,
+  WorkflowRunResult,
 } from './types.js'
 
 export interface AgentRuntimeHttpClientOptions {
@@ -20,9 +36,19 @@ export interface AgentRuntimeHttpClientOptions {
 
 export interface RunAgentParams {
   input?: JsonObject
+  metadata?: JsonObject
   runId?: string
   sessionId?: string
   threadId?: string
+  trigger?: TriggerKind
+  triggerEnvelope?: TriggerEnvelope | null
+  scope?: RunScope | null
+  user?: UserContext | null
+  workflow?: RunWorkflow | null
+}
+
+export type RunWorkflowParams = Omit<WorkflowRunRequest, 'protocol_version'> & {
+  protocol_version?: WorkflowRunRequest['protocol_version']
 }
 
 export class AgentRuntimeHttpError extends Error {
@@ -112,9 +138,22 @@ export class AgentRuntimeHttpClient {
   runAgent(agentId: string, params: RunAgentParams = {}): Promise<AgentRunResponse> {
     return this.request('POST', `/agents/${encodeURIComponent(agentId)}/run`, {
       input: params.input ?? {},
+      ...(params.metadata === undefined ? {} : {metadata: params.metadata}),
       ...(params.runId === undefined ? {} : {run_id: params.runId}),
       ...(params.sessionId === undefined ? {} : {session_id: params.sessionId}),
       ...(params.threadId === undefined ? {} : {thread_id: params.threadId}),
+      ...(params.trigger === undefined ? {} : {trigger: params.trigger}),
+      ...(params.triggerEnvelope === undefined ? {} : {trigger_envelope: params.triggerEnvelope}),
+      ...(params.scope === undefined ? {} : {scope: params.scope}),
+      ...(params.user === undefined ? {} : {user: params.user}),
+      ...(params.workflow === undefined ? {} : {workflow: params.workflow}),
+    })
+  }
+
+  runWorkflow(request: RunWorkflowParams): Promise<WorkflowRunResult> {
+    return this.request('POST', '/workflows/run', {
+      ...request,
+      protocol_version: request.protocol_version ?? 'agent.v1',
     })
   }
 
@@ -164,8 +203,28 @@ export class AgentRuntimeHttpClient {
     return this.request('POST', `/runs/${encodeURIComponent(runId)}/cancel`, {})
   }
 
+  replayRun(runId: string): Promise<ReplayExecutionResponse> {
+    return this.request('POST', `/runs/${encodeURIComponent(runId)}/replay`)
+  }
+
   callTool<TOutput = unknown>(toolName: string, input: JsonObject = {}): Promise<{output: TOutput; tool: string}> {
     return this.request('POST', `/tools/${encodeURIComponent(toolName)}/call`, {input})
+  }
+
+  listSessions(): Promise<SessionRecord[]> {
+    return this.request('GET', '/sessions')
+  }
+
+  createSession(input: SessionCreateRequest): Promise<SessionCreateResponse> {
+    return this.request('POST', '/sessions', input)
+  }
+
+  showSession(sessionId: string): Promise<SessionShowResponse> {
+    return this.request('GET', `/sessions/${encodeURIComponent(sessionId)}`)
+  }
+
+  forkSessionThread(sessionId: string, input: ThreadForkRequest): Promise<ThreadForkResponse> {
+    return this.request('POST', `/sessions/${encodeURIComponent(sessionId)}/fork`, input)
   }
 
   listProposals(runId?: string): Promise<ProposalEnvelope[]> {
@@ -174,19 +233,30 @@ export class AgentRuntimeHttpClient {
     return this.request('GET', `/proposals${suffix}`)
   }
 
-  createProposal(input: Pick<ProposalEnvelope, 'agent_id' | 'kind' | 'payload' | 'run_id' | 'summary'>): Promise<ProposalEnvelope> {
+  createProposal(
+    input: Pick<ProposalEnvelope, 'agent_id' | 'diffs' | 'kind' | 'payload' | 'run_id' | 'summary' | 'warnings'>,
+  ): Promise<ProposalEnvelope> {
     return this.request('POST', '/proposals', input)
   }
 
-  decideProposal(proposalId: string, decision: 'approve' | 'deny', comment?: string): Promise<{decision: ApprovalDecision; proposal: ProposalEnvelope}> {
-    return this.request('POST', `/proposals/${encodeURIComponent(proposalId)}/decision`, {comment, decision})
+  decideProposal(
+    proposalId: string,
+    decision: 'approve' | 'deny',
+    commentOrOptions?: string | Omit<ProposalDecisionRequest, 'decision'>,
+  ): Promise<{decision: ApprovalDecision; proposal: ProposalEnvelope}> {
+    const body =
+      typeof commentOrOptions === 'string' || commentOrOptions === undefined
+        ? {comment: commentOrOptions, decision}
+        : {...commentOrOptions, decision}
+
+    return this.request('POST', `/proposals/${encodeURIComponent(proposalId)}/decision`, body)
   }
 
-  applyProposal(proposalId: string): Promise<{proposal: ProposalEnvelope; result: unknown}> {
+  applyProposal(proposalId: string): Promise<ProposalActionResponse> {
     return this.request('POST', `/proposals/${encodeURIComponent(proposalId)}/apply`)
   }
 
-  undoProposal(proposalId: string): Promise<{proposal: ProposalEnvelope; result: unknown}> {
+  undoProposal(proposalId: string): Promise<ProposalActionResponse> {
     return this.request('POST', `/proposals/${encodeURIComponent(proposalId)}/undo`)
   }
 

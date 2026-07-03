@@ -3,7 +3,6 @@ use std::process::Stdio;
 use agent_core::ToolError;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command as TokioCommand;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -23,8 +22,8 @@ pub(crate) async fn call_tool(
         arg_count = host.args.len(),
         "starting MCP stdio tool call",
     );
-    let mut child = TokioCommand::new(&host.command)
-        .args(&host.args)
+    let mut command = host.command_builder();
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -23,10 +23,54 @@
     "finished_at": { "type": "string", "format": "date-time" },
     "summary": { "type": ["string", "null"] },
     "output": { "type": "object", "default": {} },
-    "error": { "$ref": "#/$defs/error" }
+    "error": { "$ref": "#/$defs/error" },
+    "workflow": {
+      "anyOf": [{ "$ref": "#/$defs/run_workflow" }, { "type": "null" }]
+    }
   },
   "additionalProperties": false,
   "$defs": {
+    "run_workflow": {
+      "type": "object",
+      "properties": {
+        "workflow_id": { "type": ["string", "null"], "minLength": 1 },
+        "root_run_id": { "type": ["string", "null"], "minLength": 1 },
+        "parent_run_id": { "type": ["string", "null"], "minLength": 1 },
+        "parent_agent_id": { "type": ["string", "null"], "minLength": 1 },
+        "dependencies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/run_dependency" },
+          "default": []
+        },
+        "fanout_id": { "type": ["string", "null"], "minLength": 1 },
+        "fanin_id": { "type": ["string", "null"], "minLength": 1 },
+        "compensation": {
+          "anyOf": [{ "$ref": "#/$defs/run_compensation" }, { "type": "null" }]
+        },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "run_dependency": {
+      "type": "object",
+      "required": ["run_id"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "edge": { "type": ["string", "null"], "minLength": 1 },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "run_compensation": {
+      "type": "object",
+      "required": ["compensates_run_id"],
+      "properties": {
+        "compensates_run_id": { "type": "string", "minLength": 1 },
+        "strategy": { "type": ["string", "null"], "minLength": 1 },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
     "error": {
       "type": "object",
       "required": ["kind", "code", "message", "retryable"],

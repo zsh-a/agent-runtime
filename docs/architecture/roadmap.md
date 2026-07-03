@@ -15,15 +15,31 @@ The runtime currently works well as a schema-first agent execution kernel for:
 - proposal envelope creation and approval/application flows
 - provider-neutral chat turn state and event contracts
 - HTTP/SSE chat turn streaming over `agent-chat`
+- HTTP/SSE chat resume, active-run event streaming, and active-run cancellation
 - CLI, HTTP, stdio, TUI, replay, eval, and debug-bundle development workflows
 - initial dependency-light TypeScript bindings for HTTP runtime calls, chat
   streaming, and structured LLM object generation
+- reusable `agent-tools` adapters for JSONL process, MCP stdio, and HTTP JSON
+  tool sources
+- tool input/output JSON Schema validation for tools with declared `ToolSpec`
+  schemas
+- tool-source timeout and retry policy for retryable external tool failures
+- tool-source serialized output-size limits for external tool calls
 - file-backed local stores and in-memory test stores
+- shared conformance tests for current file-backed and in-memory
+  `AgentRunStore`, `AgentProposalStore`, and `AgentSessionStore`
+- manual, interval, and five-field cron schedules for UTC, IANA timezones, or
+  fixed-offset timezones
+- first-class `RunRequest` trigger envelopes for webhook and queue deliveries,
+  exposed through HTTP and stdio `agent.run`
+- a `compat check` CLI harness for host integration smoke tests covering
+  catalog/tool-source schema validation, dry-run fixtures, proposal fixtures,
+  and debug-bundle redaction export
 
 It is not yet a full production agent platform. The main gaps are generated or
-broader SDK coverage, chat resume and cancellation, external run control,
+broader SDK coverage, durable chat/run control across process restarts,
 production stores, distributed scheduling, stronger risk policy, artifact
-handling, and richer observability.
+handling, richer observability, and fully stabilized reusable ToolHost APIs.
 
 ## Roadmap Principles
 
@@ -55,10 +71,10 @@ runtime internals.
 - Maintain `examples/business-integration/` as the canonical business adapter
   smoke test.
 - Add contract tests for the business integration example:
-  - catalog schema validation
-  - tool-source manifest validation
-  - dry-run tool call
-  - proposal envelope creation
+  - catalog schema validation (covered by `agent compat check`)
+  - tool-source manifest validation (covered by `agent compat check`)
+  - dry-run tool call (covered by `agent compat check`)
+  - proposal envelope creation (covered by `agent compat check`)
 - Document the difference between catalog dry-run agents, configuration-backed
   agents, and code-backed agents.
 - Add a compatibility checklist for host applications:
@@ -91,20 +107,28 @@ transport glue for common workflows.
 ### Deliverables
 
 - Extend HTTP/SSE chat endpoints over `agent-chat`:
-  - resume from `ChatTurnState` plus `ChatToolResult`
+  - resume from `ChatTurnState` plus `ChatToolResult` (implemented for the
+    current HTTP/server path)
   - persist or correlate chat turn traces where host apps need replay
   - expose client disconnect/cancel semantics consistently
 - Add run control protocol:
-  - cancel active run
-  - mark cancellation in run record and trace
-  - expose terminal cancellation status consistently
+  - cancel active run (implemented for in-process active runs)
+  - persist cancellation intent for running records under
+    `metadata.control.cancel_requested`
+  - active runners poll persisted cancellation intent and convert it into their
+    local cancellation token
+  - mark cancellation in run record and trace (implemented for active runs that
+    reach the shared `AgentRunner` cancellation path)
+  - expose terminal cancellation status consistently across restarts and
+    multi-instance deployments
 - Extend HTTP and stdio contracts for:
   - live run event streaming
   - structured runtime errors with stable codes
   - request metadata for user/session/thread correlation
 - Add server-side request validation against committed JSON Schemas.
-- Extend the TypeScript client reference implementation or add generated OpenAPI
-  client configuration.
+- Extend the TypeScript client reference implementation or add generated
+  OpenAPI client configuration. The hand-written reference client covers the
+  current HTTP chat/run/proposal surfaces; generated broader coverage remains.
 
 ### Acceptance Criteria
 
@@ -135,19 +159,32 @@ stores or external-only scheduling.
   - distributed `AgentLockStore`
 - Add migration/versioning strategy for persisted runtime records.
 - Extend scheduling beyond manual/interval:
-  - cron schedule spec
-  - timezone handling
-  - webhook trigger envelope
-  - queue/worker adapter contract
+  - cron schedule spec (implemented for five-field expressions)
+  - timezone handling (implemented for UTC, IANA timezone names, and fixed
+    offsets)
+  - webhook trigger envelope (implemented as `trigger=webhook` plus
+    `trigger_envelope` on `RunRequest` and HTTP/stdio `agent.run`)
+  - queue/worker adapter contract (implemented at the protocol envelope level
+    through `trigger=queue`; agent/workflow leases and renewal use the
+    configured `AgentLockStore`; concrete queue backends remain future work)
+- Add shared store conformance tests before implementing concrete DB backends
+  (implemented for current file-backed and in-memory run/proposal/session
+  stores; future DB stores should run the same behavior suite).
 - Add stale-run recovery tests for DB-backed semantics.
-- Add tenant/user scope guidance for locks, stores, metrics, and traces.
+- Add tenant/user scope guidance for locks, stores, metrics, and traces
+  (implemented as first-class `RunRequest.scope` /
+  `WorkflowRunRequest.scope`, persisted `AgentRunRecord.scope`, scope-aware
+  lease keys and idempotency material, and inherited `agent.run` subagent
+  scope).
 
 ### Acceptance Criteria
 
 - Runtime can run safely in more than one worker process against a shared store.
 - Scheduled jobs can be expressed without host-specific ad hoc metadata.
 - Stale running records can be recovered deterministically after restart.
-- Store implementations pass a shared conformance test suite.
+- Store implementations pass a shared conformance test suite. Current
+  file-backed and in-memory run/proposal/session stores do; future DB stores
+  should be added to the same suite.
 
 ## P3: Safety, Policy, And Approval Depth
 
@@ -167,27 +204,40 @@ and irreversible data mutation.
 ### Deliverables
 
 - Promote risk policy to first-class protocol fields:
-  - proposal risk
-  - required approval level
-  - policy id and policy version
-  - expiry and revocation behavior
-- Add proposal diff/warning metadata conventions.
+  - proposal risk (implemented)
+  - required approval level (implemented)
+  - policy id and policy version (implemented)
+  - expiry (implemented through proposal kind relative expiry and envelope
+    `expires_at`) and revocation behavior
+- Add proposal diff/warning metadata conventions (implemented as
+  `ProposalEnvelope.diffs` and `ProposalEnvelope.warnings`, accepted by CLI and
+  HTTP proposal creation and passed through to proposal action tools)
 - Add approval-chain support:
-  - single-user approval
-  - multi-approver approval
+  - single-user approval (implemented as the default approval decision level)
+  - multi-approver approval (implemented as accumulated distinct
+    `ApprovalDecision` records on `ProposalEnvelope.approval_decisions`, with
+    `required_approver_count` quorum semantics)
   - policy-denied terminal state
 - Add host-side policy hook contracts:
   - pre-tool-call policy check
-  - pre-proposal-create policy check
-  - pre-apply policy check
+  - pre-proposal-create policy check (implemented as `BeforeProposalCreate`
+    for agent-created proposals and manual CLI/HTTP proposal create)
+  - pre-apply policy check (implemented as `BeforeProposalApply` for proposal
+    apply, before status changes to `applying`)
 - Add audit-oriented trace events for policy decisions and proposal actions.
+  Proposal decision traces now include approval level and optional deciding
+  actor, and policy hook invocations are trace-visible for proposal create and
+  apply when the associated run trace exists; broader policy-decision audit
+  trails remain.
 
 ### Acceptance Criteria
 
 - High-risk tools can be blocked before execution by policy.
-- Proposal records carry enough structured risk data for a host UI to render
-  warnings without parsing free-form text.
-- Approval decisions are auditable and replay-visible.
+- Proposal records carry enough structured risk data, diffs, and warnings for a
+  host UI to render review surfaces without parsing free-form text.
+- Approval decisions are auditable and replay-visible for single-decision and
+  multi-approver flows, including approval level, optional deciding actor, and
+  the accumulated decision chain on the proposal envelope.
 - Apply/undo behavior has stable terminal statuses and error semantics.
 
 ## P4: Reusable SDKs And Tooling
@@ -211,13 +261,17 @@ Goal: reduce duplicated adapter work across host applications.
   - chat event mapping
   - proposal decision/apply
   - trace redaction hooks
-- Extract reusable tool adapters from `agent-cli/src/tools/` into an
-  `agent-tools` crate when the API is stable enough.
+- Continue stabilizing the extracted `agent-tools` crate into a reusable
+  ToolHost API with richer per-tool policy, a host secret manager, and stronger
+  sandbox guidance. Source-level timeouts/retries and HTTP header environment
+  placeholders are implemented for the current manifest adapters, along with
+  source-level serialized output-size limits and process/MCP stdio
+  `cwd`/`env`/`inherit_env` controls.
 - Provide a host compatibility test harness:
-  - validate catalog
-  - call each tool fixture
-  - validate proposal fixtures
-  - verify trace redaction
+  - validate catalog (implemented for provided catalog path)
+  - call tool-backed run fixture (implemented through catalog dry-run input)
+  - validate proposal fixtures (implemented by checking proposal creation)
+  - verify trace redaction (implemented by exporting a redacted debug bundle)
 
 ### Acceptance Criteria
 
@@ -242,26 +296,59 @@ Goal: handle complex agent products that need more than single-run execution.
 ### Deliverables
 
 - Add workflow/graph execution contracts:
-  - child runs
-  - dependency edges
-  - fan-out/fan-in
-  - compensation and rollback metadata
+  - child runs (implemented as `workflow.parent_run_id` / `root_run_id`)
+  - dependency edges (implemented as `workflow.dependencies`)
+  - fan-out/fan-in (implemented as workflow ids)
+  - compensation and rollback metadata (implemented as `workflow.compensation`;
+    workflow nodes can declare compensation agents and the local DAG executor
+    runs them in reverse topological result order after downstream failure)
+  - DAG scheduling/execution semantics (implemented as deterministic in-process
+    ready-node scheduling through `AgentRunner::run_workflow`, exposed via
+    `agent workflow run`, HTTP `POST /workflows/run`, and stdio `workflow.run`;
+    nodes whose dependencies are complete can run concurrently, with
+    same-agent nodes serialized against the local run lease)
+  - workflow execution leases (implemented as scope-aware
+    `workflow_id` / scope keys through the configured `AgentLockStore`, with
+    periodic renewal while work is active; distributed work stealing/execution
+    and durable saga recovery remain future work)
+  - dataflow mapping between nodes (implemented as `input_mappings` from direct
+    dependency `output` JSON Pointer paths into the target node input, with
+    optional defaults and primitive `string` / `number` / `integer` /
+    `boolean` / `json_string` transforms; expression/template transforms remain
+    future work)
 - Add artifact reference protocol:
-  - blob/document references
-  - content hashes
-  - redaction classification
-  - host-owned artifact store hooks
+  - blob/document references (implemented as typed `artifact_refs`)
+  - content hashes (implemented as `sha256`)
+  - redaction classification (implemented on `ArtifactRef`)
+  - host-owned artifact store hooks (implemented as `publish_artifact`)
+  - replay materialization from artifact stores (implemented for local files
+    and explicit host store resolver manifests via debug bundle
+    `--materialize-artifacts`; live remote fetchers remain future work)
 - Add richer observability:
-  - optional spans alongside event-first traces
-  - OpenTelemetry export guidance
-  - cost and token usage aggregation
-  - latency metrics by provider/tool/agent
+  - provider spans alongside the implemented run/tool/state spans
+    (implemented for LLM trace events)
+  - OpenTelemetry export guidance (implemented as `agent trace export-otel`
+    OTLP JSON-style document export plus OTLP HTTP collector push)
+  - cost and token usage aggregation (implemented as
+    `AgentTrace.usage_summary`)
+  - latency metrics by provider/tool/agent (implemented in
+    `/metrics/summary` as `llm_usage_by_provider`, `tool_calls_by_tool`, and
+    `runs_by_agent`)
 - Add replay support for multi-run workflows and artifact references.
+  - artifact reference manifests in debug bundles (implemented as
+    `artifacts.json`)
+  - artifact byte materialization from host stores (implemented for local
+    `file://` / `metadata.local_path` artifacts and explicit
+    `provider/bucket/key` resolver manifests with
+    `artifact_materializations.json`; live remote fetcher traits remain)
 
 ### Acceptance Criteria
 
 - A workflow can express parent/child run relationships without embedding
-  business-specific metadata.
+  business-specific metadata. The protocol fields and a local concurrent DAG
+  executor exist, with CLI/HTTP/stdio entrypoints, scope-aware workflow leases,
+  and persisted node traces for normal run inspection; distributed workflow
+  work stealing/execution and durable compensation recovery remain future work.
 - Large files can be referenced without putting raw blobs in JSON traces.
 - Production traces can be exported to common observability systems.
 - Replay remains deterministic for workflows that use recorded tool outputs.
@@ -271,7 +358,8 @@ Goal: handle complex agent products that need more than single-run execution.
 - Runtime should not own business repositories, product data models, or UI.
 - Runtime should not become the production auth gateway for host applications.
 - Runtime should not persist provider secrets in traces, catalogs, or tool
-  outputs.
+  outputs. Tool-source manifests should use environment placeholders such as
+  `${env:NAME}` for HTTP header secrets.
 - Runtime should not execute high-risk side effects directly unless the host app
   explicitly exposes a direct tool and accepts that risk.
 - Runtime should not require one database, queue, frontend framework, or mobile

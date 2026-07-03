@@ -4,5 +4,32 @@
     "message": "hello runtime"
   },
   "trigger": "manual",
+  "workflow": {
+    "workflow_id": "workflow_daily_ops",
+    "root_run_id": "run_018f0000-0000-7000-8000-000000000010",
+    "parent_run_id": "run_018f0000-0000-7000-8000-000000000011",
+    "parent_agent_id": "coordinator_agent",
+    "dependencies": [
+      {
+        "run_id": "run_018f0000-0000-7000-8000-000000000012",
+        "edge": "requires",
+        "metadata": {
+          "artifact": "briefing"
+        }
+      }
+    ],
+    "fanout_id": "fanout_research_batch",
+    "fanin_id": "fanin_research_batch",
+    "compensation": {
+      "compensates_run_id": "run_018f0000-0000-7000-8000-000000000013",
+      "strategy": "rollback",
+      "metadata": {
+        "reason": "downstream_failure"
+      }
+    },
+    "metadata": {
+      "lane": "research"
+    }
+  },
   "metadata": {}
 }

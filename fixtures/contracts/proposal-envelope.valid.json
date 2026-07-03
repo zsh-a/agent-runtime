@@ -11,7 +11,43 @@
   "risk": "medium",
   "approval_policy": "manual",
   "approval_required": true,
+  "required_approval_level": "single_user",
+  "required_approver_count": 1,
+  "approval_decisions": [
+    {
+      "protocol_version": "agent.v1",
+      "proposal_id": "proposal_01975d8c-72f5-7f1e-9b7e-c7ef3e0a1000",
+      "decision": "approve",
+      "approval_level": "single_user",
+      "decided_by": "user_fixture_reviewer",
+      "decided_at": "2026-06-28T09:13:31Z",
+      "comment": "fixture approval"
+    }
+  ],
+  "diffs": [
+    {
+      "path": "/allocations/0/weight",
+      "operation": "replace",
+      "before": 0.1,
+      "after": 0.15,
+      "metadata": {
+        "asset": "AAPL"
+      }
+    }
+  ],
+  "warnings": [
+    {
+      "severity": "warning",
+      "code": "allocation_change",
+      "message": "Allocation changes require user confirmation",
+      "metadata": {
+        "policy": "finance.proposal.default"
+      }
+    }
+  ],
+  "policy_id": "finance.proposal.default",
+  "policy_version": "2026-06-28",
   "status": "pending_approval",
   "created_at": "2026-06-28T09:12:31Z",
-  "expires_at": null
+  "expires_at": "2026-06-29T09:12:31Z"
 }

@@ -4,9 +4,16 @@ export type JsonPrimitive = boolean | null | number | string
 export type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue | undefined}
 export type JsonObject = {[key: string]: JsonValue | undefined}
 
-export type TriggerKind = 'manual' | 'replay' | 'scheduled'
+export type TriggerKind = 'manual' | 'queue' | 'replay' | 'scheduled' | 'webhook'
 export type AgentRunStatus = 'abandoned' | 'cancelled' | 'completed' | 'failed' | 'running' | 'skipped' | 'timed_out'
 export type ToolRisk = 'high' | 'low' | 'medium' | 'read_only'
+export type ApprovalLevel = 'admin' | 'multi_approver' | 'none' | 'single_user'
+export type ReplayMode = 'deterministic' | 'live' | 'view'
+export type ArtifactKind = 'blob' | 'dataset' | 'document' | 'image' | 'log' | 'other'
+export type RedactionClassification = 'confidential' | 'internal' | 'public' | 'secret'
+export type StepKind = 'agent_run' | 'approval' | 'llm_round' | 'note' | 'proposal' | 'state_update' | 'tool_call'
+export type ProposalDiffOperation = 'add' | 'remove' | 'replace'
+export type ProposalWarningSeverity = 'danger' | 'info' | 'warning'
 export type LlmRole = 'assistant' | 'system' | 'tool' | 'user'
 export type LlmFinishReason = 'content_filter' | 'error' | 'length' | 'stop' | 'tool_call'
 export type ChatToolExecution = 'client' | 'runtime'
@@ -28,6 +35,7 @@ export type HookEventName =
   | 'AfterToolCall'
   | 'BeforeAgentStep'
   | 'BeforeCompact'
+  | 'BeforeProposalApply'
   | 'BeforeProposalCreate'
   | 'BeforeStateSave'
   | 'BeforeToolCall'
@@ -50,6 +58,7 @@ export interface UserContext {
 export type ScheduleSpec =
   | {type: 'manual'}
   | {every_seconds: number; jitter_seconds?: number | null; preferred_hour_local?: number | null; type: 'interval'}
+  | {expression: string; timezone: string; type: 'cron'}
 
 export interface AgentSpec {
   capabilities?: string[]
@@ -76,8 +85,129 @@ export interface RunRequest {
   metadata?: JsonObject
   protocol_version: ProtocolVersion
   run_id?: string | null
+  scope?: null | RunScope
   trigger?: TriggerKind
+  trigger_envelope?: null | TriggerEnvelope
   user?: UserContext | null
+  workflow?: null | RunWorkflow
+}
+
+export type RunScope =
+  | {type: 'global'}
+  | {id: string; type: 'user'}
+  | {id: string; type: 'tenant'}
+
+export interface RunDependency {
+  edge?: null | string
+  metadata?: JsonObject
+  run_id: string
+}
+
+export interface RunCompensation {
+  compensates_run_id: string
+  metadata?: JsonObject
+  strategy?: null | string
+}
+
+export interface RunWorkflow {
+  compensation?: null | RunCompensation
+  dependencies?: RunDependency[]
+  fanin_id?: null | string
+  fanout_id?: null | string
+  metadata?: JsonObject
+  parent_agent_id?: null | string
+  parent_run_id?: null | string
+  root_run_id?: null | string
+  workflow_id?: null | string
+}
+
+export interface WorkflowRunNode {
+  agent_id: string
+  compensation?: null | WorkflowRunNodeCompensation
+  depends_on?: string[]
+  input?: JsonObject
+  input_mappings?: WorkflowInputMapping[]
+  metadata?: JsonObject
+  node_id: string
+  run_id?: null | string
+}
+
+export interface WorkflowInputMapping {
+  default?: JsonValue
+  from_node: string
+  from_path?: string
+  to_path: string
+  transform?: WorkflowInputTransform
+}
+
+export type WorkflowInputTransform =
+  | 'none'
+  | 'string'
+  | 'number'
+  | 'integer'
+  | 'boolean'
+  | 'json_string'
+
+export interface WorkflowRunNodeCompensation {
+  agent_id: string
+  input?: JsonObject
+  metadata?: JsonObject
+  run_id?: null | string
+  strategy?: null | string
+}
+
+export interface WorkflowRunRequest {
+  metadata?: JsonObject
+  nodes?: WorkflowRunNode[]
+  protocol_version: ProtocolVersion
+  root_run_id?: null | string
+  scope?: null | RunScope
+  trigger?: TriggerKind
+  trigger_envelope?: null | TriggerEnvelope
+  user?: null | UserContext
+  workflow_id: string
+}
+
+export interface WorkflowRunNodeResult {
+  agent_id: string
+  compensation?: null | WorkflowRunNodeCompensationResult
+  depends_on?: string[]
+  error?: null | AgentErrorRecord
+  metadata?: JsonObject
+  node_id: string
+  output?: JsonValue
+  run_id?: null | string
+  status: AgentRunStatus
+  trace?: null | AgentTrace
+}
+
+export interface WorkflowRunNodeCompensationResult {
+  agent_id: string
+  error?: null | AgentErrorRecord
+  metadata?: JsonObject
+  output?: JsonValue
+  run_id?: null | string
+  status: AgentRunStatus
+  trace?: null | AgentTrace
+}
+
+export interface WorkflowRunResult {
+  finished_at: string
+  metadata?: JsonObject
+  nodes?: WorkflowRunNodeResult[]
+  protocol_version: ProtocolVersion
+  root_run_id?: null | string
+  started_at: string
+  status: AgentRunStatus
+  workflow_id: string
+}
+
+export interface TriggerEnvelope {
+  id?: null | string
+  metadata?: JsonObject
+  payload?: JsonValue
+  received_at?: null | string
+  source: string
 }
 
 export interface AgentRunRecord {
@@ -90,9 +220,10 @@ export interface AgentRunRecord {
   output?: JsonObject
   protocol_version: ProtocolVersion
   run_id: string
-  scope: JsonObject
+  scope: RunScope
   started_at: string
   status: AgentRunStatus
+  workflow?: null | RunWorkflow
 }
 
 export interface AgentRunResult {
@@ -105,6 +236,7 @@ export interface AgentRunResult {
   started_at: string
   status: AgentRunStatus
   summary?: null | string
+  workflow?: null | RunWorkflow
 }
 
 export interface CancelRunResponse {
@@ -122,6 +254,12 @@ export interface AgentErrorRecord {
   retryable: boolean
 }
 
+export interface ErrorResponse {
+  code: string
+  details?: JsonObject
+  message: string
+}
+
 export interface TraceEvent {
   kind: string
   occurred_at: string
@@ -130,11 +268,52 @@ export interface TraceEvent {
 
 export interface ArtifactRef {
   artifact_id: string
+  kind?: ArtifactKind
   media_type?: null | string
   metadata?: JsonObject
+  redaction_classification?: RedactionClassification
   sha256?: null | string
   size_bytes?: null | number
+  store?: null | ArtifactStoreRef
   uri: string
+}
+
+export interface ArtifactStoreRef {
+  bucket?: null | string
+  key?: null | string
+  metadata?: JsonObject
+  provider: string
+  version?: null | string
+}
+
+export interface TraceSpan {
+  attributes?: JsonObject
+  duration_ms: number
+  finished_at: string
+  name: string
+  parent_span_id?: null | string
+  span_id: string
+  started_at: string
+  status: string
+}
+
+export interface TraceUsageProviderSummary {
+  cost_micros_by_currency?: Record<string, number>
+  input_tokens: number
+  model?: null | string
+  output_tokens: number
+  provider: string
+  request_count: number
+  total_tokens: number
+}
+
+export interface TraceUsageSummary {
+  by_provider?: TraceUsageProviderSummary[]
+  cost_micros_by_currency?: Record<string, number>
+  input_tokens: number
+  llm_request_count: number
+  output_tokens: number
+  total_tokens: number
 }
 
 export interface AgentTrace {
@@ -148,7 +327,83 @@ export interface AgentTrace {
   protocol_version: ProtocolVersion
   run_id: string
   runtime_version: string
+  scope: RunScope
+  spans?: TraceSpan[]
   started_at: string
+  usage_summary?: null | TraceUsageSummary
+  workflow?: null | RunWorkflow
+}
+
+export interface ReplayExecutionResponse {
+  agent_id: string
+  mode: ReplayMode
+  output_matches: boolean
+  replay_run_id: string
+  result: AgentRunResult
+  source_run_id: string
+  trace: AgentTrace
+}
+
+export interface SessionRecord {
+  created_at: string
+  metadata?: JsonObject
+  protocol_version: ProtocolVersion
+  session_id: string
+  title: string
+  updated_at: string
+}
+
+export interface ThreadRecord {
+  created_at: string
+  metadata?: JsonObject
+  parent_thread_id?: null | string
+  protocol_version: ProtocolVersion
+  session_id: string
+  thread_id: string
+  title?: null | string
+}
+
+export interface StepRecord {
+  created_at: string
+  kind: StepKind
+  payload?: JsonObject
+  protocol_version: ProtocolVersion
+  run_id?: null | string
+  step_id: string
+  summary?: null | string
+  thread_id: string
+}
+
+export interface SessionCreateRequest {
+  metadata?: JsonObject
+  title: string
+}
+
+export interface SessionCreateResponse {
+  session: SessionRecord
+  thread: ThreadRecord
+}
+
+export interface ThreadWithSteps {
+  steps: StepRecord[]
+  thread: ThreadRecord
+}
+
+export interface SessionShowResponse {
+  session: SessionRecord
+  threads: ThreadWithSteps[]
+}
+
+export interface ThreadForkRequest {
+  metadata?: JsonObject
+  parent_thread_id: string
+  title?: string
+}
+
+export interface ThreadForkResponse {
+  parent_thread_id: string
+  session_id: string
+  thread: ThreadRecord
 }
 
 export interface HookSpec {
@@ -239,6 +494,7 @@ export interface RuntimeMetricsSummary {
   failed_run_count: number
   failed_tool_call_count: number
   generated_at: string
+  llm_usage_by_provider: {[key: string]: RuntimeLlmProviderMetrics | undefined}
   llm_total_tokens: number
   proposal_applied_count: number
   proposal_approved_count: number
@@ -249,15 +505,43 @@ export interface RuntimeMetricsSummary {
   protocol_version: ProtocolVersion
   replay_count: number
   run_count: number
+  runs_by_agent: {[key: string]: RuntimeAgentMetrics | undefined}
   runs_by_status: {[key: string]: number | undefined}
   runtime_version: string
   skipped_run_count: number
   store_root: string
   successful_run_count: number
   timeout_count: number
+  tool_calls_by_tool: {[key: string]: RuntimeToolMetrics | undefined}
   tool_call_count: number
   total_run_latency_ms: number
   total_tool_call_latency_ms: number
+}
+
+export interface RuntimeAgentMetrics {
+  average_run_latency_ms?: null | number
+  failed_run_count: number
+  run_count: number
+  runs_by_status: {[key: string]: number | undefined}
+  successful_run_count: number
+  total_run_latency_ms: number
+}
+
+export interface RuntimeToolMetrics {
+  average_tool_call_latency_ms?: null | number
+  failed_tool_call_count: number
+  tool_call_count: number
+  total_tool_call_latency_ms: number
+}
+
+export interface RuntimeLlmProviderMetrics {
+  average_latency_ms?: null | number
+  cost_micros_by_currency: {[key: string]: number | undefined}
+  input_tokens: number
+  output_tokens: number
+  request_count: number
+  total_latency_ms: number
+  total_tokens: number
 }
 
 export interface LlmMessage {
@@ -407,24 +691,62 @@ export type ProposalStatus =
 
 export interface ProposalEnvelope {
   agent_id: string
+  approval_decisions?: ApprovalDecision[]
   approval_policy?: 'auto_approve' | 'manual'
   approval_required?: boolean
   created_at: string
+  diffs?: ProposalDiff[]
   expires_at?: null | string
   kind: string
   payload: JsonObject
+  policy_id?: null | string
+  policy_version?: null | string
   proposal_id: string
   protocol_version: ProtocolVersion
+  required_approval_level?: ApprovalLevel
+  required_approver_count?: number
   risk?: ToolRisk
   run_id: string
   status: ProposalStatus
   summary: string
+  warnings?: ProposalWarning[]
+}
+
+export interface ProposalDiff {
+  after?: JsonValue
+  before?: JsonValue
+  metadata?: JsonObject
+  operation?: ProposalDiffOperation
+  path: string
+}
+
+export interface ProposalWarning {
+  code: string
+  message: string
+  metadata?: JsonObject
+  severity?: ProposalWarningSeverity
 }
 
 export interface ApprovalDecision {
+  approval_level?: ApprovalLevel
   comment?: null | string
+  decided_by?: null | string
   decided_at: string
   decision: 'approve' | 'deny'
   proposal_id: string
   protocol_version: ProtocolVersion
+}
+
+export interface ProposalDecisionRequest {
+  approval_level?: ApprovalLevel
+  comment?: null | string
+  decided_by?: null | string
+  decision: 'approve' | 'approved' | 'deny' | 'denied'
+}
+
+export interface ProposalActionResponse {
+  action: 'apply' | 'undo'
+  proposal: ProposalEnvelope
+  tool: string
+  tool_output: JsonValue
 }

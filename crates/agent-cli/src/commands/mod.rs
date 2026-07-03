@@ -1,4 +1,5 @@
 pub(crate) mod catalog;
+pub(crate) mod compat;
 pub(crate) mod llm;
 pub(crate) mod proposal;
 pub(crate) mod run;

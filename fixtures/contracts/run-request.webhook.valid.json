@@ -1,0 +1,26 @@
+{
+  "protocol_version": "agent.v1",
+  "input": {
+    "message": "webhook delivery"
+  },
+  "trigger": "webhook",
+  "trigger_envelope": {
+    "source": "github.webhook",
+    "id": "evt_01HWEBHOOK",
+    "received_at": "2026-07-03T01:30:00Z",
+    "payload": {
+      "action": "opened",
+      "repository": "agent-runtime"
+    },
+    "metadata": {
+      "signature_verified": true
+    }
+  },
+  "scope": {
+    "type": "tenant",
+    "id": "tenant_acme"
+  },
+  "metadata": {
+    "tenant_id": "tenant_acme"
+  }
+}

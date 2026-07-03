@@ -1,0 +1,9 @@
+{
+  "protocol_version": "agent.v1",
+  "resolvers": [
+    {
+      "provider": "host_blob_store",
+      "root": "./artifact-store"
+    }
+  ]
+}

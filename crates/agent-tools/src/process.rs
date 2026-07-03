@@ -1,6 +1,7 @@
-use std::process::Stdio;
+use std::{collections::BTreeMap, process::Stdio};
 
 use agent_core::ToolError;
+use camino::Utf8PathBuf;
 use miette::Result;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -16,11 +17,53 @@ use crate::{
 pub(crate) struct ProcessToolHost {
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
+    pub(crate) cwd: Option<Utf8PathBuf>,
+    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) inherit_env: bool,
 }
 
 impl ProcessToolHost {
     pub(crate) fn new(command: String, args: Vec<String>) -> Self {
-        Self { command, args }
+        Self {
+            command,
+            args,
+            cwd: None,
+            env: BTreeMap::new(),
+            inherit_env: true,
+        }
+    }
+
+    pub(crate) fn with_execution_env(
+        command: String,
+        args: Vec<String>,
+        cwd: Option<Utf8PathBuf>,
+        env: BTreeMap<String, String>,
+        inherit_env: bool,
+    ) -> Self {
+        Self {
+            command,
+            args,
+            cwd,
+            env,
+            inherit_env,
+        }
+    }
+
+    pub(crate) fn command_builder(&self) -> TokioCommand {
+        let mut command = TokioCommand::new(&self.command);
+        command.args(&self.args);
+        if let Some(cwd) = &self.cwd {
+            command.current_dir(cwd);
+        }
+        if !self.inherit_env {
+            command.env_clear();
+        }
+        command.envs(
+            self.env
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+        command
     }
 
     pub(crate) async fn call(
@@ -35,8 +78,8 @@ impl ProcessToolHost {
             arg_count = self.args.len(),
             "starting process tool host call",
         );
-        let mut child = TokioCommand::new(&self.command)
-            .args(&self.args)
+        let mut command = self.command_builder();
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

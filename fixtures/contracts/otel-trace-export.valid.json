@@ -1,0 +1,71 @@
+{
+  "protocol_version": "agent.v1",
+  "export_format": "otlp_trace_json.v1",
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "agent-runtime"
+            }
+          },
+          {
+            "key": "run.id",
+            "value": {
+              "stringValue": "run_018f0000-0000-7000-8000-000000000000"
+            }
+          },
+          {
+            "key": "run.scope.type",
+            "value": {
+              "stringValue": "tenant"
+            }
+          },
+          {
+            "key": "run.scope.id",
+            "value": {
+              "stringValue": "tenant_acme"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agent-runtime",
+            "version": "0.1.0"
+          },
+          "spans": [
+            {
+              "traceId": "0123456789abcdef0123456789abcdef",
+              "spanId": "0123456789abcdef",
+              "name": "agent.run",
+              "kind": "SPAN_KIND_INTERNAL",
+              "startTimeUnixNano": "1782637951000000000",
+              "endTimeUnixNano": "1782637952000000000",
+              "attributes": [
+                {
+                  "key": "agent.id",
+                  "value": {
+                    "stringValue": "echo_agent"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": "1000"
+                  }
+                }
+              ],
+              "status": {
+                "code": "STATUS_CODE_OK"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

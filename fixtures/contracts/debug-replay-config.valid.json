@@ -13,6 +13,8 @@
     "trace": "trace.json",
     "events": "events.jsonl",
     "tool_calls": "tool_calls.jsonl",
+    "artifacts": "artifacts.json",
+    "artifact_materializations": "artifact_materializations.json",
     "state_snapshot": "state_snapshot.json",
     "prompt_manifest": "prompt_manifest.json"
   },

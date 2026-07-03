@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-runtime.local/schemas/debug-artifact-materializations.schema.json",
+  "title": "DebugArtifactMaterializations",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "runtime_version",
+    "materialized_at",
+    "mode",
+    "records"
+  ],
+  "properties": {
+    "protocol_version": { "const": "agent.v1" },
+    "runtime_version": { "type": "string", "minLength": 1 },
+    "materialized_at": { "type": "string", "format": "date-time" },
+    "mode": {
+      "enum": ["local_files_only", "local_files_and_artifact_store_resolvers"]
+    },
+    "records": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/materialization_record" }
+    }
+  },
+  "$defs": {
+    "materialization_record": {
+      "type": "object",
+      "required": ["artifact_id", "status"],
+      "properties": {
+        "artifact_id": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["materialized", "skipped", "failed"] },
+        "source": {
+          "anyOf": [
+            { "enum": ["file_uri", "metadata.local_path", null] },
+            {
+              "type": "string",
+              "pattern": "^artifact_store:[A-Za-z0-9_.-]+$"
+            }
+          ]
+        },
+        "bundled_path": { "type": ["string", "null"], "minLength": 1 },
+        "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "blake3": {
+          "type": ["string", "null"],
+          "pattern": "^blake3:[a-f0-9]{64}$"
+        },
+        "reason": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

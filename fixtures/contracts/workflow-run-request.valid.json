@@ -1,0 +1,72 @@
+{
+  "protocol_version": "agent.v1",
+  "workflow_id": "workflow_daily_ops",
+  "user": {
+    "user_id": "user_123",
+    "metadata": {}
+  },
+  "scope": {
+    "type": "tenant",
+    "id": "tenant_acme"
+  },
+  "trigger": "queue",
+  "trigger_envelope": {
+    "source": "ops.jobs",
+    "id": "msg_001",
+    "received_at": "2026-06-28T09:12:31Z",
+    "payload": {
+      "job": "daily_ops"
+    },
+    "metadata": {}
+  },
+  "nodes": [
+    {
+      "node_id": "collect",
+      "agent_id": "collector",
+      "input": {
+        "account_id": "acct_001"
+      },
+      "compensation": {
+        "agent_id": "collector_compensator",
+        "strategy": "release_collected_snapshot",
+        "input": {
+          "account_id": "acct_001"
+        },
+        "metadata": {
+          "scope": "snapshot"
+        }
+      },
+      "metadata": {
+        "phase": "read"
+      }
+    },
+    {
+      "node_id": "summarize",
+      "agent_id": "summarizer",
+      "input": {
+        "format": "brief"
+      },
+      "input_mappings": [
+        {
+          "from_node": "collect",
+          "from_path": "/account_id",
+          "to_path": "/source/account_id"
+        },
+        {
+          "from_node": "collect",
+          "from_path": "/missing/region",
+          "to_path": "/source/region",
+          "transform": "string",
+          "default": "us"
+        }
+      ],
+      "depends_on": ["collect"],
+      "metadata": {
+        "phase": "write"
+      }
+    }
+  ],
+  "metadata": {
+    "tenant_id": "tenant_acme"
+  }
+}

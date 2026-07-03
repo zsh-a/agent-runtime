@@ -29,6 +29,7 @@
         "BeforeToolCall",
         "AfterToolCall",
         "BeforeProposalCreate",
+        "BeforeProposalApply",
         "AfterProposalDecision",
         "BeforeStateSave",
         "AfterStateSave",

@@ -61,8 +61,10 @@ impl TuiRuntime {
                 .await
                 .into_diagnostic()?,
         );
+        let mut tool_overrides = options.tool_overrides.clone();
+        tool_overrides.extend_tool_specs(loaded.tool_specs.clone());
         let services = Arc::new(CliServices::with_proposal_store(
-            options.tool_overrides.clone(),
+            tool_overrides,
             proposal_store,
         ));
         let runner_services: Arc<dyn AgentServices> = services.clone();
@@ -122,7 +124,10 @@ impl TuiRuntime {
                     run_id: None,
                     input,
                     user: None,
+                    scope: None,
                     trigger: agent_core::TriggerKind::Manual,
+                    trigger_envelope: None,
+                    workflow: None,
                     metadata: json!({
                         "source": "agent_tui",
                         "input_mode": input_mode,

@@ -20,22 +20,30 @@ pub use errors::{AgentError, AgentErrorKind, AgentErrorRecord, StoreError, ToolE
 pub use hooks::{HookEffect, HookSpec, PolicyDecision, PolicyDecisionKind};
 pub use ids::{ProposalId, RunId, SessionId, StepId, ThreadId, ToolCallId};
 pub use proposal::{
-    ApprovalDecision, ApprovalDecisionKind, ProposalApprovalPolicy, ProposalEnvelope,
-    ProposalKindSpec, ProposalStatus,
+    ApprovalDecision, ApprovalDecisionKind, ApprovalLevel, ProposalApprovalPolicy, ProposalDiff,
+    ProposalDiffOperation, ProposalEnvelope, ProposalKindSpec, ProposalStatus, ProposalWarning,
+    ProposalWarningSeverity, normalized_required_approver_count,
 };
 pub use run::{
-    AgentRunRecord, AgentRunResult, AgentRunStatus, AgentSpec, RunLease, RunRequest, RunScope,
-    ScheduleSpec, TriggerKind, UserContext,
+    AgentRunRecord, AgentRunResult, AgentRunStatus, AgentSpec, RunCompensation, RunDependency,
+    RunLease, RunRequest, RunScope, RunWorkflow, ScheduleSpec, TriggerEnvelope, TriggerKind,
+    UserContext, WorkflowInputMapping, WorkflowInputTransform, WorkflowRunNode,
+    WorkflowRunNodeCompensation, WorkflowRunNodeCompensationResult, WorkflowRunNodeResult,
+    WorkflowRunRequest, WorkflowRunResult,
 };
-pub use services::{Agent, AgentContext, AgentServices, ToolContext, ToolRegistry, TraceSink};
+pub use services::{
+    Agent, AgentContext, AgentServices, ArtifactPublishRequest, ToolContext, ToolRegistry,
+    TraceSink,
+};
 pub use session::{SessionRecord, StepKind, StepRecord, ThreadRecord};
 pub use stores::{
     AgentLockStore, AgentProposalStore, AgentRegistry, AgentRunStore, AgentSessionStore,
     AgentStateStore,
 };
 pub use trace::{
-    AgentEvent, AgentTrace, ArtifactRef, HookEvent, HookEventName, HookInvocationStatus, HookKind,
-    TraceEvent,
+    AgentEvent, AgentTrace, ArtifactKind, ArtifactRef, ArtifactStoreRef, HookEvent, HookEventName,
+    HookInvocationStatus, HookKind, RedactionClassification, TraceEvent, TraceSpan,
+    TraceUsageProviderSummary, TraceUsageSummary,
 };
 
 pub const PROTOCOL_VERSION: &str = "agent.v1";

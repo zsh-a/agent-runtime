@@ -8,6 +8,10 @@
       "headers": {
         "x-agent-runtime-source": "http-dev"
       },
+      "timeout_ms": 5000,
+      "max_retries": 1,
+      "retry_backoff_ms": 25,
+      "max_output_bytes": 65536,
       "tools": [
         {
           "name": "http_echo",

@@ -22,6 +22,24 @@ cargo run -p agent-cli -- validate \
   examples/business-integration/tool-source.json
 ```
 
+## Run the compatibility smoke check
+
+```bash
+cargo run -p agent-cli -- compat check \
+  --catalog examples/business-integration/catalog.json \
+  --tool-source examples/business-integration/tool-source.json \
+  --agent-id customer_summary_agent \
+  --run-input examples/business-integration/run-customer-summary.json \
+  --proposal-input examples/business-integration/run-followup-proposal.json \
+  --schema-root schemas \
+  --store /private/tmp/agent-runtime-business-example-store \
+  --debug-bundle-out /private/tmp/agent-runtime-business-example-bundle
+```
+
+The command validates the catalog and tool-source manifest, runs the read-only
+tool fixture, verifies that the proposal fixture creates a proposal envelope,
+and exports a redacted debug bundle.
+
 ## Run a tool-backed workflow
 
 ```bash

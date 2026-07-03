@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-runtime.local/schemas/workflow-run-result.schema.json",
+  "title": "WorkflowRunResult",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "workflow_id",
+    "status",
+    "started_at",
+    "finished_at",
+    "nodes"
+  ],
+  "properties": {
+    "protocol_version": { "const": "agent.v1" },
+    "workflow_id": { "type": "string", "minLength": 1 },
+    "status": { "$ref": "#/$defs/agent_run_status" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "root_run_id": { "type": ["string", "null"], "minLength": 1 },
+    "nodes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/workflow_run_node_result" }
+    },
+    "metadata": { "type": "object", "default": {} }
+  },
+  "$defs": {
+    "run_scope": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["global", "user", "tenant"] },
+        "id": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "global" } } },
+          "then": { "not": { "required": ["id"] } }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["user", "tenant"] } } },
+          "then": { "required": ["id"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "workflow_run_node_result": {
+      "type": "object",
+      "required": ["node_id", "agent_id", "status"],
+      "properties": {
+        "node_id": { "type": "string", "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/agent_run_status" },
+        "run_id": { "type": ["string", "null"], "minLength": 1 },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
+        },
+        "output": { "default": {} },
+        "error": {
+          "anyOf": [{ "$ref": "#/$defs/agent_error_record" }, { "type": "null" }]
+        },
+        "trace": {
+          "anyOf": [{ "$ref": "#/$defs/agent_trace" }, { "type": "null" }]
+        },
+        "compensation": {
+          "anyOf": [
+            { "$ref": "#/$defs/workflow_run_node_compensation_result" },
+            { "type": "null" }
+          ]
+        },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "workflow_run_node_compensation_result": {
+      "type": "object",
+      "required": ["agent_id", "status"],
+      "properties": {
+        "agent_id": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/agent_run_status" },
+        "run_id": { "type": ["string", "null"], "minLength": 1 },
+        "output": { "default": {} },
+        "error": {
+          "anyOf": [{ "$ref": "#/$defs/agent_error_record" }, { "type": "null" }]
+        },
+        "trace": {
+          "anyOf": [{ "$ref": "#/$defs/agent_trace" }, { "type": "null" }]
+        },
+        "metadata": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    },
+    "agent_trace": {
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "runtime_version",
+        "run_id",
+        "agent_id",
+        "agent_version",
+        "scope",
+        "started_at",
+        "finished_at",
+        "events"
+      ],
+      "properties": {
+        "protocol_version": { "const": "agent.v1" },
+        "runtime_version": { "type": "string" },
+        "run_id": { "type": "string", "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "agent_version": { "type": "string" },
+        "scope": { "$ref": "#/$defs/run_scope" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" },
+        "input": { "type": "object", "default": {} },
+        "output": { "type": "object", "default": {} },
+        "workflow": {
+          "anyOf": [{ "type": "object" }, { "type": "null" }]
+        },
+        "usage_summary": {
+          "anyOf": [{ "type": "object" }, { "type": "null" }]
+        },
+        "artifact_refs": {
+          "type": "array",
+          "items": { "type": "object" },
+          "default": []
+        },
+        "spans": {
+          "type": "array",
+          "items": { "type": "object" },
+          "default": []
+        },
+        "events": {
+          "type": "array",
+          "items": { "type": "object" },
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "agent_run_status": {
+      "enum": [
+        "running",
+        "completed",
+        "skipped",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "abandoned"
+      ]
+    },
+    "agent_error_record": {
+      "type": "object",
+      "required": ["code", "kind", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" },
+        "details": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

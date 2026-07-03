@@ -5,6 +5,14 @@
       "id": "local-dev",
       "command": "target/debug/agent",
       "args": ["dev-tool-host"],
+      "inherit_env": true,
+      "env": {
+        "AGENT_RUNTIME_TOOL_SOURCE": "local-dev"
+      },
+      "timeout_ms": 5000,
+      "max_retries": 1,
+      "retry_backoff_ms": 25,
+      "max_output_bytes": 65536,
       "tools": [
         {
           "name": "sourced_echo",

@@ -1,0 +1,15 @@
+{
+  "protocol_version": "agent.v1",
+  "id": "cron_summary",
+  "name": "Cron Summary",
+  "version": "0.1.0",
+  "schedule": {
+    "type": "cron",
+    "expression": "30 9 * * MON-FRI",
+    "timezone": "America/New_York"
+  },
+  "capabilities": ["scheduled_agent"],
+  "metadata": {
+    "domain": "debug"
+  }
+}

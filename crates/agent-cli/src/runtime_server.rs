@@ -3,10 +3,11 @@ use std::{collections::HashMap, sync::Arc};
 use agent_chat::{ChatEventStream, ChatResumeRequest, ChatTurnRequest, ChatTurnRunner};
 use agent_core::{
     AgentError, AgentProposalStore, AgentRunRecord, AgentRunResult, AgentRunStatus, AgentRunStore,
-    AgentRuntimeCatalog, AgentServices, AgentSessionStore, AgentTrace, ApprovalDecision,
-    ApprovalDecisionKind, ContextPolicy, PROTOCOL_VERSION, ProposalEnvelope, ProposalId,
-    ProposalStatus, RunId, RunRequest, SessionId, SessionRecord, ThreadId, ThreadRecord, ToolError,
-    TraceEvent,
+    AgentRuntimeCatalog, AgentServices, AgentSessionStore, AgentTrace, ApprovalLevel,
+    ContextPolicy, PROTOCOL_VERSION, ProposalDiff, ProposalEnvelope, ProposalId, ProposalWarning,
+    RunId, RunRequest, RunScope, RunWorkflow, SessionId, SessionRecord, ThreadId, ThreadRecord,
+    ToolError, TraceEvent, TriggerEnvelope, TriggerKind, UserContext, WorkflowRunRequest,
+    WorkflowRunResult,
 };
 use agent_runtime::{
     AGENT_RUN_TOOL_NAME, AgentRunToolContext, AgentRunner, HookManager, RunControl,
@@ -19,6 +20,7 @@ use futures::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use time::OffsetDateTime;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -28,19 +30,21 @@ use crate::{
     chat::{ChatLlmOptions, provider_from_options},
     metrics::{RuntimeMetricsSummary, build_metrics_summary},
     proposal::{
-        ProposalAction, ProposalActionResponse, ProposalDecisionResponse,
+        ProposalAction, ProposalActionResponse, ProposalDecisionInput, ProposalDecisionResponse,
         append_proposal_action_trace_event, append_proposal_created_trace_event,
-        append_proposal_decision_trace_event, execute_proposal_action_with_store,
-        parse_approval_decision, proposal_action_tool, proposal_kind_spec,
+        append_proposal_decision_trace_event, authorize_proposal_apply_policy,
+        authorize_proposal_create_policy, decide_proposal_with_store,
+        execute_proposal_action_with_store, parse_approval_decision, proposal_action_tool,
+        proposal_kind_spec,
     },
     replay::{ReplayExecutionReport, ReplayMode, replay_source_trace},
     session::{
         HttpSessionCreateParams, HttpSessionCreateResponse, HttpThreadForkParams,
         SessionShowReport, ThreadForkReport, ThreadWithSteps, ensure_thread,
-        record_chat_event_step, record_session_step, run_metadata,
+        record_chat_event_step, record_session_step,
     },
     tools::{CliServices, ToolOverrides},
-    trace_store::{read_store_trace, write_store_trace},
+    trace_store::{read_store_trace, write_store_trace, write_workflow_traces},
 };
 
 #[derive(Clone)]
@@ -93,6 +97,10 @@ pub(crate) struct HttpProposalCreateParams {
     pub(crate) summary: String,
     #[serde(default)]
     pub(crate) payload: Value,
+    #[serde(default)]
+    pub(crate) diffs: Vec<ProposalDiff>,
+    #[serde(default)]
+    pub(crate) warnings: Vec<ProposalWarning>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,20 +121,18 @@ pub(crate) struct HttpRunListParams {
 pub(crate) struct HttpProposalDecisionParams {
     pub(crate) decision: String,
     #[serde(default)]
+    pub(crate) approval_level: Option<ApprovalLevel>,
+    #[serde(default)]
+    pub(crate) decided_by: Option<String>,
+    #[serde(default)]
     pub(crate) comment: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AgentRunParams {
     pub(crate) agent_id: String,
-    #[serde(default)]
-    pub(crate) run_id: Option<String>,
-    #[serde(default)]
-    pub(crate) input: Value,
-    #[serde(default)]
-    pub(crate) session_id: Option<String>,
-    #[serde(default)]
-    pub(crate) thread_id: Option<String>,
+    #[serde(flatten)]
+    pub(crate) run: HttpAgentRunParams,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +145,18 @@ pub(crate) struct HttpAgentRunParams {
     pub(crate) session_id: Option<String>,
     #[serde(default)]
     pub(crate) thread_id: Option<String>,
+    #[serde(default = "default_agent_run_trigger")]
+    pub(crate) trigger: TriggerKind,
+    #[serde(default)]
+    pub(crate) trigger_envelope: Option<TriggerEnvelope>,
+    #[serde(default)]
+    pub(crate) workflow: Option<RunWorkflow>,
+    #[serde(default)]
+    pub(crate) user: Option<UserContext>,
+    #[serde(default)]
+    pub(crate) scope: Option<RunScope>,
+    #[serde(default)]
+    pub(crate) metadata: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,11 +165,39 @@ pub(crate) struct HttpToolCallParams {
     pub(crate) input: Value,
 }
 
+fn default_agent_run_trigger() -> TriggerKind {
+    TriggerKind::Manual
+}
+
+fn merge_run_metadata(metadata: Value, session_id: Option<&str>, thread_id: Option<&str>) -> Value {
+    let mut metadata = if metadata.is_object() {
+        metadata
+    } else {
+        json!({})
+    };
+    let object = metadata
+        .as_object_mut()
+        .expect("metadata was normalized to an object");
+    object.insert(
+        "session_id".to_owned(),
+        session_id
+            .map(|value| Value::String(value.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "thread_id".to_owned(),
+        thread_id
+            .map(|value| Value::String(value.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    metadata
+}
+
 impl RuntimeServer {
     pub(crate) async fn new(
         catalog_path: Utf8PathBuf,
         store_path: Utf8PathBuf,
-        tool_overrides: ToolOverrides,
+        mut tool_overrides: ToolOverrides,
         hooks: HookManager,
         context_policy: ContextPolicy,
         chat: ChatLlmOptions,
@@ -162,7 +208,9 @@ impl RuntimeServer {
             "initializing runtime server",
         );
         let mut catalog = read_catalog(catalog_path).await?;
-        catalog.tools.extend(tool_overrides.source_specs.clone());
+        let source_specs = tool_overrides.source_specs.clone();
+        tool_overrides.extend_tool_specs(catalog.tools.clone());
+        catalog.tools.extend(source_specs);
         ensure_agent_run_tool(&mut catalog.tools);
         let catalog = Arc::new(catalog);
         info!(
@@ -293,17 +341,27 @@ impl RuntimeServer {
     pub(crate) async fn run_agent(
         &self,
         agent_id: String,
-        run_id: Option<String>,
-        input: Value,
-        session_id: Option<String>,
-        thread_id: Option<String>,
+        params: HttpAgentRunParams,
     ) -> Result<AgentRunResponse> {
         let started_at = std::time::Instant::now();
+        let HttpAgentRunParams {
+            run_id,
+            input,
+            session_id,
+            thread_id,
+            trigger,
+            trigger_envelope,
+            workflow,
+            user,
+            scope,
+            metadata,
+        } = params;
         let run_id = match run_id {
             Some(value) if !value.trim().is_empty() => RunId(value),
             Some(_) => return Err(miette!("run_id cannot be empty")),
             None => RunId::new_v7(),
         };
+        let metadata = merge_run_metadata(metadata, session_id.as_deref(), thread_id.as_deref());
         let cancellation = CancellationToken::new();
         let (events, _) = broadcast::channel(256);
         {
@@ -324,6 +382,7 @@ impl RuntimeServer {
             agent_id = %agent_id,
             session_id = session_id.as_deref().unwrap_or("none"),
             thread_id = thread_id.as_deref().unwrap_or("none"),
+            trigger = ?trigger,
             input_bytes = serialized_value_len(&input),
             "server run_agent requested",
         );
@@ -335,9 +394,12 @@ impl RuntimeServer {
                     protocol_version: PROTOCOL_VERSION.to_owned(),
                     run_id: Some(run_id.clone()),
                     input,
-                    user: None,
-                    trigger: agent_core::TriggerKind::Manual,
-                    metadata: run_metadata(session_id.as_deref(), thread_id.as_deref()),
+                    user,
+                    scope,
+                    trigger,
+                    trigger_envelope,
+                    workflow,
+                    metadata,
                 },
                 RunControl {
                     cancellation,
@@ -362,16 +424,64 @@ impl RuntimeServer {
         })
     }
 
+    pub(crate) async fn run_workflow(
+        &self,
+        request: WorkflowRunRequest,
+    ) -> Result<WorkflowRunResult> {
+        info!(
+            workflow_id = %request.workflow_id,
+            node_count = request.nodes.len(),
+            trigger = ?request.trigger,
+            "server workflow run requested",
+        );
+        let result = self.runner.run_workflow(request).await.into_diagnostic()?;
+        let trace_count = write_workflow_traces(&self.store_path, &result).await?;
+        info!(
+            workflow_id = %result.workflow_id,
+            status = ?result.status,
+            trace_count,
+            "server workflow run completed",
+        );
+        Ok(result)
+    }
+
     pub(crate) async fn cancel_run(&self, run_id: RunId) -> Result<CancelRunResponse> {
         let active = self.active_runs.lock().await.get(&run_id.0).cloned();
 
         if let Some(active) = active {
+            let persisted = self
+                .persist_run_cancellation_request(&run_id, "http")
+                .await?;
             active.cancellation.cancel();
             return Ok(CancelRunResponse {
                 cancellation_requested: true,
-                message: "cancellation requested".to_owned(),
+                message: if persisted.is_some() {
+                    "cancellation requested and persisted".to_owned()
+                } else {
+                    "cancellation requested; run record is not persisted yet".to_owned()
+                },
                 run_id: run_id.0,
                 status: Some(AgentRunStatus::Running),
+            });
+        }
+
+        if let Some(status) = self
+            .persist_run_cancellation_request(&run_id, "http")
+            .await?
+        {
+            if status == AgentRunStatus::Running {
+                return Ok(CancelRunResponse {
+                    cancellation_requested: true,
+                    message: "cancellation intent persisted".to_owned(),
+                    run_id: run_id.0,
+                    status: Some(status),
+                });
+            }
+            return Ok(CancelRunResponse {
+                cancellation_requested: false,
+                message: "run is not active".to_owned(),
+                run_id: run_id.0,
+                status: Some(status),
             });
         }
 
@@ -382,6 +492,22 @@ impl RuntimeServer {
             run_id: run_id.0,
             status: Some(run.status),
         })
+    }
+
+    async fn persist_run_cancellation_request(
+        &self,
+        run_id: &RunId,
+        requested_by: &str,
+    ) -> Result<Option<AgentRunStatus>> {
+        let Some(mut run) = self.run_store.get_run(run_id).await.into_diagnostic()? else {
+            return Ok(None);
+        };
+        let status = run.status.clone();
+        if status == AgentRunStatus::Running {
+            run.request_cancellation(OffsetDateTime::now_utc(), Some(requested_by.to_owned()));
+            self.run_store.update_run(run).await.into_diagnostic()?;
+        }
+        Ok(Some(status))
     }
 
     fn persist_chat_steps(
@@ -514,7 +640,7 @@ impl RuntimeServer {
             "server create_proposal requested",
         );
         let kind_spec = proposal_kind_spec(&self.catalog, &params.kind)?;
-        let proposal = ProposalEnvelope::new(
+        let mut proposal = ProposalEnvelope::new(
             RunId(params.run_id),
             params.agent_id,
             params.kind,
@@ -522,6 +648,9 @@ impl RuntimeServer {
             params.payload,
         )
         .with_kind_policy(kind_spec);
+        proposal.diffs = params.diffs;
+        proposal.warnings = params.warnings;
+        authorize_proposal_create_policy(&self.hooks, &self.store_path, &proposal).await?;
         self.proposal_store
             .create_proposal(proposal.clone())
             .await
@@ -660,24 +789,17 @@ impl RuntimeServer {
         );
         let mut proposal = self.get_proposal(proposal_id.clone()).await?;
         let decision = parse_approval_decision(&params.decision)?;
-        proposal.status = match decision {
-            ApprovalDecisionKind::Approve => ProposalStatus::Approved,
-            ApprovalDecisionKind::Deny => ProposalStatus::Denied,
-        };
-        self.proposal_store
-            .update_proposal(proposal.clone())
-            .await
-            .into_diagnostic()?;
-        let response = ProposalDecisionResponse {
-            decision: ApprovalDecision {
-                protocol_version: PROTOCOL_VERSION.to_owned(),
-                proposal_id,
+        let response = decide_proposal_with_store(
+            self.proposal_store.as_ref(),
+            &mut proposal,
+            ProposalDecisionInput {
                 decision,
-                decided_at: time::OffsetDateTime::now_utc(),
+                approval_level: params.approval_level,
+                decided_by: params.decided_by,
                 comment: params.comment,
             },
-            proposal,
-        };
+        )
+        .await?;
         append_proposal_decision_trace_event(&self.store_path, &response).await?;
         Ok(response)
     }
@@ -710,6 +832,8 @@ impl RuntimeServer {
         );
         let mut proposal = self.get_proposal(proposal_id).await?;
         let tool = proposal_action_tool(&self.catalog, &proposal.kind)?;
+        authorize_proposal_apply_policy(&self.hooks, &self.store_path, &proposal, &tool, action)
+            .await?;
         let response = execute_proposal_action_with_store(
             self.proposal_store.as_ref(),
             self.services.as_ref(),

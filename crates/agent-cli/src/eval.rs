@@ -244,7 +244,7 @@ pub(crate) async fn create_eval_from_run(
 async fn run_eval(
     eval_file: Utf8PathBuf,
     store_path: Utf8PathBuf,
-    tool_overrides: ToolOverrides,
+    mut tool_overrides: ToolOverrides,
     update_golden: bool,
 ) -> Result<EvalReport> {
     let bytes = fs_err::tokio::read(&eval_file)
@@ -259,6 +259,7 @@ async fn run_eval(
         Some(_) => Some(build_prompt_manifest(&catalog, Some(&case.agent_id))?),
         None => None,
     };
+    tool_overrides.extend_tool_specs(catalog.tools.clone());
     let registry = registry_from_catalog(&catalog);
     let trace_store_path = store_path.clone();
     let store = Arc::new(FileRunStore::new(store_path).await.into_diagnostic()?);
@@ -285,7 +286,10 @@ async fn run_eval(
                 run_id: None,
                 input: case.input.clone(),
                 user: None,
+                scope: None,
                 trigger: TriggerKind::Manual,
+                trigger_envelope: None,
+                workflow: None,
                 metadata: json!({"eval_id": case.id}),
             },
         )
@@ -776,6 +780,7 @@ fn normalize_volatile_json(value: &mut Value) {
                 "expires_at",
                 "duration_ms",
                 "runtime_version",
+                "spans",
             ] {
                 map.remove(key);
             }

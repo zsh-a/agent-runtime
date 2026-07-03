@@ -50,6 +50,24 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "expression", "timezone"],
+          "properties": {
+            "type": { "const": "cron" },
+            "expression": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Five-field cron expression: minute hour day-of-month month day-of-week."
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "description": "UTC, Z, Etc/UTC, an IANA timezone such as America/New_York, or a fixed offset such as +08:00."
+            }
+          },
+          "additionalProperties": false
         }
       ]
     }

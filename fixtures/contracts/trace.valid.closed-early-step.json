@@ -4,6 +4,9 @@
   "run_id": "run_018f0000-0000-7000-8000-000000000001",
   "agent_id": "execution_review",
   "agent_version": "0.1.0",
+  "scope": {
+    "type": "global"
+  },
   "started_at": "2026-06-28T09:12:31Z",
   "finished_at": "2026-06-28T09:12:32Z",
   "input": {
@@ -22,6 +25,21 @@
       "message": "agent runtime tool-call budget exhausted"
     }
   },
+  "spans": [
+    {
+      "span_id": "span_61e9d637568cf04e72c42fd89fd52558f0a9c67238204cb8cd9619c4311deccb",
+      "name": "agent.run",
+      "started_at": "2026-06-28T09:12:31Z",
+      "finished_at": "2026-06-28T09:12:32Z",
+      "duration_ms": 1000,
+      "status": "failed",
+      "attributes": {
+        "run_id": "run_018f0000-0000-7000-8000-000000000001",
+        "agent_id": "execution_review",
+        "status": "failed"
+      }
+    }
+  ],
   "events": [
     {
       "kind": "run_started",

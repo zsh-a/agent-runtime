@@ -16,8 +16,14 @@
       "type": "string",
       "enum": ["approve", "deny"]
     },
+    "approval_level": {
+      "type": "string",
+      "enum": ["none", "single_user", "multi_approver", "admin"],
+      "default": "single_user"
+    },
+    "decided_by": { "type": ["string", "null"], "minLength": 1 },
     "decided_at": { "type": "string", "format": "date-time" },
-    "comment": { "type": "string" }
+    "comment": { "type": ["string", "null"] }
   },
   "additionalProperties": false
 }

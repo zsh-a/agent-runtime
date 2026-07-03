@@ -208,13 +208,18 @@ pub enum ScheduleSpec {
 }
 ```
 
-初期可以只支持：
+当前实现支持：
 
 - manual
 - interval
 - daily preferred hour
+- five-field cron expressions with `UTC`/`Z`, IANA timezone names such as
+  `America/New_York`, and fixed-offset timezones such as `+08:00`
+- `RunRequest` trigger kinds for `webhook` and `queue`, with a
+  `trigger_envelope` carrying source, optional event/message id, received time,
+  payload, and metadata
 
-后续再加 cron。
+后续再补具体的 queue consumer、webhook registry 和 distributed scheduler。
 
 ### 4.2 Scheduler
 
@@ -1164,7 +1169,7 @@ agent:{agent_id}:scope:{scope_id}
 每次 run 都应该有 idempotency key。
 
 ```text
-idempotency_key = hash(agent_id + scope + trigger_kind + scheduled_for)
+idempotency_key = hash(agent_id + scope + trigger_kind + scheduled_for + trigger_envelope.source/id)
 ```
 
 用途：
@@ -1307,6 +1312,8 @@ Approval decision：
 pub struct ApprovalDecision {
     pub proposal_id: String,
     pub decision: ApprovalDecisionKind,
+    pub approval_level: ApprovalLevel,
+    pub decided_by: Option<String>,
     pub decided_at: DateTime<Utc>,
     pub comment: Option<String>,
 }
@@ -1950,6 +1957,7 @@ SubagentStop
 BeforeToolCall
 AfterToolCall
 BeforeProposalCreate
+BeforeProposalApply
 AfterProposalDecision
 BeforeStateSave
 AfterStateSave
