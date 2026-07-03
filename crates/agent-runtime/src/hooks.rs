@@ -2,7 +2,7 @@ use std::{future::Future, pin::Pin, process::Stdio, sync::Arc, time::Duration};
 
 use agent_core::{
     AgentError, HookEffect, HookEvent, HookEventName, HookInvocationStatus, HookKind, HookSpec,
-    PolicyDecision, PolicyDecisionKind, PROTOCOL_VERSION, RunId, TraceEvent, TraceSink,
+    PROTOCOL_VERSION, PolicyDecision, PolicyDecisionKind, RunId, TraceEvent, TraceSink,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -112,7 +112,14 @@ impl HookManager {
     ) -> Result<(), AgentError> {
         for hook in self.matching(event, HookEffect::Observe) {
             let outcome = self
-                .invoke(hook, event, run_id.clone(), agent_id.clone(), input.clone(), trace)
+                .invoke(
+                    hook,
+                    event,
+                    run_id.clone(),
+                    agent_id.clone(),
+                    input.clone(),
+                    trace,
+                )
                 .await;
             if outcome.is_err() {
                 continue;
@@ -131,7 +138,14 @@ impl HookManager {
     ) -> Result<PolicyDecision, AgentError> {
         for hook in self.matching(event, HookEffect::Policy) {
             let output = self
-                .invoke(hook, event, run_id.clone(), agent_id.clone(), input.clone(), trace)
+                .invoke(
+                    hook,
+                    event,
+                    run_id.clone(),
+                    agent_id.clone(),
+                    input.clone(),
+                    trace,
+                )
                 .await?;
             let decision = parse_policy_decision(output)?;
             if decision.is_denied() {
@@ -144,7 +158,9 @@ impl HookManager {
     fn matching(&self, event: HookEventName, effect: HookEffect) -> Vec<&HookRegistration> {
         self.hooks
             .iter()
-            .filter(|hook| hook.spec.enabled && hook.spec.event == event && hook.spec.effect == effect)
+            .filter(|hook| {
+                hook.spec.enabled && hook.spec.event == event && hook.spec.effect == effect
+            })
             .collect()
     }
 
@@ -222,7 +238,9 @@ struct ProcessHook {
 impl HookHandler for ProcessHook {
     async fn handle(&self, invocation: HookInvocation) -> Result<Value, AgentError> {
         let Some((program, args)) = self.command.split_first() else {
-            return Err(AgentError::validation("process hook command cannot be empty"));
+            return Err(AgentError::validation(
+                "process hook command cannot be empty",
+            ));
         };
         let mut child = TokioCommand::new(program)
             .args(args)
@@ -239,10 +257,9 @@ impl HookHandler for ProcessHook {
                 "input": invocation.input,
             }))
             .map_err(|error| AgentError::internal(error.to_string()))?;
-            stdin
-                .write_all(&input)
-                .await
-                .map_err(|error| AgentError::internal(format!("failed to write hook input: {error}")))?;
+            stdin.write_all(&input).await.map_err(|error| {
+                AgentError::internal(format!("failed to write hook input: {error}"))
+            })?;
         }
         let output = tokio::time::timeout(self.timeout, child.wait_with_output())
             .await

@@ -1,0 +1,70 @@
+{
+  "version": "tool_source.v1",
+  "sources": [
+    {
+      "id": "local-shell",
+      "protocol": "jsonl_tool_call",
+      "command": "target/debug/agent",
+      "args": ["shell-tool-host"],
+      "tools": [
+        {
+          "name": "shell.exec",
+          "description": "Execute a shell command in a bounded local workspace directory. Use only when direct command execution is necessary.",
+          "input_schema": {
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+              "command": { "type": "string", "minLength": 1 },
+              "cwd": {
+                "type": "string",
+                "description": "Optional working directory relative to the shell host startup directory."
+              },
+              "timeout_ms": { "type": "integer", "minimum": 1, "default": 10000 },
+              "max_output_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 65536
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            },
+            "additionalProperties": false
+          },
+          "output_schema": {
+            "type": "object",
+            "required": [
+              "command",
+              "cwd",
+              "exit_code",
+              "timed_out",
+              "duration_ms",
+              "stdout",
+              "stderr",
+              "stdout_truncated",
+              "stderr_truncated"
+            ],
+            "properties": {
+              "command": { "type": "string" },
+              "cwd": { "type": "string" },
+              "exit_code": { "type": ["integer", "null"] },
+              "timed_out": { "type": "boolean" },
+              "duration_ms": { "type": "integer", "minimum": 0 },
+              "stdout": { "type": "string" },
+              "stderr": { "type": "string" },
+              "stdout_truncated": { "type": "boolean" },
+              "stderr_truncated": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          },
+          "risk": "high",
+          "metadata": {
+            "source": "local-shell",
+            "protocol": "jsonl_tool_call"
+          }
+        }
+      ]
+    }
+  ]
+}

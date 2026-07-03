@@ -188,7 +188,11 @@ async fn runner_observe_hooks_record_invocations() {
     let state_store = agent_store::InMemoryStateStore::shared();
     let services = Arc::new(NoopServices { state_store });
     let hooks = HookManager::new(vec![HookRegistration::native(
-        hook_spec("record_run_start", HookEventName::RunStart, HookEffect::Observe),
+        hook_spec(
+            "record_run_start",
+            HookEventName::RunStart,
+            HookEffect::Observe,
+        ),
         Arc::new(AllowHook),
     )]);
     let runner = AgentRunner::new(registry, run_store, services).with_hooks(hooks);
@@ -216,7 +220,11 @@ async fn policy_hook_can_deny_state_save() {
     let state_store = agent_store::InMemoryStateStore::shared();
     let services = Arc::new(NoopServices { state_store });
     let hooks = HookManager::new(vec![HookRegistration::native(
-        hook_spec("deny_state_save", HookEventName::BeforeStateSave, HookEffect::Policy),
+        hook_spec(
+            "deny_state_save",
+            HookEventName::BeforeStateSave,
+            HookEffect::Policy,
+        ),
         Arc::new(DenyHook),
     )]);
     let runner = AgentRunner::new(registry, run_store, services).with_hooks(hooks);

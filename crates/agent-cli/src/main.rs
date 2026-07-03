@@ -23,6 +23,7 @@ mod replay;
 mod runtime_server;
 mod server;
 mod session;
+mod shell_tool_host;
 mod stdio_protocol;
 mod tools;
 mod trace_store;
@@ -44,6 +45,7 @@ use registry::load_registry;
 use replay::{ReplayMode, ReplayTraceOptions, replay_trace};
 use runtime_server::RuntimeServer;
 use server::{serve_http, serve_stdio};
+use shell_tool_host::run_shell_tool_host;
 use tools::tool_overrides;
 use trace_store::read_json;
 use tui::{TuiOptions, run_tui};
@@ -394,6 +396,8 @@ enum Command {
     DevMcpServer,
     #[command(hide = true)]
     DevScoreHook,
+    #[command(hide = true)]
+    ShellToolHost,
 }
 
 #[derive(Debug, Subcommand)]
@@ -894,6 +898,7 @@ async fn main() -> Result<()> {
         Command::DevToolHost => run_dev_tool_host().await?,
         Command::DevMcpServer => run_dev_mcp_server().await?,
         Command::DevScoreHook => run_dev_score_hook().await?,
+        Command::ShellToolHost => run_shell_tool_host().await?,
     }
     Ok(())
 }

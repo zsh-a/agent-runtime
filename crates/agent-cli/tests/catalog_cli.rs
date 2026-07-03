@@ -1231,6 +1231,70 @@ fn tool_cli_calls_http_json_tool_source_manifest() {
 }
 
 #[test]
+fn tool_cli_calls_shell_tool_source_manifest() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source_path = dir.path().join("shell-tool-source.json");
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    std::fs::write(
+        &source_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": "tool_source.v1",
+            "sources": [{
+                "id": "local-shell",
+                "protocol": "jsonl_tool_call",
+                "command": agent_bin.to_str().expect("utf8 agent bin"),
+                "args": ["shell-tool-host"],
+                "tools": [{
+                    "name": "shell.exec",
+                    "description": "Execute a shell command in a bounded local workspace directory.",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["command"],
+                        "properties": {
+                            "command": {"type": "string", "minLength": 1},
+                            "cwd": {"type": "string"},
+                            "timeout_ms": {"type": "integer", "minimum": 1},
+                            "max_output_bytes": {"type": "integer", "minimum": 1},
+                            "env": {
+                                "type": "object",
+                                "additionalProperties": {"type": "string"}
+                            }
+                        },
+                        "additionalProperties": false
+                    },
+                    "output_schema": {"type": "object"},
+                    "risk": "high",
+                    "metadata": {"source": "local-shell", "protocol": "jsonl_tool_call"}
+                }]
+            }]
+        }))
+        .expect("manifest encodes"),
+    )
+    .expect("manifest writes");
+
+    let output = agent_cmd()
+        .args([
+            "tool",
+            "call",
+            "shell.exec",
+            "--tool-source",
+            source_path.to_str().expect("utf8 source path"),
+            "--input-json",
+            r#"{"command":"printf shell-ok","timeout_ms":5000}"#,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output: Value = serde_json::from_slice(&output).expect("tool output is JSON");
+    assert_eq!(output["exit_code"], 0);
+    assert_eq!(output["timed_out"], false);
+    assert_eq!(output["stdout"], "shell-ok");
+    assert_eq!(output["stderr"], "");
+}
+
+#[test]
 fn tool_cli_rejects_tools_missing_from_catalog() {
     let agent_bin = assert_cmd::cargo::cargo_bin("agent");
     agent_cmd()

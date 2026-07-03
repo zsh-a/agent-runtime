@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentError, AgentEvent, AgentServices, AgentStateStore, HookEventName, PROTOCOL_VERSION,
-    ProposalEnvelope, RunId, RunRequest, ToolContext, ToolError, ToolRegistry, TraceEvent,
-    TraceSink, TriggerKind, UserContext,
+    AgentError, AgentEvent, AgentServices, AgentStateStore, HookEventName, ProposalEnvelope, RunId,
+    ToolContext, ToolError, ToolRegistry, TraceEvent, TraceSink, UserContext,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::{RunControl, hooks::HookManager, runner::AgentRunner};
-
-const SUBAGENT_TOOL_NAME: &str = "agent.run";
+use crate::{
+    AGENT_RUN_TOOL_NAME, AgentRunToolContext, call_agent_run_tool, hooks::HookManager,
+    runner::AgentRunner,
+};
 
 pub struct BasicAgentServices {
     agent_id: String,
@@ -89,7 +89,7 @@ impl AgentServices for BasicAgentServices {
 #[async_trait]
 impl AgentServices for TracedAgentServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
-        if name == SUBAGENT_TOOL_NAME {
+        if name == AGENT_RUN_TOOL_NAME {
             return self.call_subagent(input).await;
         }
         let started_at = std::time::Instant::now();
@@ -523,139 +523,23 @@ impl TracedAgentServices {
         let Some(runner) = &self.subagent_runner else {
             return Err(ToolError::policy_denied(
                 "agent.run is not available outside an AgentRunner",
-                json!({"tool_name": SUBAGENT_TOOL_NAME}),
+                json!({"tool_name": AGENT_RUN_TOOL_NAME}),
             ));
         };
-        let agent_id = input
-            .get("agent_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                ToolError::policy_denied(
-                    "agent.run requires a non-empty agent_id",
-                    json!({"tool_name": SUBAGENT_TOOL_NAME}),
-                )
-            })?;
-        let run_id = input
-            .get("run_id")
-            .and_then(Value::as_str)
-            .map(|value| RunId(value.to_owned()));
-        let child_input = input.get("input").cloned().unwrap_or_else(|| json!({}));
-        let mut metadata = json!({
-            "subagent": true,
-            "parent_run_id": self.run_id.0.clone(),
-            "parent_agent_id": self.agent_id.clone(),
-        });
-        if let Some(extra) = input.get("metadata").and_then(Value::as_object)
-            && let Some(object) = metadata.as_object_mut()
-        {
-            for (key, value) in extra {
-                object.insert(key.clone(), value.clone());
-            }
-        }
-        let hook_input = json!({
-            "run_id": self.run_id.0.clone(),
-            "agent_id": self.agent_id.clone(),
-            "subagent_id": agent_id,
-            "input": child_input,
-            "metadata": metadata,
-        });
-        let decision = self
-            .hooks
-            .authorize(
-                HookEventName::SubagentStart,
-                Some(self.run_id.clone()),
-                Some(self.agent_id.clone()),
-                hook_input.clone(),
-                self.trace.as_ref(),
-            )
-            .await
-            .map_err(ToolError::from_agent_error)?;
-        if decision.is_denied() {
-            return Err(ToolError::policy_denied(
-                decision
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| format!("subagent '{agent_id}' denied by policy hook")),
-                json!({
-                    "decision": decision,
-                    "event": "SubagentStart",
-                    "subagent_id": agent_id,
-                }),
-            ));
-        }
-        self.hooks
-            .observe(
-                HookEventName::SubagentStart,
-                Some(self.run_id.clone()),
-                Some(self.agent_id.clone()),
-                hook_input.clone(),
-                self.trace.as_ref(),
-            )
-            .await
-            .map_err(ToolError::from_agent_error)?;
-        self.trace
-            .emit(TraceEvent::new(
-                "subagent_started",
-                json!({
-                    "run_id": self.run_id.0.clone(),
-                    "agent_id": self.agent_id.clone(),
-                    "subagent_id": agent_id,
-                }),
-            ))
-            .await
-            .map_err(ToolError::from_agent_error)?;
-        let outcome = runner
-            .run_once_with_control(
-                &agent_id,
-                RunRequest {
-                    protocol_version: PROTOCOL_VERSION.to_owned(),
-                    run_id,
-                    input: child_input.clone(),
-                    user: self.user.clone(),
-                    trigger: TriggerKind::Manual,
-                    metadata: metadata.clone(),
-                },
-                RunControl {
-                    cancellation: self.cancellation.clone(),
-                    trace_events: None,
-                },
-            )
-            .await
-            .map_err(ToolError::from_agent_error)?;
-        self.trace
-            .emit(TraceEvent::new(
-                "subagent_finished",
-                json!({
-                    "run_id": self.run_id.0.clone(),
-                    "agent_id": self.agent_id.clone(),
-                    "subagent_id": agent_id,
-                    "subagent_run_id": outcome.result.run_id.0.clone(),
-                    "status": outcome.result.status.clone(),
-                }),
-            ))
-            .await
-            .map_err(ToolError::from_agent_error)?;
-        self.hooks
-            .observe(
-                HookEventName::SubagentStop,
-                Some(self.run_id.clone()),
-                Some(self.agent_id.clone()),
-                json!({
-                    "run_id": self.run_id.0.clone(),
-                    "agent_id": self.agent_id.clone(),
-                    "subagent_id": agent_id,
-                    "result": outcome.result.clone(),
-                }),
-                self.trace.as_ref(),
-            )
-            .await
-            .map_err(ToolError::from_agent_error)?;
-        Ok(json!({
-            "result": outcome.result,
-            "trace": outcome.trace,
-        }))
+        call_agent_run_tool(
+            runner,
+            input,
+            AgentRunToolContext {
+                parent_run_id: Some(self.run_id.clone()),
+                parent_agent_id: Some(self.agent_id.clone()),
+                user: self.user.clone(),
+                metadata: json!({}),
+                trace: Some(self.trace.clone()),
+                hooks: self.hooks.clone(),
+                cancellation: self.cancellation.clone(),
+            },
+        )
+        .await
     }
 }
 

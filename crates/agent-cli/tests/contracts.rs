@@ -110,6 +110,10 @@ fn committed_fixtures_match_json_schemas() {
         "fixtures/contracts/http-tool-source.example.json",
     );
     assert_valid(
+        "schemas/tool-source-manifest.schema.json",
+        "fixtures/contracts/shell-tool-source.example.json",
+    );
+    assert_valid(
         "schemas/hook-event.schema.json",
         "fixtures/contracts/hook-event.valid.json",
     );

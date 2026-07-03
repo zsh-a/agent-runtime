@@ -33,8 +33,8 @@ mod tests {
         TraceEvent,
     };
     use agent_llm::{
-        LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmProvider, LlmRequest,
-        LlmMessage, LlmResponse, LlmRole, LlmUsage, MockLlmProvider, user_message,
+        LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmMessage, LlmProvider,
+        LlmRequest, LlmResponse, LlmRole, LlmUsage, MockLlmProvider, user_message,
     };
     use async_trait::async_trait;
     use futures::{StreamExt, stream};
@@ -384,7 +384,12 @@ mod tests {
 
         let request = chat_turn_prepare_llm_request(&mut state).expect("context prepares");
 
-        assert!(state.context_snapshot.as_ref().is_some_and(|snapshot| snapshot.compacted));
+        assert!(
+            state
+                .context_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.compacted)
+        );
         assert!(state.compaction.is_some());
         assert_eq!(request.messages[0].role, LlmRole::System);
         assert_eq!(

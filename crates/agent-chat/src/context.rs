@@ -35,7 +35,12 @@ pub(crate) fn prepare_llm_request(state: &mut ChatTurnState) -> Result<PreparedC
     let token_estimate = total_tokens(&blocks);
     let content_hash = blocks_hash(&blocks);
     let snapshot = ContextSnapshot::new(
-        format!("ctx_{}", content_hash.strip_prefix("blake3:").unwrap_or(&content_hash)),
+        format!(
+            "ctx_{}",
+            content_hash
+                .strip_prefix("blake3:")
+                .unwrap_or(&content_hash)
+        ),
         content_hash.clone(),
         token_estimate,
         budget,
@@ -71,7 +76,9 @@ pub(crate) fn prepare_llm_request(state: &mut ChatTurnState) -> Result<PreparedC
         object.insert(
             "context_snapshot".to_owned(),
             serde_json::to_value(snapshot_summary(&snapshot)).map_err(|error| {
-                ChatError::validation(format!("failed to encode context snapshot metadata: {error}"))
+                ChatError::validation(format!(
+                    "failed to encode context snapshot metadata: {error}"
+                ))
             })?,
         );
         if let Some(compaction) = &compaction {
@@ -184,7 +191,11 @@ fn compact_messages(
         }),
     });
     compacted.extend_from_slice(preserved);
-    (compacted, u32::try_from(omit_count).unwrap_or(u32::MAX), Some(summary))
+    (
+        compacted,
+        u32::try_from(omit_count).unwrap_or(u32::MAX),
+        Some(summary),
+    )
 }
 
 fn summarize_messages(messages: &[LlmMessage]) -> String {
@@ -236,9 +247,9 @@ fn effective_input_budget(policy: &ContextPolicy) -> u32 {
 }
 
 fn total_tokens(blocks: &[ContextBlock]) -> u32 {
-    blocks
-        .iter()
-        .fold(0_u32, |total, block| total.saturating_add(block.token_estimate))
+    blocks.iter().fold(0_u32, |total, block| {
+        total.saturating_add(block.token_estimate)
+    })
 }
 
 fn blocks_hash(blocks: &[ContextBlock]) -> String {

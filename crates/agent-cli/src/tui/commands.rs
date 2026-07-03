@@ -4,12 +4,15 @@ use agent_chat::{
     ChatToolExecution, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner,
 };
 use agent_core::{
-    AgentRegistry, AgentRunStore, AgentServices, PROTOCOL_VERSION, RunId, RunRequest, ToolRisk,
-    ToolSpec,
+    AgentError, AgentRegistry, AgentRunStore, AgentServices, AgentTrace, PROTOCOL_VERSION, RunId,
+    RunRequest, ToolError, ToolRisk, ToolSpec,
 };
 use agent_llm::{LlmMessage, LlmRole, user_message};
-use agent_runtime::AgentRunner;
+use agent_runtime::{
+    AGENT_RUN_TOOL_NAME, AgentRunToolContext, AgentRunner, agent_run_tool_spec, call_agent_run_tool,
+};
 use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
+use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use futures::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
@@ -17,6 +20,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     catalog::{load_catalog_registry, read_catalog},
@@ -184,7 +188,7 @@ async fn tool_call_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let (name, json_input) = split_name_and_json(rest, "tool name")?;
     let input = parse_json_or_default(json_input, "tool input")?;
     state.push_user_message(format!("/tool {name} {}", compact_json(&input)));
-    let services = CliServices::new(state.options.tool_overrides.clone());
+    let services = tui_tool_services(&state.options, None).await?;
     let output = services
         .call_tool(&name, input)
         .await
@@ -195,15 +199,7 @@ async fn tool_call_command(state: &mut TuiState, rest: &str) -> Result<()> {
 
 async fn run_chat_turn(state: &mut TuiState, agent_id: &str, text: &str) -> Result<()> {
     let provider = provider_from_options(&state.options.chat)?;
-    let proposal_store = Arc::new(
-        FileProposalStore::new(state.options.store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let services = Arc::new(CliServices::with_proposal_store(
-        state.options.tool_overrides.clone(),
-        proposal_store,
-    ));
+    let services = tui_tool_services(&state.options, Some(agent_id.to_owned())).await?;
     let runner = ChatTurnRunner::new(provider, services);
     let user = user_message(text);
     state.chat_messages.push(user.clone());
@@ -266,15 +262,7 @@ async fn run_natural_language_stream(
 ) -> Result<()> {
     let agent_id = default_agent_id_from_options(&options).await?;
     let provider = provider_from_options(&options.chat)?;
-    let proposal_store = Arc::new(
-        FileProposalStore::new(options.store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let services = Arc::new(CliServices::with_proposal_store(
-        options.tool_overrides.clone(),
-        proposal_store,
-    ));
+    let services = tui_tool_services(&options, Some(agent_id.clone())).await?;
     let runner = ChatTurnRunner::new(provider, services);
     let request = ChatTurnRequest {
         protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -526,6 +514,9 @@ async fn chat_tools_from_options(options: &super::data::TuiOptions) -> Result<Ve
         None => Vec::new(),
     };
     tools.extend(options.tool_overrides.source_specs.clone());
+    if !tools.iter().any(|tool| tool.name == AGENT_RUN_TOOL_NAME) {
+        tools.push(agent_run_tool_spec());
+    }
     if !tools.iter().any(|tool| tool.name == "echo") {
         tools.push(ToolSpec {
             name: "echo".to_owned(),
@@ -629,18 +620,137 @@ async fn default_agent_id_from_options(options: &super::data::TuiOptions) -> Res
 }
 
 async fn load_active_registry(state: &TuiState) -> Result<Arc<dyn AgentRegistry>> {
-    match &state.options.catalog_path {
+    load_active_registry_from_options(&state.options).await
+}
+
+async fn load_active_registry_from_options(
+    options: &super::data::TuiOptions,
+) -> Result<Arc<dyn AgentRegistry>> {
+    match &options.catalog_path {
         Some(path) => {
             let registry: Arc<dyn AgentRegistry> = load_catalog_registry(path.clone()).await?;
             Ok(registry)
         }
         None => {
-            let registry: Arc<dyn AgentRegistry> =
-                load_registry(state.options.registry_path.clone())
-                    .await?
-                    .into_agent_registry();
+            let registry: Arc<dyn AgentRegistry> = load_registry(options.registry_path.clone())
+                .await?
+                .into_agent_registry();
             Ok(registry)
         }
+    }
+}
+
+async fn tui_tool_services(
+    options: &super::data::TuiOptions,
+    parent_agent_id: Option<String>,
+) -> Result<Arc<dyn AgentServices>> {
+    let proposal_store = Arc::new(
+        FileProposalStore::new(options.store_path.clone())
+            .await
+            .into_diagnostic()?,
+    );
+    let inner = Arc::new(CliServices::with_proposal_store(
+        options.tool_overrides.clone(),
+        proposal_store,
+    ));
+    let registry = load_active_registry_from_options(options).await?;
+    let store = Arc::new(
+        FileRunStore::new(options.store_path.clone())
+            .await
+            .into_diagnostic()?,
+    );
+    let lock_store = Arc::new(
+        FileLockStore::new(options.store_path.clone())
+            .await
+            .into_diagnostic()?,
+    );
+    let runner = AgentRunner::new(registry, store, inner.clone())
+        .with_lock_store(lock_store)
+        .with_policy(execution_policy(
+            options.timeout_seconds,
+            options.max_retries,
+            options.retry_backoff_ms,
+        ));
+    Ok(Arc::new(TuiToolServices {
+        inner,
+        agent_runner: runner,
+        store_path: options.store_path.clone(),
+        parent_agent_id,
+    }))
+}
+
+struct TuiToolServices {
+    inner: Arc<CliServices>,
+    agent_runner: AgentRunner,
+    store_path: Utf8PathBuf,
+    parent_agent_id: Option<String>,
+}
+
+#[async_trait]
+impl AgentServices for TuiToolServices {
+    async fn call_tool(&self, name: &str, input: Value) -> std::result::Result<Value, ToolError> {
+        if name != AGENT_RUN_TOOL_NAME {
+            return self.inner.call_tool(name, input).await;
+        }
+        let output = call_agent_run_tool(
+            &self.agent_runner,
+            input,
+            AgentRunToolContext {
+                parent_agent_id: self.parent_agent_id.clone(),
+                metadata: json!({
+                    "source": "agent_tui",
+                    "surface": "agent_tui",
+                }),
+                cancellation: CancellationToken::new(),
+                ..AgentRunToolContext::default()
+            },
+        )
+        .await?;
+        persist_agent_run_trace(&self.store_path, &output).await?;
+        Ok(output)
+    }
+
+    async fn emit_event(
+        &self,
+        event: agent_core::AgentEvent,
+    ) -> std::result::Result<(), AgentError> {
+        self.inner.emit_event(event).await
+    }
+
+    async fn load_state(&self, key: &str) -> std::result::Result<Option<Value>, AgentError> {
+        self.inner.load_state(key).await
+    }
+
+    async fn save_state(&self, key: &str, value: Value) -> std::result::Result<(), AgentError> {
+        self.inner.save_state(key, value).await
+    }
+
+    async fn create_proposal(
+        &self,
+        proposal: agent_core::ProposalEnvelope,
+    ) -> std::result::Result<(), AgentError> {
+        self.inner.create_proposal(proposal).await
+    }
+}
+
+async fn persist_agent_run_trace(
+    store_path: &Utf8PathBuf,
+    output: &Value,
+) -> Result<(), ToolError> {
+    let Some(trace) = output.get("trace").cloned() else {
+        return Ok(());
+    };
+    let trace: AgentTrace = serde_json::from_value(trace).map_err(|error| {
+        tool_internal_error(format!("failed to decode agent.run trace: {error}"))
+    })?;
+    write_store_trace(store_path, &trace)
+        .await
+        .map_err(|error| tool_internal_error(format!("failed to persist agent.run trace: {error}")))
+}
+
+fn tool_internal_error(message: impl Into<String>) -> ToolError {
+    ToolError {
+        record: AgentError::internal(message).record,
     }
 }
 
@@ -1053,6 +1163,66 @@ mod tests {
                 .transcript
                 .iter()
                 .any(|item| item.content.contains(r#""value": 42"#))
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_tools_include_agent_run() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let options = TuiOptions {
+            catalog_path: None,
+            trace_path: None,
+            store_path: temp_store_path(&dir),
+            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
+            tool_overrides: ToolOverrides::default(),
+            chat: test_chat_options("mock response"),
+            timeout_seconds: 60,
+            max_retries: 0,
+            retry_backoff_ms: 0,
+            mouse_capture: false,
+            once: false,
+        };
+
+        let tools = chat_tools_from_options(&options).await.expect("tools load");
+
+        assert!(tools.iter().any(|tool| tool.name == AGENT_RUN_TOOL_NAME));
+        assert!(tools.iter().any(|tool| tool.name == "echo"));
+    }
+
+    #[tokio::test]
+    async fn tool_command_can_run_agent_run_tool() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = TuiState::load(TuiOptions {
+            catalog_path: None,
+            trace_path: None,
+            store_path: temp_store_path(&dir),
+            registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
+            tool_overrides: ToolOverrides::default(),
+            chat: test_chat_options("mock response"),
+            timeout_seconds: 60,
+            max_retries: 0,
+            retry_backoff_ms: 0,
+            mouse_capture: false,
+            once: false,
+        })
+        .await
+        .expect("state loads");
+
+        execute_command(
+            &mut state,
+            r#"/tool agent.run {"agent_id":"echo_agent","input":{"message":"from agent.run"}}"#,
+        )
+        .await
+        .expect("agent.run tool command succeeds");
+        state.refresh_runs().await.expect("runs refresh");
+
+        assert_eq!(state.recent_runs.len(), 1);
+        assert_eq!(state.recent_runs[0].agent_id, "echo_agent");
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|item| item.content.contains("from agent.run"))
         );
     }
 }
