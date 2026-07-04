@@ -46,6 +46,7 @@ pub(super) async fn call_tool_or_request_approval(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn approve_pending_tool(state: &mut TuiState) -> Result<()> {
     approve_pending_tool_with_display(state, "/approve").await
 }
@@ -127,10 +128,6 @@ pub(super) async fn approve_pending_tool_with_display(
         return Err(error);
     }
     Ok(())
-}
-
-pub(super) async fn deny_pending_tool(state: &mut TuiState) -> Result<()> {
-    deny_pending_tool_with_display(state, "/deny").await
 }
 
 pub(super) async fn deny_pending_tool_with_display(

@@ -1274,7 +1274,7 @@ fn catalog_dry_run_can_call_process_tool_host() {
             input_path.to_str().expect("utf8 input path"),
             "--trace-out",
             trace_path.to_str().expect("utf8 trace path"),
-            "--tool-host",
+            "--tool-cmd",
             agent_bin.to_str().expect("utf8 agent bin"),
             "dev-tool-host",
             "--store",
@@ -1610,7 +1610,7 @@ fn catalog_dry_run_can_call_mock_tool_from_file() {
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
             input_path.to_str().expect("utf8 input path"),
-            "--mock-tool",
+            "--mock",
             &format!(
                 "propose_fake=@{}",
                 mock_path.to_str().expect("utf8 mock path")
@@ -1753,7 +1753,7 @@ fn tool_cli_lists_and_calls_tool_source_manifest() {
         .args([
             "tool",
             "list",
-            "--tool-source",
+            "--tools",
             source_path.to_str().expect("utf8 source path"),
         ])
         .assert()
@@ -2043,6 +2043,8 @@ fn tui_once_renders_catalog_and_trace_snapshot() {
             "../../fixtures/contracts/catalog.valid.json",
             "--trace",
             "../../fixtures/contracts/trace.valid.json",
+            "--tools",
+            "../../fixtures/contracts/tool-source.example.json",
             "--once",
         ])
         .assert()
@@ -2060,6 +2062,66 @@ fn tui_once_renders_catalog_and_trace_snapshot() {
     assert!(output.contains("agent echo_agent@0.1.0"));
     assert!(output.contains("Ready. Chatting with agent 'execution_review'."));
     assert!(output.contains("Quick commands: /status, /runs, /tools, /help <command>."));
+}
+
+#[test]
+fn tui_once_reads_unified_runtime_config() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("configured-tui-store");
+    let config_path = dir.path().join("agent-runtime.toml");
+    let registry = std::path::Path::new("../../examples/agents.yaml")
+        .canonicalize()
+        .expect("registry path");
+    let catalog = std::path::Path::new("../../fixtures/contracts/catalog.valid.json")
+        .canonicalize()
+        .expect("catalog path");
+    let tool_source = std::path::Path::new("../../fixtures/contracts/tool-source.example.json")
+        .canonicalize()
+        .expect("tool source path");
+    let trace = std::path::Path::new("../../fixtures/contracts/trace.valid.json")
+        .canonicalize()
+        .expect("trace path");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[runtime]
+store = "{}"
+default_agent = "execution_review"
+timeout_seconds = 5
+
+[runtime.sources]
+registry = "{}"
+catalog = "{}"
+
+[runtime.tools]
+sources = ["{}"]
+"#,
+            store.display(),
+            registry.display(),
+            catalog.display(),
+            tool_source.display()
+        ),
+    )
+    .expect("config written");
+
+    let output = agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().expect("utf8 config path"),
+            "tui",
+            "--trace",
+            trace.to_str().expect("utf8 trace path"),
+            "--once",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).expect("stdout is utf8");
+    assert!(output.contains("Ready. Chatting with agent 'execution_review'."));
+    assert!(output.contains("catalog 1 agents / 1 tools"));
+    assert!(output.contains("tools 4 high 1 blocked 0"));
 }
 
 #[test]

@@ -28,8 +28,8 @@ pub(crate) struct RuntimeProfile {
     pub(crate) sources: RuntimeSources,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) default_agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) tool_sources: Option<Vec<Utf8PathBuf>>,
+    #[serde(default, skip_serializing_if = "RuntimeTools::is_empty")]
+    pub(crate) tools: RuntimeTools,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -58,6 +58,34 @@ pub(crate) struct RuntimeContextPolicy {
     pub(crate) preserve_recent_messages: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) compact_when_over_budget: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct RuntimeTools {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sources: Option<Vec<Utf8PathBuf>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mocks: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) host: Option<Vec<String>>,
+}
+
+impl RuntimeTools {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.sources.is_none() && self.mocks.is_none() && self.host.is_none()
+    }
+
+    fn merge(&mut self, overlay: RuntimeTools) {
+        if overlay.sources.is_some() {
+            self.sources = overlay.sources;
+        }
+        if overlay.mocks.is_some() {
+            self.mocks = overlay.mocks;
+        }
+        if overlay.host.is_some() {
+            self.host = overlay.host;
+        }
+    }
 }
 
 impl RuntimeContextPolicy {
@@ -117,9 +145,7 @@ impl RuntimeProfile {
         if overlay.default_agent.is_some() {
             self.default_agent = overlay.default_agent;
         }
-        if overlay.tool_sources.is_some() {
-            self.tool_sources = overlay.tool_sources;
-        }
+        self.tools.merge(overlay.tools);
         if overlay.host.is_some() {
             self.host = overlay.host;
         }
@@ -243,17 +269,6 @@ pub(crate) fn configured_string(
     }
 }
 
-pub(crate) fn configured_paths(
-    values: Vec<Utf8PathBuf>,
-    configured: Option<&Vec<Utf8PathBuf>>,
-) -> Vec<Utf8PathBuf> {
-    if values.is_empty() {
-        configured.cloned().unwrap_or_default()
-    } else {
-        values
-    }
-}
-
 pub(crate) fn configured_hooks(configured: Option<&Vec<HookSpec>>) -> Vec<HookSpec> {
     configured.cloned().unwrap_or_default()
 }
@@ -302,6 +317,11 @@ hooks = [
 [runtime.sources]
 registry = "../../examples/agents.yaml"
 
+[runtime.tools]
+sources = ["tools/base.json"]
+mocks = ['echo={"ok":true}']
+host = ["agent", "dev-tool-host"]
+
 [runtime.context]
 max_input_tokens = 1000
 reserve_output_tokens = 100
@@ -312,6 +332,9 @@ timeout_seconds = 20
 hooks = [
   { name = "guard_tool", event = "BeforeToolCall", kind = "process", effect = "policy", command = ["guard-hook"] },
 ]
+
+[profiles.strict.tools]
+sources = ["tools/strict.json"]
 
 [profiles.strict.context]
 reserve_output_tokens = 200
@@ -330,6 +353,18 @@ compact_when_over_budget = false
 
         assert_eq!(config.runtime.timeout_seconds, Some(20));
         assert_eq!(config.runtime.default_agent.as_deref(), Some("echo_agent"));
+        assert_eq!(
+            config.runtime.tools.sources.as_deref(),
+            Some(&[Utf8PathBuf::from("tools/strict.json")][..])
+        );
+        assert_eq!(
+            config.runtime.tools.mocks.as_deref(),
+            Some(&["echo={\"ok\":true}".to_owned()][..])
+        );
+        assert_eq!(
+            config.runtime.tools.host.as_deref(),
+            Some(&["agent".to_owned(), "dev-tool-host".to_owned()][..])
+        );
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].name, "guard_tool");
         assert_eq!(

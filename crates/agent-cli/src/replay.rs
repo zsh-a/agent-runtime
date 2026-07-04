@@ -13,7 +13,7 @@ use crate::{
     config::execution_policy,
     print_json,
     runtime_config::{ResolvedRuntimeSources, RuntimeSourceOptions, compose_runtime_sources},
-    tools::{CliServices, tool_overrides},
+    tools::{CliServices, ToolSelection},
     trace_store::{read_trace, write_json, write_store_trace},
 };
 
@@ -40,9 +40,7 @@ pub(crate) struct ReplayTraceOptions {
     pub(crate) trace_file: Utf8PathBuf,
     pub(crate) mode: ReplayMode,
     pub(crate) sources: ResolvedRuntimeSources,
-    pub(crate) tool_host: Vec<String>,
-    pub(crate) mock_tool: Vec<String>,
-    pub(crate) tool_source: Vec<Utf8PathBuf>,
+    pub(crate) tools: ToolSelection,
     pub(crate) store: Utf8PathBuf,
     pub(crate) trace_out: Option<Utf8PathBuf>,
     pub(crate) timeout_seconds: u64,
@@ -60,8 +58,7 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
         }
         return print_json(&report);
     }
-    let mut overrides =
-        tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?;
+    let mut overrides = options.tools.load().await?;
     let composition = compose_runtime_sources(RuntimeSourceOptions {
         sources: options.sources,
         tool_overrides: overrides.clone(),

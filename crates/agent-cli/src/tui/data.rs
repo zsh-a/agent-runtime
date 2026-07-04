@@ -234,13 +234,6 @@ impl TuiApprovalSelection {
         }
     }
 
-    pub(super) fn display(self) -> &'static str {
-        match self {
-            Self::Approve => "Approve",
-            Self::Deny => "Deny",
-        }
-    }
-
     pub(super) fn command(self) -> &'static str {
         match self {
             Self::Approve => "yes",

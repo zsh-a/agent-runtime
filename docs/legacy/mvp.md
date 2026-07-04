@@ -1497,6 +1497,11 @@ retry_backoff_ms = 250
 registry = "examples/agents.yaml"
 catalog = "fixtures/contracts/catalog.valid.json"
 
+[runtime.tools]
+sources = ["fixtures/contracts/tool-source.example.json"]
+mocks = ['propose_fake={"accepted":true}']
+host = ["target/debug/agent", "dev-tool-host"]
+
 [profiles.ci]
 store = "/private/tmp/agent-runtime-ci-store"
 timeout_seconds = 10
@@ -1544,12 +1549,20 @@ rtk cargo run -p agent-cli -- \
   --config agent-runtime.toml \
   --profile server \
   serve
+
+rtk cargo run -p agent-cli -- \
+  --config examples/tui/agent-runtime.toml \
+  tui
 ```
 
+The TUI example uses the same `[runtime]`, `[runtime.sources]`,
+`[runtime.tools]`, and `[runtime.context]` sections as `run` and `serve`;
+there is no separate TUI-specific schema.
+
 Command-line values win over profile values. Profiles currently cover common
-runtime defaults: `registry`, `catalog`, `store`, `eval_store`,
-`tool_sources`, `hooks`, `host`, `port`, `stdio`, `timeout_seconds`,
-`max_retries`, `retry_backoff_ms`, and chat context policy under
+runtime defaults: `sources.registry`, `sources.catalog`, `store`, `eval_store`,
+`tools.sources`, `tools.mocks`, `tools.host`, `hooks`, `host`, `port`, `stdio`,
+`timeout_seconds`, `max_retries`, `retry_backoff_ms`, and chat context policy under
 `runtime.context`. `agent run`, `agent tick`,
 `agent replay --mode live`, `agent cmd run`, `agent serve`, and `agent tui`
 install configured process hooks into the runtime runner; view-only and

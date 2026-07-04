@@ -16,7 +16,7 @@ use crate::config::execution_policy;
 use crate::runtime_config::{
     ResolvedRuntimeSources, RuntimeSourceOptions, RuntimeSources, compose_runtime_sources,
 };
-use crate::tools::{CliServices, tool_overrides};
+use crate::tools::{CliServices, ToolSelection};
 use crate::trace_store::{
     read_json, write_json, write_store_trace, write_text, write_workflow_traces,
 };
@@ -56,9 +56,7 @@ pub(crate) struct CommandRunOptions {
     pub(crate) configured_sources: RuntimeSources,
     pub(crate) source_overrides: RuntimeSources,
     pub(crate) store: Utf8PathBuf,
-    pub(crate) tool_host: Vec<String>,
-    pub(crate) mock_tool: Vec<String>,
-    pub(crate) tool_source: Vec<Utf8PathBuf>,
+    pub(crate) tools: ToolSelection,
     pub(crate) trace_out: Option<Utf8PathBuf>,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_retries: u32,
@@ -70,9 +68,7 @@ pub(crate) struct WorkflowRunCliOptions {
     pub(crate) input: Utf8PathBuf,
     pub(crate) sources: ResolvedRuntimeSources,
     pub(crate) store: Utf8PathBuf,
-    pub(crate) tool_host: Vec<String>,
-    pub(crate) mock_tool: Vec<String>,
-    pub(crate) tool_source: Vec<Utf8PathBuf>,
+    pub(crate) tools: ToolSelection,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_retries: u32,
     pub(crate) retry_backoff_ms: u64,
@@ -94,8 +90,7 @@ pub(crate) async fn run_workflow_request(
     validate_workflow_request(&value)?;
     let request = serde_json::from_value::<WorkflowRunRequest>(value)
         .map_err(|e| miette!("failed to parse workflow request at {}: {e}", options.input))?;
-    let mut overrides =
-        tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?;
+    let mut overrides = options.tools.load().await?;
     let composition = compose_runtime_sources(RuntimeSourceOptions {
         sources: options.sources,
         tool_overrides: overrides.clone(),
@@ -206,8 +201,7 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
         options.configured_sources,
         options.source_overrides,
     );
-    let mut overrides =
-        tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?;
+    let mut overrides = options.tools.load().await?;
     let composition = compose_runtime_sources(RuntimeSourceOptions {
         sources,
         tool_overrides: overrides.clone(),

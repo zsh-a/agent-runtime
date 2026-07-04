@@ -5,12 +5,27 @@ use agent_core::{
 };
 use agent_store::{FileProposalStore, InMemoryStateStore};
 use async_trait::async_trait;
+use camino::Utf8PathBuf;
+use miette::Result;
 use serde_json::Value;
 
 pub(crate) use agent_tools::{
     ToolOverrides, builtin_tools, load_tool_source_specs, load_tool_sources, source_has_tool,
     tool_overrides,
 };
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolSelection {
+    pub(crate) host: Vec<String>,
+    pub(crate) mocks: Vec<String>,
+    pub(crate) sources: Vec<Utf8PathBuf>,
+}
+
+impl ToolSelection {
+    pub(crate) async fn load(self) -> Result<ToolOverrides> {
+        tool_overrides(self.host, self.mocks, self.sources).await
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct CliServices {

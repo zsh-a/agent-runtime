@@ -4,7 +4,7 @@ use agent_core::{AgentRunStore, ContextPolicy, HookSpec, RunId};
 use agent_runtime::{ExecutionPolicy, HookManager, recover_stale_runs};
 use agent_store::{FileProposalStore, FileRunStore};
 use camino::Utf8PathBuf;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::Serialize;
 
@@ -55,7 +55,7 @@ use runtime_config::{
 use runtime_server::RuntimeServer;
 use server::{serve_http, serve_stdio};
 use shell_tool_host::run_shell_tool_host;
-use tools::{ToolOverrides, tool_overrides};
+use tools::{ToolOverrides, ToolSelection};
 use trace_store::read_json;
 use tui::{TuiOptions, run_tui};
 
@@ -67,6 +67,7 @@ const DEFAULT_EVAL_STORE: &str = ".agent-runtime/eval-store";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8765;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+const DEFAULT_MAX_TOOL_ROUNDS: u32 = 4;
 const TUI_LOG_FILE: &str = "tui.log";
 
 #[derive(Debug)]
@@ -144,8 +145,29 @@ impl AppContext {
         }
     }
 
-    fn tool_sources(&self, values: Vec<Utf8PathBuf>) -> Vec<Utf8PathBuf> {
-        config::configured_paths(values, self.config.runtime.tool_sources.as_ref())
+    fn tools(&self, args: ToolCliArgs) -> ToolSelection {
+        ToolSelection {
+            host: if args.tool_host.is_empty() {
+                self.config.runtime.tools.host.clone().unwrap_or_default()
+            } else {
+                args.tool_host
+            },
+            mocks: if args.mock_tool.is_empty() {
+                self.config.runtime.tools.mocks.clone().unwrap_or_default()
+            } else {
+                args.mock_tool
+            },
+            sources: if args.tool_source.is_empty() {
+                self.config
+                    .runtime
+                    .tools
+                    .sources
+                    .clone()
+                    .unwrap_or_default()
+            } else {
+                args.tool_source
+            },
+        }
     }
 
     fn hooks(&self) -> Result<HookManager> {
@@ -192,6 +214,20 @@ impl AppContext {
     fn port(&self, value: u16) -> u16 {
         config::configured_u16(value, DEFAULT_PORT, self.config.runtime.port)
     }
+
+    fn chat(&self, args: ChatCliArgs) -> chat::ChatLlmOptions {
+        chat::ChatLlmOptions {
+            provider: args.provider,
+            model: args.model,
+            mock_response: args.mock_response,
+            api_base_url: args.api_base_url,
+            api_key_env: args.api_key_env,
+            anthropic_version: args.anthropic_version,
+            temperature: args.temperature,
+            max_output_tokens: args.max_output_tokens,
+            max_tool_rounds: args.max_tool_rounds,
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -204,6 +240,47 @@ struct Cli {
     profile: Option<String>,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+struct ToolCliArgs {
+    #[arg(
+        long = "tool-host",
+        visible_alias = "tool-cmd",
+        num_args = 1..,
+        value_name = "COMMAND"
+    )]
+    tool_host: Vec<String>,
+    #[arg(
+        long = "mock-tool",
+        visible_alias = "mock",
+        value_name = "NAME=JSON_OR_@PATH"
+    )]
+    mock_tool: Vec<String>,
+    #[arg(long = "tool-source", visible_alias = "tools", value_name = "PATH")]
+    tool_source: Vec<Utf8PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct ChatCliArgs {
+    #[arg(long, env = "AGENT_LLM_PROVIDER", default_value = "mock")]
+    provider: String,
+    #[arg(long, default_value = "mock-model")]
+    model: String,
+    #[arg(long, default_value = "mock response")]
+    mock_response: String,
+    #[arg(long, env = "OPENAI_BASE_URL")]
+    api_base_url: Option<String>,
+    #[arg(long, default_value = "OPENAI_API_KEY")]
+    api_key_env: String,
+    #[arg(long, default_value = "2023-06-01")]
+    anthropic_version: String,
+    #[arg(long)]
+    temperature: Option<f32>,
+    #[arg(long)]
+    max_output_tokens: Option<u32>,
+    #[arg(long, default_value_t = DEFAULT_MAX_TOOL_ROUNDS)]
+    max_tool_rounds: u32,
 }
 
 #[derive(Debug, Subcommand)]
@@ -220,12 +297,8 @@ enum Command {
         registry: Utf8PathBuf,
         #[arg(long)]
         catalog: Option<Utf8PathBuf>,
-        #[arg(long, num_args = 1.., value_name = "COMMAND")]
-        tool_host: Vec<String>,
-        #[arg(long, value_name = "NAME=JSON_OR_@PATH")]
-        mock_tool: Vec<String>,
-        #[arg(long)]
-        tool_source: Vec<Utf8PathBuf>,
+        #[command(flatten)]
+        tools: ToolCliArgs,
         #[arg(long)]
         input: Option<Utf8PathBuf>,
         #[arg(long)]
@@ -263,12 +336,8 @@ enum Command {
         registry: Utf8PathBuf,
         #[arg(long)]
         catalog: Option<Utf8PathBuf>,
-        #[arg(long, num_args = 1.., value_name = "COMMAND")]
-        tool_host: Vec<String>,
-        #[arg(long, value_name = "NAME=JSON_OR_@PATH")]
-        mock_tool: Vec<String>,
-        #[arg(long)]
-        tool_source: Vec<Utf8PathBuf>,
+        #[command(flatten)]
+        tools: ToolCliArgs,
         #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
         #[arg(long)]
@@ -350,36 +419,16 @@ enum Command {
         catalog: Option<Utf8PathBuf>,
         #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
-        #[arg(long, num_args = 1.., value_name = "COMMAND")]
-        tool_host: Vec<String>,
-        #[arg(long, value_name = "NAME=JSON_OR_@PATH")]
-        mock_tool: Vec<String>,
-        #[arg(long)]
-        tool_source: Vec<Utf8PathBuf>,
+        #[command(flatten)]
+        tools: ToolCliArgs,
         #[arg(long)]
         stdio: bool,
         #[arg(long, default_value = DEFAULT_HOST)]
         host: String,
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
-        #[arg(long, env = "AGENT_LLM_PROVIDER", default_value = "mock")]
-        provider: String,
-        #[arg(long, default_value = "mock-model")]
-        model: String,
-        #[arg(long, default_value = "mock response")]
-        mock_response: String,
-        #[arg(long, env = "OPENAI_BASE_URL")]
-        api_base_url: Option<String>,
-        #[arg(long, default_value = "OPENAI_API_KEY")]
-        api_key_env: String,
-        #[arg(long, default_value = "2023-06-01")]
-        anthropic_version: String,
-        #[arg(long)]
-        temperature: Option<f32>,
-        #[arg(long)]
-        max_output_tokens: Option<u32>,
-        #[arg(long, default_value_t = 4)]
-        max_tool_rounds: u32,
+        #[command(flatten)]
+        chat: ChatCliArgs,
     },
     Tui {
         #[arg(long, default_value = DEFAULT_REGISTRY)]
@@ -390,35 +439,15 @@ enum Command {
         trace: Option<Utf8PathBuf>,
         #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
-        #[arg(long, num_args = 1.., value_name = "COMMAND")]
-        tool_host: Vec<String>,
-        #[arg(long, value_name = "NAME=JSON_OR_@PATH")]
-        mock_tool: Vec<String>,
-        #[arg(long)]
-        tool_source: Vec<Utf8PathBuf>,
+        #[command(flatten)]
+        tools: ToolCliArgs,
         #[arg(
             long,
             help = "Block high-risk tools such as agent.run and shell.exec in the TUI runtime"
         )]
         deny_high_risk_tools: bool,
-        #[arg(long, env = "AGENT_LLM_PROVIDER", default_value = "mock")]
-        provider: String,
-        #[arg(long, default_value = "mock-model")]
-        model: String,
-        #[arg(long, default_value = "mock response")]
-        mock_response: String,
-        #[arg(long, env = "OPENAI_BASE_URL")]
-        api_base_url: Option<String>,
-        #[arg(long, default_value = "OPENAI_API_KEY")]
-        api_key_env: String,
-        #[arg(long, default_value = "2023-06-01")]
-        anthropic_version: String,
-        #[arg(long)]
-        temperature: Option<f32>,
-        #[arg(long)]
-        max_output_tokens: Option<u32>,
-        #[arg(long, default_value_t = 4)]
-        max_tool_rounds: u32,
+        #[command(flatten)]
+        chat: ChatCliArgs,
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECONDS)]
         timeout_seconds: u64,
         #[arg(long, default_value_t = 0)]
@@ -439,12 +468,8 @@ enum Command {
         eval_path: Utf8PathBuf,
         #[arg(long, default_value = DEFAULT_EVAL_STORE)]
         store: Utf8PathBuf,
-        #[arg(long, num_args = 1.., value_name = "COMMAND")]
-        tool_host: Vec<String>,
-        #[arg(long, value_name = "NAME=JSON_OR_@PATH")]
-        mock_tool: Vec<String>,
-        #[arg(long)]
-        tool_source: Vec<Utf8PathBuf>,
+        #[command(flatten)]
+        tools: ToolCliArgs,
         #[arg(long)]
         update_golden: bool,
         #[arg(long)]
@@ -497,12 +522,8 @@ enum CmdCommand {
         registry: Option<Utf8PathBuf>,
         #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
-        #[arg(long, num_args = 1.., value_name = "COMMAND")]
-        tool_host: Vec<String>,
-        #[arg(long, value_name = "NAME=JSON_OR_@PATH")]
-        mock_tool: Vec<String>,
-        #[arg(long)]
-        tool_source: Vec<Utf8PathBuf>,
+        #[command(flatten)]
+        tools: ToolCliArgs,
         #[arg(long)]
         trace_out: Option<Utf8PathBuf>,
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECONDS)]
@@ -553,12 +574,8 @@ enum WorkflowCommand {
         catalog: Option<Utf8PathBuf>,
         #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
-        #[arg(long, num_args = 1.., value_name = "COMMAND")]
-        tool_host: Vec<String>,
-        #[arg(long, value_name = "NAME=JSON_OR_@PATH")]
-        mock_tool: Vec<String>,
-        #[arg(long)]
-        tool_source: Vec<Utf8PathBuf>,
+        #[command(flatten)]
+        tools: ToolCliArgs,
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECONDS)]
         timeout_seconds: u64,
         #[arg(long, default_value_t = 0)]
@@ -632,9 +649,7 @@ async fn main() -> Result<()> {
             agent_id,
             registry,
             catalog,
-            tool_host,
-            mock_tool,
-            tool_source,
+            tools,
             input,
             trace_out,
             session,
@@ -646,14 +661,13 @@ async fn main() -> Result<()> {
             retry_backoff_ms,
         } => {
             let sources = context.runtime_sources(registry, catalog);
-            let tool_source = context.tool_sources(tool_source);
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
             let hooks = context.hooks()?;
             run_agent_once(RunCliOptions {
                 agent_id,
                 sources,
-                tool_overrides: tool_overrides(tool_host, mock_tool, tool_source).await?,
+                tool_overrides: context.tools(tools).load().await?,
                 input,
                 trace_out,
                 session,
@@ -688,9 +702,7 @@ async fn main() -> Result<()> {
             execute,
             registry,
             catalog,
-            tool_host,
-            mock_tool,
-            tool_source,
+            tools,
             store,
             trace_out,
             timeout_seconds,
@@ -698,7 +710,6 @@ async fn main() -> Result<()> {
             retry_backoff_ms,
         } => {
             let sources = context.runtime_sources(registry, catalog);
-            let tool_source = context.tool_sources(tool_source);
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
             let mode = if execute {
@@ -717,9 +728,7 @@ async fn main() -> Result<()> {
                         trace_file,
                         mode,
                         sources,
-                        tool_host,
-                        mock_tool,
-                        tool_source,
+                        tools: context.tools(tools),
                         store,
                         trace_out,
                         timeout_seconds: execution.timeout_seconds,
@@ -817,9 +826,7 @@ async fn main() -> Result<()> {
                 registry,
                 catalog,
                 store,
-                tool_host,
-                mock_tool,
-                tool_source,
+                tools,
                 timeout_seconds,
                 max_retries,
                 retry_backoff_ms,
@@ -830,9 +837,7 @@ async fn main() -> Result<()> {
                     input,
                     sources,
                     store: context.store(store),
-                    tool_host,
-                    mock_tool,
-                    tool_source: context.tool_sources(tool_source),
+                    tools: context.tools(tools),
                     timeout_seconds: execution.timeout_seconds,
                     max_retries: execution.max_retries,
                     retry_backoff_ms: execution.retry_backoff_ms,
@@ -927,9 +932,7 @@ async fn main() -> Result<()> {
                 catalog,
                 registry,
                 store,
-                tool_host,
-                mock_tool,
-                tool_source,
+                tools,
                 trace_out,
                 timeout_seconds,
                 max_retries,
@@ -940,9 +943,7 @@ async fn main() -> Result<()> {
                     configured_sources: context.configured_runtime_sources(),
                     source_overrides: RuntimeSources::new(registry, catalog),
                     store,
-                    tool_host,
-                    mock_tool,
-                    tool_source,
+                    tools: context.tools(tools),
                     trace_out,
                     timeout_seconds,
                     max_retries,
@@ -957,25 +958,14 @@ async fn main() -> Result<()> {
             registry,
             catalog,
             store,
-            tool_host,
-            mock_tool,
-            tool_source,
+            tools,
             stdio,
             host,
             port,
-            provider,
-            model,
-            mock_response,
-            api_base_url,
-            api_key_env,
-            anthropic_version,
-            temperature,
-            max_output_tokens,
-            max_tool_rounds,
+            chat,
         } => {
             let sources = context.runtime_sources(registry, catalog);
             let store = context.store(store);
-            let tool_source = context.tool_sources(tool_source);
             let stdio = context.stdio(stdio);
             let host = context.host(host);
             let port = context.port(port);
@@ -983,21 +973,11 @@ async fn main() -> Result<()> {
             let server = RuntimeServer::new(
                 sources,
                 store,
-                tool_overrides(tool_host, mock_tool, tool_source).await?,
+                context.tools(tools).load().await?,
                 hooks,
                 context.context_policy(),
                 context.default_agent(),
-                chat::ChatLlmOptions {
-                    provider,
-                    model,
-                    mock_response,
-                    api_base_url,
-                    api_key_env,
-                    anthropic_version,
-                    temperature,
-                    max_output_tokens,
-                    max_tool_rounds,
-                },
+                context.chat(chat),
             )
             .await?;
             if stdio {
@@ -1011,19 +991,9 @@ async fn main() -> Result<()> {
             catalog,
             trace,
             store,
-            tool_host,
-            mock_tool,
-            tool_source,
+            tools,
             deny_high_risk_tools,
-            provider,
-            model,
-            mock_response,
-            api_base_url,
-            api_key_env,
-            anthropic_version,
-            temperature,
-            max_output_tokens,
-            max_tool_rounds,
+            chat,
             timeout_seconds,
             max_retries,
             retry_backoff_ms,
@@ -1032,25 +1002,14 @@ async fn main() -> Result<()> {
         } => {
             let sources = context.runtime_sources(registry, catalog);
             let store = context.store(store);
-            let tool_source = context.tool_sources(tool_source);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
             run_tui(TuiOptions {
                 runtime_sources: sources,
                 trace_path: trace,
                 store_path: store,
-                tool_overrides: tool_overrides(tool_host, mock_tool, tool_source).await?,
+                tool_overrides: context.tools(tools).load().await?,
                 allow_high_risk_tools: !deny_high_risk_tools,
-                chat: chat::ChatLlmOptions {
-                    provider,
-                    model,
-                    mock_response,
-                    api_base_url,
-                    api_key_env,
-                    anthropic_version,
-                    temperature,
-                    max_output_tokens,
-                    max_tool_rounds,
-                },
+                chat: context.chat(chat),
                 timeout_seconds: execution.timeout_seconds,
                 max_retries: execution.max_retries,
                 retry_backoff_ms: execution.retry_backoff_ms,
@@ -1065,9 +1024,7 @@ async fn main() -> Result<()> {
         Command::Eval {
             eval_path,
             store,
-            tool_host,
-            mock_tool,
-            tool_source,
+            tools,
             update_golden,
             from_run,
             out,
@@ -1077,7 +1034,6 @@ async fn main() -> Result<()> {
         } => {
             let store = context.eval_store(store);
             let catalog = context.catalog(catalog);
-            let tool_source = context.tool_sources(tool_source);
             let result = if eval_path.as_str() == "create" || from_run.is_some() {
                 create_eval_from_run(
                     from_run.ok_or_else(|| miette!("--from-run is required"))?,
@@ -1092,7 +1048,7 @@ async fn main() -> Result<()> {
                 run_eval_path(
                     eval_path,
                     store,
-                    tool_overrides(tool_host, mock_tool, tool_source).await?,
+                    context.tools(tools).load().await?,
                     update_golden,
                 )
                 .await?

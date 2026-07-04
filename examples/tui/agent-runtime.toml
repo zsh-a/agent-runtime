@@ -1,0 +1,19 @@
+[runtime]
+store = ".agent-runtime/tui-store"
+default_agent = "execution_review"
+timeout_seconds = 60
+max_retries = 0
+retry_backoff_ms = 0
+
+[runtime.sources]
+registry = "examples/agents.yaml"
+catalog = "fixtures/contracts/catalog.valid.json"
+
+[runtime.tools]
+sources = ["fixtures/contracts/shell-tool-source.example.json"]
+
+[runtime.context]
+max_input_tokens = 128000
+reserve_output_tokens = 4096
+preserve_recent_messages = 12
+compact_when_over_budget = true
