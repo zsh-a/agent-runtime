@@ -12,7 +12,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::data::{
     TranscriptItem, TranscriptRole, TuiActivityItem, TuiActivityKind, TuiApprovalSelection,
-    TuiProposalListSummary, TuiRunSummary, TuiState, TuiTraceEventSummary, TuiWorkflowSummary,
+    TuiFocusPanel, TuiProposalListSummary, TuiRunSummary, TuiState, TuiTraceEventSummary,
+    TuiWorkflowSummary,
 };
 
 const MAX_INPUT_HEIGHT: u16 = 8;
@@ -50,7 +51,7 @@ pub(super) fn render_tui_frame(frame: &mut Frame<'_>, state: &TuiState) {
 
     frame.render_widget(status_line(state), root[0]);
     frame.render_widget(chat_panel(state, body[0]), body[0]);
-    frame.render_widget(context_panel(state), side[0]);
+    frame.render_widget(context_panel(state, side[0]), side[0]);
     frame.render_widget(activity_panel(state, side[1]), side[1]);
 
     let input = command_panel(state, root[2]);
@@ -86,7 +87,7 @@ fn status_line(state: &TuiState) -> Paragraph<'static> {
     ]))
 }
 
-fn context_panel(state: &TuiState) -> List<'static> {
+fn context_panel(state: &TuiState, area: Rect) -> List<'static> {
     let mut items = Vec::new();
     if let Some(summary) = &state.catalog_summary {
         items.extend([
@@ -171,7 +172,25 @@ fn context_panel(state: &TuiState) -> List<'static> {
         items.push(ListItem::new(approval.summary()));
         items.push(ListItem::new("Tab selects, Enter confirms"));
     }
-    List::new(items).block(panel_block("Context"))
+    let height = area.height.saturating_sub(2) as usize;
+    let max_scroll = items.len().saturating_sub(height);
+    let scroll = usize::from(state.context_scroll).min(max_scroll);
+    let title = context_panel_title(scroll, max_scroll);
+    List::new(top_window(items, height, scroll)).block(focused_panel_block(
+        state,
+        TuiFocusPanel::Context,
+        title,
+    ))
+}
+
+fn context_panel_title(scroll: usize, max_scroll: usize) -> String {
+    if max_scroll == 0 {
+        "Context".to_owned()
+    } else if scroll == 0 {
+        format!("Context  {} more below", max_scroll)
+    } else {
+        format!("Context  {scroll}/{max_scroll}")
+    }
 }
 
 fn run_context_items(run: &TuiRunSummary) -> Vec<ListItem<'static>> {
@@ -331,7 +350,11 @@ fn chat_panel(state: &TuiState, area: Rect) -> Paragraph<'static> {
         format!("Chat +{} lines", state.chat_scroll)
     };
 
-    Paragraph::new(Text::from(visible)).block(panel_block(title))
+    Paragraph::new(Text::from(visible)).block(focused_panel_block(
+        state,
+        TuiFocusPanel::Chat,
+        title,
+    ))
 }
 
 fn activity_panel(state: &TuiState, area: Rect) -> List<'static> {
@@ -372,7 +395,7 @@ fn activity_panel(state: &TuiState, area: Rect) -> List<'static> {
     } else {
         format!("Activity +{} lines", state.event_scroll)
     };
-    List::new(visible).block(panel_block(title))
+    List::new(visible).block(focused_panel_block(state, TuiFocusPanel::Activity, title))
 }
 
 fn activity_item(activity: &TuiActivityItem) -> ListItem<'static> {
@@ -435,6 +458,43 @@ struct BuiltInput {
     lines: Vec<Line<'static>>,
     cursor_x: u16,
     cursor_y: usize,
+}
+
+pub(super) fn input_cursor_for_click(
+    state: &TuiState,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    if area.width <= 2 || area.height <= 2 {
+        return None;
+    }
+    let content_x = area.x.saturating_add(1);
+    let content_y = area.y.saturating_add(1);
+    if column < content_x
+        || column >= area.x.saturating_add(area.width).saturating_sub(1)
+        || row < content_y
+        || row >= area.y.saturating_add(area.height).saturating_sub(1)
+    {
+        return None;
+    }
+
+    let inner_width = area.width.saturating_sub(2).max(1);
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let built = input_lines(state, inner_width);
+    let start = if built.cursor_y >= inner_height.max(1) {
+        built.cursor_y + 1 - inner_height.max(1)
+    } else {
+        0
+    };
+    let target_y = usize::from(row.saturating_sub(content_y)).saturating_add(start);
+    let target_x = column
+        .saturating_sub(content_x)
+        .min(inner_width.saturating_sub(1));
+    let rows = input_click_rows(state, inner_width);
+    rows.get(target_y)
+        .map(|row| row.cursor_for_column(target_x))
+        .or_else(|| rows.last().map(InputClickRow::end_cursor))
 }
 
 fn input_lines(state: &TuiState, width: u16) -> BuiltInput {
@@ -542,6 +602,115 @@ fn input_lines(state: &TuiState, width: u16) -> BuiltInput {
         cursor_x,
         cursor_y,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputClickRow {
+    start_cursor: usize,
+    end_cursor: usize,
+    end_col: u16,
+    segments: Vec<InputClickSegment>,
+}
+
+impl InputClickRow {
+    fn new(start_cursor: usize) -> Self {
+        Self {
+            start_cursor,
+            end_cursor: start_cursor,
+            end_col: INPUT_PREFIX_WIDTH,
+            segments: Vec::new(),
+        }
+    }
+
+    fn cursor_for_column(&self, column: u16) -> usize {
+        if column <= INPUT_PREFIX_WIDTH {
+            return self.start_cursor;
+        }
+        for segment in &self.segments {
+            if column < segment.end_col {
+                let midpoint = segment
+                    .start_col
+                    .saturating_add((segment.end_col.saturating_sub(segment.start_col)) / 2);
+                return if column < midpoint {
+                    segment.before_cursor
+                } else {
+                    segment.after_cursor
+                };
+            }
+        }
+        self.end_cursor
+    }
+
+    fn end_cursor(&self) -> usize {
+        self.end_cursor
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputClickSegment {
+    start_col: u16,
+    end_col: u16,
+    before_cursor: usize,
+    after_cursor: usize,
+}
+
+fn input_click_rows(state: &TuiState, width: u16) -> Vec<InputClickRow> {
+    let slash = state.command_input.starts_with('/');
+    let body = if slash {
+        state.command_input.strip_prefix('/').unwrap_or("")
+    } else {
+        state.command_input.as_str()
+    };
+    let cursor_offset = usize::from(slash);
+    if body.is_empty() {
+        return vec![InputClickRow::new(state.command_input.len())];
+    }
+
+    let mut rows = Vec::new();
+    let mut row = InputClickRow::new(cursor_offset);
+    row.end_col = INPUT_PREFIX_WIDTH.min(width);
+
+    for (byte_index, ch) in body.char_indices() {
+        let before_cursor = cursor_offset + byte_index;
+        let after_cursor = before_cursor + ch.len_utf8();
+        if ch == '\n' {
+            row.end_cursor = before_cursor;
+            rows.push(row);
+            row = InputClickRow::new(after_cursor);
+            row.end_col = INPUT_PREFIX_WIDTH.min(width);
+            continue;
+        }
+
+        let char_width = ch.width().unwrap_or(0) as u16;
+        if !row.segments.is_empty() && row.end_col.saturating_add(char_width) > width {
+            row.end_cursor = before_cursor;
+            rows.push(row);
+            row = InputClickRow::new(before_cursor);
+            row.end_col = INPUT_PREFIX_WIDTH.min(width);
+        }
+
+        if char_width > 0 {
+            let start_col = row.end_col;
+            row.end_col = row.end_col.saturating_add(char_width);
+            row.segments.push(InputClickSegment {
+                start_col,
+                end_col: row.end_col,
+                before_cursor,
+                after_cursor,
+            });
+        }
+        row.end_cursor = after_cursor;
+
+        if row.end_col >= width {
+            rows.push(row);
+            row = InputClickRow::new(after_cursor);
+            row.end_col = INPUT_PREFIX_WIDTH.min(width);
+        }
+    }
+
+    row.end_cursor = cursor_offset + body.len();
+    rows.push(row);
+    rows
 }
 
 fn push_input_line(
@@ -706,7 +875,17 @@ fn bottom_window<T>(items: Vec<T>, height: usize, scroll_from_bottom: u16) -> Ve
     items.into_iter().skip(start).take(end - start).collect()
 }
 
-fn input_panel_height(state: &TuiState, area: Rect) -> u16 {
+fn top_window<T>(items: Vec<T>, height: usize, scroll_from_top: usize) -> Vec<T> {
+    if height == 0 || items.is_empty() {
+        return Vec::new();
+    }
+    let len = items.len();
+    let start = scroll_from_top.min(len.saturating_sub(height));
+    let end = (start + height).min(len);
+    items.into_iter().skip(start).take(end - start).collect()
+}
+
+pub(super) fn input_panel_height(state: &TuiState, area: Rect) -> u16 {
     let width = area.width.saturating_sub(2).max(1);
     let line_count = input_lines(state, width).lines.len() as u16;
     let wanted = line_count
@@ -717,10 +896,30 @@ fn input_panel_height(state: &TuiState, area: Rect) -> u16 {
 }
 
 fn panel_block(title: impl Into<String>) -> Block<'static> {
+    panel_block_with_focus(title, false)
+}
+
+fn focused_panel_block(
+    state: &TuiState,
+    panel: TuiFocusPanel,
+    title: impl Into<String>,
+) -> Block<'static> {
+    let focused = state.focused_panel == panel;
+    let title = title.into();
+    let title = if focused { format!("> {title}") } else { title };
+    panel_block_with_focus(title, focused)
+}
+
+fn panel_block_with_focus(title: impl Into<String>, focused: bool) -> Block<'static> {
+    let style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     Block::default()
         .title(title.into())
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(style)
 }
 
 fn busy_style(busy: bool) -> Style {
@@ -852,7 +1051,9 @@ mod tests {
             approval_selection: TuiApprovalSelection::Approve,
             chat_messages: Vec::new(),
             chat_scroll: 0,
+            context_scroll: 0,
             event_scroll: 0,
+            focused_panel: TuiFocusPanel::Chat,
             input_history: VecDeque::new(),
             history_cursor: None,
             history_draft: None,
@@ -885,11 +1086,46 @@ mod tests {
     }
 
     #[test]
+    fn input_cursor_for_click_maps_plain_text_position() {
+        let mut state = test_state();
+        state.replace_command_input("hello");
+        let area = Rect::new(0, 0, 40, 3);
+
+        let cursor = input_cursor_for_click(&state, area, 1 + 4, 1).expect("click maps to cursor");
+
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn input_cursor_for_click_accounts_for_slash_prompt() {
+        let mut state = test_state();
+        state.replace_command_input("/status");
+        let area = Rect::new(0, 0, 40, 3);
+
+        let cursor = input_cursor_for_click(&state, area, 1 + 4, 1).expect("click maps to cursor");
+
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
     fn command_panel_title_mentions_tab_completion() {
         let state = test_state();
         let rendered = render_tui_once(&state).expect("tui renders");
 
         assert!(rendered.contains("Tab completes"));
+    }
+
+    #[test]
+    fn focused_panel_title_is_marked() {
+        let mut state = test_state();
+        let rendered = render_tui_once(&state).expect("tui renders");
+
+        assert!(rendered.contains("> Chat"));
+
+        state.focused_panel = TuiFocusPanel::Activity;
+        let rendered = render_tui_once(&state).expect("tui renders");
+
+        assert!(rendered.contains("> Activity"));
     }
 
     #[test]

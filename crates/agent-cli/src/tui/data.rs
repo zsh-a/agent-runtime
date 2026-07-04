@@ -249,6 +249,13 @@ impl TuiApprovalSelection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TuiFocusPanel {
+    Chat,
+    Context,
+    Activity,
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum TuiPendingApprovalAction {
     SlashTool {
@@ -370,7 +377,9 @@ pub(super) struct TuiState {
     pub(super) approval_selection: TuiApprovalSelection,
     pub(super) chat_messages: Vec<LlmMessage>,
     pub(super) chat_scroll: u16,
+    pub(super) context_scroll: u16,
     pub(super) event_scroll: u16,
+    pub(super) focused_panel: TuiFocusPanel,
     pub(super) input_history: VecDeque<String>,
     pub(super) history_cursor: Option<usize>,
     pub(super) history_draft: Option<String>,
@@ -418,7 +427,9 @@ impl TuiState {
             approval_selection: TuiApprovalSelection::Approve,
             chat_messages: Vec::new(),
             chat_scroll: 0,
+            context_scroll: 0,
             event_scroll: 0,
+            focused_panel: TuiFocusPanel::Chat,
             input_history: VecDeque::new(),
             history_cursor: None,
             history_draft: None,
@@ -529,6 +540,7 @@ impl TuiState {
         self.pending_approval = None;
         self.approval_selection = TuiApprovalSelection::Approve;
         self.chat_scroll = 0;
+        self.context_scroll = 0;
         self.event_scroll = 0;
     }
 
@@ -793,6 +805,16 @@ impl TuiState {
         self.input_cursor = self.command_input.len();
     }
 
+    pub(super) fn set_input_cursor(&mut self, cursor: usize) {
+        self.break_history_navigation();
+        let cursor = cursor.min(self.command_input.len());
+        self.input_cursor = if self.command_input.is_char_boundary(cursor) {
+            cursor
+        } else {
+            self.previous_char_boundary(cursor)
+        };
+    }
+
     pub(super) fn move_cursor_to_line_start(&mut self) {
         self.input_cursor = self.command_input[..self.input_cursor]
             .rfind('\n')
@@ -858,6 +880,34 @@ impl TuiState {
 
     pub(super) fn scroll_activity_down(&mut self) {
         self.event_scroll = self.event_scroll.saturating_sub(SCROLL_LINES);
+    }
+
+    pub(super) fn scroll_context_up(&mut self) {
+        self.context_scroll = self.context_scroll.saturating_sub(SCROLL_LINES);
+    }
+
+    pub(super) fn scroll_context_down(&mut self) {
+        self.context_scroll = self.context_scroll.saturating_add(SCROLL_LINES);
+    }
+
+    pub(super) fn focus_panel(&mut self, panel: TuiFocusPanel) {
+        self.focused_panel = panel;
+    }
+
+    pub(super) fn scroll_focused_panel_up(&mut self) {
+        match self.focused_panel {
+            TuiFocusPanel::Chat => self.scroll_chat_up(),
+            TuiFocusPanel::Context => self.scroll_context_up(),
+            TuiFocusPanel::Activity => self.scroll_activity_up(),
+        }
+    }
+
+    pub(super) fn scroll_focused_panel_down(&mut self) {
+        match self.focused_panel {
+            TuiFocusPanel::Chat => self.scroll_chat_down(),
+            TuiFocusPanel::Context => self.scroll_context_down(),
+            TuiFocusPanel::Activity => self.scroll_activity_down(),
+        }
     }
 
     pub(super) fn scroll_chat_top(&mut self) {
@@ -1146,7 +1196,9 @@ mod tests {
             approval_selection: TuiApprovalSelection::Approve,
             chat_messages: Vec::new(),
             chat_scroll: 0,
+            context_scroll: 0,
             event_scroll: 0,
+            focused_panel: TuiFocusPanel::Chat,
             input_history: VecDeque::new(),
             history_cursor: None,
             history_draft: None,

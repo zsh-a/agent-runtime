@@ -5,18 +5,20 @@ use std::{
 
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    MouseEvent, MouseEventKind,
+    MouseButton, MouseEvent, MouseEventKind,
 };
 use miette::{IntoDiagnostic, Result};
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::{
     approval::start_pending_approval_task,
     chat::{TuiTaskHandle, start_natural_language_task},
     commands::execute_command,
-    data::{TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiState, TuiUpdate},
-    render::render_tui_frame,
+    data::{
+        TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiFocusPanel, TuiState, TuiUpdate,
+    },
+    render::{input_cursor_for_click, input_panel_height, render_tui_frame},
 };
 
 pub(super) async fn run_tui_terminal(mut state: TuiState) -> Result<()> {
@@ -100,8 +102,15 @@ async fn run_tui_event_loop(
                     }
                 }
                 Event::Mouse(mouse) if mouse_capture => {
-                    let width = terminal.size().into_diagnostic()?.width;
-                    handle_mouse_event(state, mouse, width);
+                    let size = terminal.size().into_diagnostic()?;
+                    handle_mouse_event(
+                        state,
+                        mouse,
+                        size.width,
+                        size.height,
+                        &sender,
+                        &mut active_task,
+                    );
                 }
                 _ => {}
             }
@@ -249,8 +258,8 @@ async fn handle_input_key(
         }
         KeyCode::Up => state.history_previous(),
         KeyCode::Down => state.history_next(),
-        KeyCode::PageUp => state.scroll_chat_up(),
-        KeyCode::PageDown => state.scroll_chat_down(),
+        KeyCode::PageUp => state.scroll_focused_panel_up(),
+        KeyCode::PageDown => state.scroll_focused_panel_down(),
         KeyCode::Tab if state.approval_picker_active() => {
             state.toggle_approval_selection();
         }
@@ -306,27 +315,215 @@ fn drain_updates(state: &mut TuiState, receiver: &mut UnboundedReceiver<TuiUpdat
     }
 }
 
-fn handle_mouse_event(state: &mut TuiState, mouse: MouseEvent, terminal_width: u16) {
+fn handle_mouse_event(
+    state: &mut TuiState,
+    mouse: MouseEvent,
+    terminal_width: u16,
+    terminal_height: u16,
+    sender: &UnboundedSender<TuiUpdate>,
+    active_task: &mut Option<TuiTaskHandle>,
+) {
+    let layout = mouse_layout(state, terminal_width, terminal_height);
     match mouse.kind {
-        MouseEventKind::ScrollUp => scroll_at_column(state, mouse.column, terminal_width, true),
-        MouseEventKind::ScrollDown => scroll_at_column(state, mouse.column, terminal_width, false),
+        MouseEventKind::ScrollUp => {
+            scroll_at_position(state, &layout, mouse.column, mouse.row, true)
+        }
+        MouseEventKind::ScrollDown => {
+            scroll_at_position(state, &layout, mouse.column, mouse.row, false)
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            handle_mouse_click(state, &layout, mouse.column, mouse.row, sender, active_task)
+        }
         _ => {}
     }
 }
 
-fn scroll_at_column(state: &mut TuiState, column: u16, terminal_width: u16, up: bool) {
-    let side_panel_start = terminal_width.saturating_mul(72) / 100;
-    if column >= side_panel_start {
+#[derive(Clone, Copy)]
+struct TuiMouseLayout {
+    chat: Rect,
+    context: Rect,
+    activity: Rect,
+    input: Rect,
+}
+
+fn mouse_layout(state: &TuiState, terminal_width: u16, terminal_height: u16) -> TuiMouseLayout {
+    let area = Rect::new(0, 0, terminal_width, terminal_height);
+    let input_height = input_panel_height(state, area).min(terminal_height);
+    let input_y = terminal_height.saturating_sub(input_height);
+    let body_y = terminal_height.min(1);
+    let body_height = input_y.saturating_sub(body_y);
+    let chat_width = terminal_width.saturating_mul(72) / 100;
+    let side_width = terminal_width.saturating_sub(chat_width);
+    let context_height = body_height.min(15);
+    let activity_y = body_y.saturating_add(context_height);
+    TuiMouseLayout {
+        chat: Rect::new(0, body_y, chat_width, body_height),
+        context: Rect::new(chat_width, body_y, side_width, context_height),
+        activity: Rect::new(
+            chat_width,
+            activity_y,
+            side_width,
+            body_height.saturating_sub(context_height),
+        ),
+        input: Rect::new(0, input_y, terminal_width, input_height),
+    }
+}
+
+fn scroll_at_position(
+    state: &mut TuiState,
+    layout: &TuiMouseLayout,
+    column: u16,
+    row: u16,
+    up: bool,
+) {
+    if contains(layout.input, column, row) {
+        state.input_mode = true;
+        if up {
+            state.history_previous();
+        } else {
+            state.history_next();
+        }
+    } else if contains(layout.context, column, row) {
+        state.focus_panel(TuiFocusPanel::Context);
+        if up {
+            state.scroll_context_up();
+        } else {
+            state.scroll_context_down();
+        }
+    } else if contains(layout.activity, column, row) {
+        state.focus_panel(TuiFocusPanel::Activity);
         if up {
             state.scroll_activity_up();
         } else {
             state.scroll_activity_down();
         }
-    } else if up {
-        state.scroll_chat_up();
-    } else {
-        state.scroll_chat_down();
+    } else if contains(layout.chat, column, row) {
+        state.focus_panel(TuiFocusPanel::Chat);
+        if up {
+            state.scroll_chat_up();
+        } else {
+            state.scroll_chat_down();
+        }
     }
+}
+
+fn handle_mouse_click(
+    state: &mut TuiState,
+    layout: &TuiMouseLayout,
+    column: u16,
+    row: u16,
+    sender: &UnboundedSender<TuiUpdate>,
+    active_task: &mut Option<TuiTaskHandle>,
+) {
+    if contains(layout.input, column, row) {
+        state.input_mode = true;
+        if let Some(cursor) = input_cursor_for_click(state, layout.input, column, row) {
+            state.set_input_cursor(cursor);
+        }
+    }
+    if let Some(panel) = focus_panel_at_position(layout, column, row) {
+        state.focus_panel(panel);
+    }
+    if contains(layout.activity, column, row) {
+        if let Some(run_id) = activity_recent_run_id_at_position(state, layout.activity, row) {
+            state.input_mode = true;
+            state.replace_command_input(format!("/inspect {run_id}"));
+            state.push_activity(TuiActivityItem::with_detail(
+                TuiActivityKind::System,
+                "run selected",
+                run_id,
+            ));
+        }
+    }
+    if state.busy || !state.approval_picker_active() || !contains(layout.input, column, row) {
+        return;
+    }
+    let Some(selection) = approval_selection_at_input_position(layout.input, column, row) else {
+        return;
+    };
+    match start_pending_approval_task(state, selection, selection.command(), sender.clone()) {
+        Ok(task) => *active_task = Some(task),
+        Err(error) => push_command_error(state, error.to_string()),
+    }
+}
+
+fn activity_recent_run_id_at_position(
+    state: &TuiState,
+    activity: Rect,
+    row: u16,
+) -> Option<String> {
+    if activity.height <= 2 || row <= activity.y || row >= activity.y + activity.height - 1 {
+        return None;
+    }
+    let visible_row = usize::from(row - activity.y - 1);
+    let height = activity.height.saturating_sub(2) as usize;
+    let activity_count = if state.activity.is_empty() {
+        1
+    } else {
+        state.activity.len()
+    };
+    let shown_runs = state.recent_runs.len().min(4);
+    if shown_runs == 0 {
+        return None;
+    }
+    let full_len = activity_count + 2 + shown_runs;
+    let scroll = usize::from(state.event_scroll).min(full_len.saturating_sub(height));
+    let end = full_len.saturating_sub(scroll);
+    let start = end.saturating_sub(height);
+    let full_index = start.saturating_add(visible_row);
+    if full_index >= end {
+        return None;
+    }
+    let recent_start = activity_count + 2;
+    let run_index = full_index.checked_sub(recent_start)?;
+    state
+        .recent_runs
+        .get(run_index)
+        .filter(|_| run_index < shown_runs)
+        .map(|run| run.run_id.0.clone())
+}
+
+fn focus_panel_at_position(
+    layout: &TuiMouseLayout,
+    column: u16,
+    row: u16,
+) -> Option<TuiFocusPanel> {
+    if contains(layout.chat, column, row) {
+        Some(TuiFocusPanel::Chat)
+    } else if contains(layout.context, column, row) {
+        Some(TuiFocusPanel::Context)
+    } else if contains(layout.activity, column, row) {
+        Some(TuiFocusPanel::Activity)
+    } else {
+        None
+    }
+}
+
+fn approval_selection_at_input_position(
+    input: Rect,
+    column: u16,
+    row: u16,
+) -> Option<TuiApprovalSelection> {
+    let content_y = input.y.saturating_add(1);
+    let content_x = input.x.saturating_add(1);
+    if row != content_y || column < content_x {
+        return None;
+    }
+    let x = column - content_x;
+    if (2..=10).contains(&x) {
+        Some(TuiApprovalSelection::Approve)
+    } else if (13..=18).contains(&x) {
+        Some(TuiApprovalSelection::Deny)
+    } else {
+        None
+    }
+}
+
+fn contains(rect: Rect, column: u16, row: u16) -> bool {
+    column >= rect.x
+        && column < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
 }
 
 fn cancel_active_task(state: &mut TuiState, active_task: &mut Option<TuiTaskHandle>) {
@@ -853,6 +1050,276 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mouse_wheel_scrolls_panel_under_pointer() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+        let (sender, _receiver) = unbounded_channel();
+        let mut active_task = None;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::ScrollUp, 10, 5),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+        assert_eq!(state.chat_scroll, 4);
+        assert_eq!(state.focused_panel, TuiFocusPanel::Chat);
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::ScrollDown, 10, 5),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+        assert_eq!(state.chat_scroll, 0);
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::ScrollDown, 80, 2),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+        assert_eq!(state.context_scroll, 4);
+        assert_eq!(state.focused_panel, TuiFocusPanel::Context);
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::ScrollUp, 80, 2),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+        assert_eq!(state.context_scroll, 0);
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::ScrollUp, 80, 20),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+        assert_eq!(state.event_scroll, 4);
+        assert_eq!(state.focused_panel, TuiFocusPanel::Activity);
+    }
+
+    #[tokio::test]
+    async fn mouse_click_selects_focused_panel_for_keyboard_scroll() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+        let (sender, _receiver) = unbounded_channel();
+        let mut active_task = None;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 80, 2),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+        assert_eq!(state.focused_panel, TuiFocusPanel::Context);
+
+        handle_input_key(
+            &mut state,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &sender,
+            &mut active_task,
+        )
+        .await
+        .expect("page down handled");
+
+        assert_eq!(state.context_scroll, 4);
+        assert_eq!(state.chat_scroll, 0);
+        assert_eq!(state.event_scroll, 0);
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 80, 20),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+        assert_eq!(state.focused_panel, TuiFocusPanel::Activity);
+
+        handle_input_key(
+            &mut state,
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &sender,
+            &mut active_task,
+        )
+        .await
+        .expect("page up handled");
+
+        assert_eq!(state.event_scroll, 4);
+    }
+
+    #[tokio::test]
+    async fn mouse_clicking_recent_run_prefills_inspect_command() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+        state.recent_runs = vec![
+            test_run("run_alpha", AgentRunStatus::Completed),
+            test_run("run_beta", AgentRunStatus::Running),
+        ];
+        let layout = mouse_layout(&state, 100, 30);
+        let activity_count = 1usize;
+        let full_len = activity_count + 2 + state.recent_runs.len();
+        let height = layout.activity.height.saturating_sub(2) as usize;
+        let start = full_len.saturating_sub(height);
+        let first_run_full_index = activity_count + 2;
+        let row = layout.activity.y + 1 + (first_run_full_index - start) as u16;
+        let (sender, _receiver) = unbounded_channel();
+        let mut active_task = None;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 80, row),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+
+        assert_eq!(state.focused_panel, TuiFocusPanel::Activity);
+        assert_eq!(state.command_input, "/inspect run_alpha");
+        assert_eq!(state.input_cursor, state.command_input.len());
+        assert!(state.activity.iter().any(|activity| {
+            activity.kind == TuiActivityKind::System
+                && activity.title == "run selected"
+                && activity.detail.as_deref() == Some("run_alpha")
+        }));
+    }
+
+    #[tokio::test]
+    async fn mouse_wheel_over_input_browses_history_without_changing_panel_focus() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+        state.remember_input("/status");
+        state.remember_input("/runs");
+        state.focus_panel(TuiFocusPanel::Activity);
+        let layout = mouse_layout(&state, 100, 30);
+        let input_column = layout.input.x + 4;
+        let input_row = layout.input.y + 1;
+        let (sender, _receiver) = unbounded_channel();
+        let mut active_task = None;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::ScrollUp, input_column, input_row),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+        assert_eq!(state.command_input, "/runs");
+        assert_eq!(state.focused_panel, TuiFocusPanel::Activity);
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::ScrollUp, input_column, input_row),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+        assert_eq!(state.command_input, "/status");
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(MouseEventKind::ScrollDown, input_column, input_row),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+        assert_eq!(state.command_input, "/runs");
+    }
+
+    #[tokio::test]
+    async fn mouse_clicking_input_keeps_panel_focus_and_enters_input_mode() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+        state.replace_command_input("hello");
+        state.input_mode = false;
+        state.focus_panel(TuiFocusPanel::Context);
+        let layout = mouse_layout(&state, 100, 30);
+        let (sender, _receiver) = unbounded_channel();
+        let mut active_task = None;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                layout.input.x + 5,
+                layout.input.y + 1,
+            ),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+
+        assert!(state.input_mode);
+        assert_eq!(state.input_cursor, 3);
+        assert_eq!(state.focused_panel, TuiFocusPanel::Context);
+    }
+
+    #[tokio::test]
+    async fn mouse_clicking_approval_picker_starts_background_decision() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+        state.set_pending_approval(TuiPendingApproval::tool_call(
+            "echo",
+            TuiToolRisk::High,
+            json!({"value": "mouse"}),
+        ));
+        let layout = mouse_layout(&state, 100, 30);
+        let deny_column = layout.input.x + 1 + 13;
+        let option_row = layout.input.y + 1;
+        let (sender, mut receiver) = unbounded_channel();
+        let mut active_task = None;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                deny_column,
+                option_row,
+            ),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+
+        assert!(state.pending_approval.is_none());
+        assert!(state.busy);
+        assert!(active_task.is_some());
+        assert!(state.transcript.iter().any(|item| item.content == "no"));
+
+        apply_updates_until_idle(&mut state, &mut receiver).await;
+        if let Some(task) = active_task.take() {
+            task.join.await.expect("approval task joins");
+        }
+
+        assert!(
+            state
+                .transcript
+                .iter()
+                .any(|item| item.content.contains("Denied high-risk tool 'echo'."))
+        );
+    }
+
+    #[tokio::test]
     async fn typed_approval_reply_starts_background_task() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(&dir, "mock response").await;
@@ -905,6 +1372,15 @@ mod tests {
             if !state.busy {
                 break;
             }
+        }
+    }
+
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
         }
     }
 
