@@ -18,7 +18,10 @@ use super::{
     data::{
         TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiFocusPanel, TuiState, TuiUpdate,
     },
-    render::{input_cursor_for_click, input_panel_height, render_tui_frame},
+    render::{
+        TuiContextClickAction, context_action_for_click, input_cursor_for_click,
+        input_panel_height, render_tui_frame,
+    },
 };
 
 pub(super) async fn run_tui_terminal(mut state: TuiState) -> Result<()> {
@@ -424,6 +427,11 @@ fn handle_mouse_click(
     if let Some(panel) = focus_panel_at_position(layout, column, row) {
         state.focus_panel(panel);
     }
+    if contains(layout.context, column, row)
+        && let Some(action) = context_action_for_click(state, layout.context, column, row)
+    {
+        handle_context_click_action(state, action);
+    }
     if contains(layout.activity, column, row) {
         if let Some(run_id) = activity_recent_run_id_at_position(state, layout.activity, row) {
             state.input_mode = true;
@@ -444,6 +452,20 @@ fn handle_mouse_click(
     match start_pending_approval_task(state, selection, selection.command(), sender.clone()) {
         Ok(task) => *active_task = Some(task),
         Err(error) => push_command_error(state, error.to_string()),
+    }
+}
+
+fn handle_context_click_action(state: &mut TuiState, action: TuiContextClickAction) {
+    match action {
+        TuiContextClickAction::InspectProposal(proposal_id) => {
+            state.input_mode = true;
+            state.replace_command_input(format!("/proposal {proposal_id}"));
+            state.push_activity(TuiActivityItem::with_detail(
+                TuiActivityKind::System,
+                "proposal selected",
+                proposal_id,
+            ));
+        }
     }
 }
 
@@ -1196,6 +1218,77 @@ mod tests {
             activity.kind == TuiActivityKind::System
                 && activity.title == "run selected"
                 && activity.detail.as_deref() == Some("run_alpha")
+        }));
+    }
+
+    #[tokio::test]
+    async fn mouse_clicking_context_proposal_prefills_proposal_command() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+        state.latest_proposals = Some(TuiProposalListSummary {
+            total_count: 2,
+            pending_count: 1,
+            approved_count: 1,
+            denied_count: 0,
+            proposals: vec![
+                TuiProposalSummary {
+                    proposal_id: "proposal_alpha".to_owned(),
+                    run_id: "run_alpha".to_owned(),
+                    agent_id: "echo_agent".to_owned(),
+                    kind: "edit_file".to_owned(),
+                    summary: "Update a file".to_owned(),
+                    status: "pending_approval".to_owned(),
+                    risk: "High".to_owned(),
+                    diff_count: 1,
+                    warning_count: 0,
+                },
+                TuiProposalSummary {
+                    proposal_id: "proposal_beta".to_owned(),
+                    run_id: "run_beta".to_owned(),
+                    agent_id: "echo_agent".to_owned(),
+                    kind: "write_file".to_owned(),
+                    summary: "Write a file".to_owned(),
+                    status: "approved".to_owned(),
+                    risk: "Medium".to_owned(),
+                    diff_count: 1,
+                    warning_count: 0,
+                },
+            ],
+        });
+        let layout = mouse_layout(&state, 100, 30);
+        let proposal_column = layout.context.x + 2;
+        let first_proposal_row = (layout.context.y + 1
+            ..layout.context.y + layout.context.height - 1)
+            .find(|row| {
+                context_action_for_click(&state, layout.context, proposal_column, *row)
+                    == Some(TuiContextClickAction::InspectProposal(
+                        "proposal_alpha".to_owned(),
+                    ))
+            })
+            .expect("proposal row is visible");
+        let (sender, _receiver) = unbounded_channel();
+        let mut active_task = None;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                proposal_column,
+                first_proposal_row,
+            ),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+        );
+
+        assert_eq!(state.focused_panel, TuiFocusPanel::Context);
+        assert_eq!(state.command_input, "/proposal proposal_alpha");
+        assert_eq!(state.input_cursor, state.command_input.len());
+        assert!(state.activity.iter().any(|activity| {
+            activity.kind == TuiActivityKind::System
+                && activity.title == "proposal selected"
+                && activity.detail.as_deref() == Some("proposal_alpha")
         }));
     }
 

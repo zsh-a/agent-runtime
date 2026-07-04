@@ -20,6 +20,29 @@ const MAX_INPUT_HEIGHT: u16 = 8;
 const MIN_INPUT_HEIGHT: u16 = 3;
 const INPUT_PREFIX_WIDTH: u16 = 2;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TuiContextClickAction {
+    InspectProposal(String),
+}
+
+struct ContextPanelItem {
+    item: ListItem<'static>,
+    action: Option<TuiContextClickAction>,
+}
+
+impl ContextPanelItem {
+    fn inert(item: ListItem<'static>) -> Self {
+        Self { item, action: None }
+    }
+
+    fn clickable(item: ListItem<'static>, action: TuiContextClickAction) -> Self {
+        Self {
+            item,
+            action: Some(action),
+        }
+    }
+}
+
 pub(super) fn render_tui_once(state: &TuiState) -> Result<String> {
     let backend = TestBackend::new(110, 34);
     let mut terminal = Terminal::new(backend).into_diagnostic()?;
@@ -88,23 +111,64 @@ fn status_line(state: &TuiState) -> Paragraph<'static> {
 }
 
 fn context_panel(state: &TuiState, area: Rect) -> List<'static> {
+    let items = context_panel_items(state);
+    let height = area.height.saturating_sub(2) as usize;
+    let max_scroll = items.len().saturating_sub(height);
+    let scroll = usize::from(state.context_scroll).min(max_scroll);
+    let title = context_panel_title(scroll, max_scroll);
+    List::new(top_window(
+        items.into_iter().map(|item| item.item).collect(),
+        height,
+        scroll,
+    ))
+    .block(focused_panel_block(state, TuiFocusPanel::Context, title))
+}
+
+pub(super) fn context_action_for_click(
+    state: &TuiState,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<TuiContextClickAction> {
+    if area.width <= 2 || area.height <= 2 {
+        return None;
+    }
+    let content_x = area.x.saturating_add(1);
+    let content_y = area.y.saturating_add(1);
+    if column < content_x
+        || column >= area.x.saturating_add(area.width).saturating_sub(1)
+        || row < content_y
+        || row >= area.y.saturating_add(area.height).saturating_sub(1)
+    {
+        return None;
+    }
+
+    let height = area.height.saturating_sub(2) as usize;
+    let items = context_panel_items(state);
+    let max_scroll = items.len().saturating_sub(height);
+    let scroll = usize::from(state.context_scroll).min(max_scroll);
+    let index = scroll.saturating_add(usize::from(row.saturating_sub(content_y)));
+    items.get(index).and_then(|item| item.action.clone())
+}
+
+fn context_panel_items(state: &TuiState) -> Vec<ContextPanelItem> {
     let mut items = Vec::new();
     if let Some(summary) = &state.catalog_summary {
         items.extend([
-            ListItem::new(format!(
+            context_item(format!(
                 "catalog {} agents / {} tools",
                 summary.agent_count, summary.tool_count
             )),
-            ListItem::new(format!("domains {}", summary.active_domains.join(", "))),
+            context_item(format!("domains {}", summary.active_domains.join(", "))),
         ]);
     } else {
-        items.push(ListItem::new("catalog: not loaded"));
+        items.push(context_item("catalog: not loaded"));
     }
-    items.push(ListItem::new(format!(
+    items.push(context_item(format!(
         "agent: {}",
         state.active_agent_label()
     )));
-    items.push(ListItem::new(format!(
+    items.push(context_item(format!(
         "trace: {}",
         state
             .trace_label
@@ -113,13 +177,13 @@ fn context_panel(state: &TuiState, area: Rect) -> List<'static> {
     )));
     if let Some(trace) = &state.trace {
         items.extend([
-            ListItem::new(format!("run {}", trace.run_id.0)),
-            ListItem::new(format!("agent {}@{}", trace.agent_id, trace.agent_version)),
-            ListItem::new(format!("events: {}", trace.events.len())),
+            context_item(format!("run {}", trace.run_id.0)),
+            context_item(format!("agent {}@{}", trace.agent_id, trace.agent_version)),
+            context_item(format!("events: {}", trace.events.len())),
         ]);
     }
     if let Some(inventory) = &state.tool_inventory {
-        items.push(ListItem::new(format!(
+        items.push(context_item(format!(
             "tools {} high {} blocked {}",
             inventory.total_count(),
             inventory.high_risk_count(),
@@ -139,48 +203,44 @@ fn context_panel(state: &TuiState, area: Rect) -> List<'static> {
         items.extend(trace_event_context_items(events));
     }
     if let Some(context) = &state.context_status {
-        items.push(ListItem::new(""));
-        items.push(ListItem::new(Line::styled(
+        items.push(context_item(""));
+        items.push(context_item(Line::styled(
             "chat context",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )));
-        items.push(ListItem::new(format!(
+        items.push(context_item(format!(
             "tokens {}/{}",
             context.token_estimate, context.max_input_tokens
         )));
-        items.push(ListItem::new(format!("blocks {}", context.block_count)));
+        items.push(context_item(format!("blocks {}", context.block_count)));
         if context.compacted {
             let strategy = context.compaction_strategy.as_deref().unwrap_or("unknown");
-            items.push(ListItem::new(format!(
+            items.push(context_item(format!(
                 "compacted: {} omitted ({strategy})",
                 context.omitted_block_count
             )));
         } else {
-            items.push(ListItem::new("compacted: no"));
+            items.push(context_item("compacted: no"));
         }
     }
     if let Some(approval) = &state.pending_approval {
-        items.push(ListItem::new(""));
-        items.push(ListItem::new(Line::styled(
+        items.push(context_item(""));
+        items.push(context_item(Line::styled(
             "pending approval",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )));
-        items.push(ListItem::new(approval.summary()));
-        items.push(ListItem::new("Tab selects, Enter confirms"));
+        items.push(context_item(approval.summary()));
+        items.push(context_item("Tab selects, Enter confirms"));
     }
-    let height = area.height.saturating_sub(2) as usize;
-    let max_scroll = items.len().saturating_sub(height);
-    let scroll = usize::from(state.context_scroll).min(max_scroll);
-    let title = context_panel_title(scroll, max_scroll);
-    List::new(top_window(items, height, scroll)).block(focused_panel_block(
-        state,
-        TuiFocusPanel::Context,
-        title,
-    ))
+    items
+}
+
+fn context_item(content: impl Into<Text<'static>>) -> ContextPanelItem {
+    ContextPanelItem::inert(ListItem::new(content))
 }
 
 fn context_panel_title(scroll: usize, max_scroll: usize) -> String {
@@ -193,60 +253,60 @@ fn context_panel_title(scroll: usize, max_scroll: usize) -> String {
     }
 }
 
-fn run_context_items(run: &TuiRunSummary) -> Vec<ListItem<'static>> {
+fn run_context_items(run: &TuiRunSummary) -> Vec<ContextPanelItem> {
     let mut items = vec![
-        ListItem::new(""),
-        ListItem::new(Line::styled(
+        context_item(""),
+        context_item(Line::styled(
             "inspected run",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
-        ListItem::new(run.run_id.clone()),
-        ListItem::new(format!("status {}", run.status)),
-        ListItem::new(format!("agent {}", run.agent_id)),
-        ListItem::new(format!(
+        context_item(run.run_id.clone()),
+        context_item(format!("status {}", run.status)),
+        context_item(format!("agent {}", run.agent_id)),
+        context_item(format!(
             "started {}",
             compact_render_text(&run.started_at, 24)
         )),
     ];
     if let Some(finished_at) = &run.finished_at {
-        items.push(ListItem::new(format!(
+        items.push(context_item(format!(
             "finished {}",
             compact_render_text(finished_at, 23)
         )));
     }
     if run.cancellation_requested {
-        items.push(ListItem::new("cancel requested"));
+        items.push(context_item("cancel requested"));
     }
     if let Some(error) = &run.error {
-        items.push(ListItem::new(format!(
+        items.push(context_item(format!(
             "error {}",
             compact_render_text(error, 24)
         )));
     }
-    items.push(ListItem::new(format!(
+    items.push(context_item(format!(
         "input {}",
         compact_render_text(&run.input_preview, 24)
     )));
-    items.push(ListItem::new(format!(
+    items.push(context_item(format!(
         "output {}",
         compact_render_text(&run.output_preview, 24)
     )));
     items
 }
 
-fn workflow_context_items(workflow: &TuiWorkflowSummary) -> Vec<ListItem<'static>> {
+fn workflow_context_items(workflow: &TuiWorkflowSummary) -> Vec<ContextPanelItem> {
     let mut items = vec![
-        ListItem::new(""),
-        ListItem::new(Line::styled(
+        context_item(""),
+        context_item(Line::styled(
             "workflow",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
-        ListItem::new(format!("{} [{}]", workflow.workflow_id, workflow.status)),
-        ListItem::new(format!(
+        context_item(format!("{} [{}]", workflow.workflow_id, workflow.status)),
+        context_item(format!(
             "nodes {} ok {} fail {} skip {}",
             workflow.node_count,
             workflow.completed_count,
@@ -255,7 +315,7 @@ fn workflow_context_items(workflow: &TuiWorkflowSummary) -> Vec<ListItem<'static
         )),
     ];
     if workflow.compensation_count > 0 {
-        items.push(ListItem::new(format!(
+        items.push(context_item(format!(
             "compensations {}",
             workflow.compensation_count
         )));
@@ -270,24 +330,24 @@ fn workflow_context_items(workflow: &TuiWorkflowSummary) -> Vec<ListItem<'static
             detail.push_str(" blocked=");
             detail.push_str(&node.blocked_dependencies.join(","));
         }
-        ListItem::new(detail)
+        context_item(detail)
     }));
     if workflow.nodes.len() > 5 {
-        items.push(ListItem::new(format!("+{} more", workflow.nodes.len() - 5)));
+        items.push(context_item(format!("+{} more", workflow.nodes.len() - 5)));
     }
     items
 }
 
-fn trace_event_context_items(events: &TuiTraceEventSummary) -> Vec<ListItem<'static>> {
+fn trace_event_context_items(events: &TuiTraceEventSummary) -> Vec<ContextPanelItem> {
     let mut items = vec![
-        ListItem::new(""),
-        ListItem::new(Line::styled(
+        context_item(""),
+        context_item(Line::styled(
             "events",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
-        ListItem::new(format!(
+        context_item(format!(
             "{} {}/{}",
             events.run_id, events.shown_count, events.event_count
         )),
@@ -299,24 +359,24 @@ fn trace_event_context_items(events: &TuiTraceEventSummary) -> Vec<ListItem<'sta
             .filter(|detail| !detail.is_empty())
             .map(|detail| format!(" {detail}"))
             .unwrap_or_default();
-        ListItem::new(format!("{}{}", event.kind, detail))
+        context_item(format!("{}{}", event.kind, detail))
     }));
     if events.events.len() > 4 {
-        items.push(ListItem::new(format!("+{} more", events.events.len() - 4)));
+        items.push(context_item(format!("+{} more", events.events.len() - 4)));
     }
     items
 }
 
-fn proposal_context_items(proposals: &TuiProposalListSummary) -> Vec<ListItem<'static>> {
+fn proposal_context_items(proposals: &TuiProposalListSummary) -> Vec<ContextPanelItem> {
     let mut items = vec![
-        ListItem::new(""),
-        ListItem::new(Line::styled(
+        context_item(""),
+        context_item(Line::styled(
             "proposals",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
-        ListItem::new(format!(
+        context_item(format!(
             "total {} pend {} ok {} deny {}",
             proposals.total_count,
             proposals.pending_count,
@@ -325,13 +385,16 @@ fn proposal_context_items(proposals: &TuiProposalListSummary) -> Vec<ListItem<'s
         )),
     ];
     items.extend(proposals.proposals.iter().take(4).map(|proposal| {
-        ListItem::new(format!(
-            "{} {} {}",
-            proposal.proposal_id, proposal.status, proposal.kind
-        ))
+        ContextPanelItem::clickable(
+            ListItem::new(format!(
+                "{} {} {}",
+                proposal.proposal_id, proposal.status, proposal.kind
+            )),
+            TuiContextClickAction::InspectProposal(proposal.proposal_id.clone()),
+        )
     }));
     if proposals.proposals.len() > 4 {
-        items.push(ListItem::new(format!(
+        items.push(context_item(format!(
             "+{} more",
             proposals.proposals.len() - 4
         )));
