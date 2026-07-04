@@ -12,6 +12,14 @@ catalog = "fixtures/contracts/catalog.valid.json"
 [runtime.tools]
 sources = ["fixtures/contracts/shell-tool-source.example.json"]
 
+[runtime.llm]
+provider = "anthropic"
+model = "stepfun-ai/Step-3.7-Flash"
+api_base_url = "https://api-inference.modelscope.cn/v1"
+api_key_env = "MODELSCOPE_API_KEY"
+max_output_tokens = 1024
+max_tool_rounds = 4
+
 [runtime.context]
 max_input_tokens = 128000
 reserve_output_tokens = 4096

@@ -67,6 +67,11 @@ const DEFAULT_EVAL_STORE: &str = ".agent-runtime/eval-store";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8765;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+const DEFAULT_LLM_PROVIDER: &str = "mock";
+const DEFAULT_LLM_MODEL: &str = "mock-model";
+const DEFAULT_MOCK_RESPONSE: &str = "mock response";
+const DEFAULT_API_KEY_ENV: &str = "OPENAI_API_KEY";
+const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOOL_ROUNDS: u32 = 4;
 const TUI_LOG_FILE: &str = "tui.log";
 
@@ -216,16 +221,43 @@ impl AppContext {
     }
 
     fn chat(&self, args: ChatCliArgs) -> chat::ChatLlmOptions {
+        let configured = &self.config.runtime.llm;
         chat::ChatLlmOptions {
-            provider: args.provider,
-            model: args.model,
-            mock_response: args.mock_response,
-            api_base_url: args.api_base_url,
-            api_key_env: args.api_key_env,
-            anthropic_version: args.anthropic_version,
-            temperature: args.temperature,
-            max_output_tokens: args.max_output_tokens,
-            max_tool_rounds: args.max_tool_rounds,
+            provider: config::configured_string(
+                args.provider,
+                DEFAULT_LLM_PROVIDER,
+                configured.provider.as_ref(),
+            ),
+            model: config::configured_string(
+                args.model,
+                DEFAULT_LLM_MODEL,
+                configured.model.as_ref(),
+            ),
+            mock_response: config::configured_string(
+                args.mock_response,
+                DEFAULT_MOCK_RESPONSE,
+                configured.mock_response.as_ref(),
+            ),
+            api_base_url: args
+                .api_base_url
+                .or_else(|| configured.api_base_url.clone()),
+            api_key_env: config::configured_string(
+                args.api_key_env,
+                DEFAULT_API_KEY_ENV,
+                configured.api_key_env.as_ref(),
+            ),
+            anthropic_version: config::configured_string(
+                args.anthropic_version,
+                DEFAULT_ANTHROPIC_VERSION,
+                configured.anthropic_version.as_ref(),
+            ),
+            temperature: args.temperature.or(configured.temperature),
+            max_output_tokens: args.max_output_tokens.or(configured.max_output_tokens),
+            max_tool_rounds: config::configured_u32(
+                args.max_tool_rounds,
+                DEFAULT_MAX_TOOL_ROUNDS,
+                configured.max_tool_rounds,
+            ),
         }
     }
 }

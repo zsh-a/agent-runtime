@@ -30,6 +30,8 @@ pub(crate) struct RuntimeProfile {
     pub(crate) default_agent: Option<String>,
     #[serde(default, skip_serializing_if = "RuntimeTools::is_empty")]
     pub(crate) tools: RuntimeTools,
+    #[serde(default, skip_serializing_if = "RuntimeLlm::is_empty")]
+    pub(crate) llm: RuntimeLlm,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +70,72 @@ pub(crate) struct RuntimeTools {
     pub(crate) mocks: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) host: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct RuntimeLlm {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mock_response: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) api_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) anthropic_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_tool_rounds: Option<u32>,
+}
+
+impl RuntimeLlm {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.provider.is_none()
+            && self.model.is_none()
+            && self.mock_response.is_none()
+            && self.api_base_url.is_none()
+            && self.api_key_env.is_none()
+            && self.anthropic_version.is_none()
+            && self.temperature.is_none()
+            && self.max_output_tokens.is_none()
+            && self.max_tool_rounds.is_none()
+    }
+
+    fn merge(&mut self, overlay: RuntimeLlm) {
+        if overlay.provider.is_some() {
+            self.provider = overlay.provider;
+        }
+        if overlay.model.is_some() {
+            self.model = overlay.model;
+        }
+        if overlay.mock_response.is_some() {
+            self.mock_response = overlay.mock_response;
+        }
+        if overlay.api_base_url.is_some() {
+            self.api_base_url = overlay.api_base_url;
+        }
+        if overlay.api_key_env.is_some() {
+            self.api_key_env = overlay.api_key_env;
+        }
+        if overlay.anthropic_version.is_some() {
+            self.anthropic_version = overlay.anthropic_version;
+        }
+        if overlay.temperature.is_some() {
+            self.temperature = overlay.temperature;
+        }
+        if overlay.max_output_tokens.is_some() {
+            self.max_output_tokens = overlay.max_output_tokens;
+        }
+        if overlay.max_tool_rounds.is_some() {
+            self.max_tool_rounds = overlay.max_tool_rounds;
+        }
+    }
 }
 
 impl RuntimeTools {
@@ -146,6 +214,7 @@ impl RuntimeProfile {
             self.default_agent = overlay.default_agent;
         }
         self.tools.merge(overlay.tools);
+        self.llm.merge(overlay.llm);
         if overlay.host.is_some() {
             self.host = overlay.host;
         }
@@ -322,6 +391,11 @@ sources = ["tools/base.json"]
 mocks = ['echo={"ok":true}']
 host = ["agent", "dev-tool-host"]
 
+[runtime.llm]
+provider = "mock"
+model = "base-model"
+max_tool_rounds = 2
+
 [runtime.context]
 max_input_tokens = 1000
 reserve_output_tokens = 100
@@ -335,6 +409,10 @@ hooks = [
 
 [profiles.strict.tools]
 sources = ["tools/strict.json"]
+
+[profiles.strict.llm]
+model = "strict-model"
+max_output_tokens = 512
 
 [profiles.strict.context]
 reserve_output_tokens = 200
@@ -365,6 +443,10 @@ compact_when_over_budget = false
             config.runtime.tools.host.as_deref(),
             Some(&["agent".to_owned(), "dev-tool-host".to_owned()][..])
         );
+        assert_eq!(config.runtime.llm.provider.as_deref(), Some("mock"));
+        assert_eq!(config.runtime.llm.model.as_deref(), Some("strict-model"));
+        assert_eq!(config.runtime.llm.max_tool_rounds, Some(2));
+        assert_eq!(config.runtime.llm.max_output_tokens, Some(512));
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].name, "guard_tool");
         assert_eq!(

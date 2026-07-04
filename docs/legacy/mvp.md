@@ -1502,6 +1502,15 @@ sources = ["fixtures/contracts/tool-source.example.json"]
 mocks = ['propose_fake={"accepted":true}']
 host = ["target/debug/agent", "dev-tool-host"]
 
+[runtime.llm]
+provider = "mock"
+model = "mock-model"
+mock_response = "mock response"
+api_base_url = "http://127.0.0.1:11434"
+api_key_env = "OPENAI_API_KEY"
+max_output_tokens = 1024
+max_tool_rounds = 4
+
 [profiles.ci]
 store = "/private/tmp/agent-runtime-ci-store"
 timeout_seconds = 10
@@ -1556,14 +1565,14 @@ rtk cargo run -p agent-cli -- \
 ```
 
 The TUI example uses the same `[runtime]`, `[runtime.sources]`,
-`[runtime.tools]`, and `[runtime.context]` sections as `run` and `serve`;
-there is no separate TUI-specific schema.
+`[runtime.tools]`, `[runtime.llm]`, and `[runtime.context]` sections as `run`
+and `serve`; there is no separate TUI-specific schema.
 
 Command-line values win over profile values. Profiles currently cover common
 runtime defaults: `sources.registry`, `sources.catalog`, `store`, `eval_store`,
 `tools.sources`, `tools.mocks`, `tools.host`, `hooks`, `host`, `port`, `stdio`,
-`timeout_seconds`, `max_retries`, `retry_backoff_ms`, and chat context policy under
-`runtime.context`. `agent run`, `agent tick`,
+`timeout_seconds`, `max_retries`, `retry_backoff_ms`, chat provider defaults
+under `runtime.llm`, and chat context policy under `runtime.context`. `agent run`, `agent tick`,
 `agent replay --mode live`, `agent cmd run`, `agent serve`, and `agent tui`
 install configured process hooks into the runtime runner; view-only and
 deterministic replay modes do not execute hooks. One-off debugging runs can

@@ -2095,6 +2095,11 @@ catalog = "{}"
 
 [runtime.tools]
 sources = ["{}"]
+
+[runtime.llm]
+provider = "mock"
+model = "configured-model"
+max_tool_rounds = 2
 "#,
             store.display(),
             registry.display(),
@@ -2119,7 +2124,9 @@ sources = ["{}"]
         .stdout
         .clone();
     let output = String::from_utf8(output).expect("stdout is utf8");
+    assert!(output.contains("mock / configured-model"));
     assert!(output.contains("Ready. Chatting with agent 'execution_review'."));
+    assert!(output.contains("Model: mock / configured-model."));
     assert!(output.contains("catalog 1 agents / 1 tools"));
     assert!(output.contains("tools 4 high 1 blocked 0"));
 }
