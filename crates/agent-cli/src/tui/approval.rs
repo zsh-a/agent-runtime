@@ -1,10 +1,15 @@
 use miette::{Result, miette};
 use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
 
 use super::{
-    chat::{ChatApprovalDecision, resume_chat_approval},
+    chat::{
+        ChatApprovalDecision, TuiTaskHandle, resume_chat_approval, resume_chat_approval_with_emit,
+    },
     data::{
-        TuiActivityItem, TuiActivityKind, TuiPendingApproval, TuiPendingApprovalAction, TuiState,
+        TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiOptions, TuiPendingApproval,
+        TuiPendingApprovalAction, TuiState, TuiUpdate,
     },
     format::{compact_json, pretty_json},
     policy::TuiToolRisk,
@@ -42,11 +47,76 @@ pub(super) async fn call_tool_or_request_approval(
 }
 
 pub(super) async fn approve_pending_tool(state: &mut TuiState) -> Result<()> {
+    approve_pending_tool_with_display(state, "/approve").await
+}
+
+pub(super) fn start_pending_approval_task(
+    state: &mut TuiState,
+    selection: TuiApprovalSelection,
+    display: impl Into<String>,
+    sender: UnboundedSender<TuiUpdate>,
+) -> Result<TuiTaskHandle> {
+    let approval = state
+        .take_pending_approval()
+        .ok_or_else(|| miette!("no pending high-risk tool call to decide"))?;
+    let summary = approval.summary();
+    state.push_user_message(display.into());
+    state.push_activity(TuiActivityItem::with_detail(
+        TuiActivityKind::Approval,
+        match selection {
+            TuiApprovalSelection::Approve => "approval granted",
+            TuiApprovalSelection::Deny => "approval denied",
+        },
+        summary.clone(),
+    ));
+    state.set_busy(true);
+
+    let options = state.options.clone();
+    let cancellation = CancellationToken::new();
+    let join = tokio::spawn({
+        let cancellation = cancellation.clone();
+        let sender = sender.clone();
+        async move {
+            if let Err(error) = run_pending_approval_task(
+                options,
+                approval.clone(),
+                selection,
+                sender.clone(),
+                cancellation.clone(),
+            )
+            .await
+            {
+                let _ = sender.send(TuiUpdate::PendingApproval(Some(approval)));
+                let _ = sender.send(TuiUpdate::Activity(TuiActivityItem::with_detail(
+                    TuiActivityKind::Approval,
+                    "approval still pending",
+                    format!("{summary}; decision failed"),
+                )));
+                let _ = sender.send(TuiUpdate::SystemMessage(format!(
+                    "Approval failed: {error}"
+                )));
+                let _ = sender.send(TuiUpdate::Activity(TuiActivityItem::with_detail(
+                    TuiActivityKind::Error,
+                    "approval failed",
+                    error.to_string(),
+                )));
+            }
+            let _ = sender.send(TuiUpdate::Busy(false));
+        }
+    });
+
+    Ok(TuiTaskHandle { join, cancellation })
+}
+
+pub(super) async fn approve_pending_tool_with_display(
+    state: &mut TuiState,
+    display: impl Into<String>,
+) -> Result<()> {
     let approval = state
         .take_pending_approval()
         .ok_or_else(|| miette!("no pending high-risk tool call to approve"))?;
     let summary = approval.summary();
-    state.push_user_message("/approve");
+    state.push_user_message(display.into());
     state.push_activity(TuiActivityItem::with_detail(
         TuiActivityKind::Approval,
         "approval granted",
@@ -60,10 +130,17 @@ pub(super) async fn approve_pending_tool(state: &mut TuiState) -> Result<()> {
 }
 
 pub(super) async fn deny_pending_tool(state: &mut TuiState) -> Result<()> {
+    deny_pending_tool_with_display(state, "/deny").await
+}
+
+pub(super) async fn deny_pending_tool_with_display(
+    state: &mut TuiState,
+    display: impl Into<String>,
+) -> Result<()> {
     match state.take_pending_approval() {
         Some(approval) => {
             let summary = approval.summary();
-            state.push_user_message("/deny");
+            state.push_user_message(display.into());
             state.push_activity(TuiActivityItem::with_detail(
                 TuiActivityKind::Approval,
                 "approval denied",
@@ -87,7 +164,7 @@ fn request_slash_tool_approval(
 ) -> Result<()> {
     if state.pending_approval.is_some() {
         return Err(miette!(
-            "a high-risk tool call is already pending approval; use /approve or /deny"
+            "a high-risk tool call is already pending approval; use the approval card or type yes/no"
         ));
     }
     let input_preview = compact_json(&input);
@@ -102,7 +179,7 @@ fn request_slash_tool_approval(
         format!("{} ({})", tool_name, risk.label()),
     ));
     state.push_system_message(format!(
-        "Approval required for high-risk tool '{tool_name}'. Use /approve to run or /deny to cancel.\nInput: {input_preview}"
+        "Approval required for high-risk tool '{tool_name}'. Use the approval card: Tab selects, Enter confirms. You can also type yes/no.\nInput: {input_preview}"
     ));
     Ok(())
 }
@@ -166,6 +243,86 @@ async fn deny_pending_approval(state: &mut TuiState, approval: TuiPendingApprova
     Ok(())
 }
 
+async fn run_pending_approval_task(
+    options: TuiOptions,
+    approval: TuiPendingApproval,
+    selection: TuiApprovalSelection,
+    sender: UnboundedSender<TuiUpdate>,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    let risk = approval.risk.clone();
+    match (selection, approval.action) {
+        (
+            TuiApprovalSelection::Approve,
+            TuiPendingApprovalAction::SlashTool { tool_name, input },
+        ) => {
+            approve_slash_tool_with_updates(options, tool_name, input, sender, cancellation)
+                .await?;
+        }
+        (TuiApprovalSelection::Deny, TuiPendingApprovalAction::SlashTool { tool_name, .. }) => {
+            let _ = sender.send(TuiUpdate::SystemMessage(format!(
+                "Denied high-risk tool '{tool_name}'."
+            )));
+        }
+        (
+            TuiApprovalSelection::Approve,
+            TuiPendingApprovalAction::ChatTools {
+                agent_id,
+                state: chat_state,
+                tool_calls,
+                surface_messages,
+            },
+        ) => {
+            let sender_for_emit = sender.clone();
+            let mut emit = move |update| {
+                let _ = sender_for_emit.send(update);
+            };
+            resume_chat_approval_with_emit(
+                options,
+                ChatApprovalDecision::Approve,
+                agent_id,
+                chat_state,
+                tool_calls,
+                surface_messages,
+                cancellation,
+                &mut emit,
+            )
+            .await?;
+            let _ = sender.send(TuiUpdate::Activity(TuiActivityItem::with_detail(
+                TuiActivityKind::Approval,
+                "approved chat tools resumed",
+                risk.label(),
+            )));
+        }
+        (
+            TuiApprovalSelection::Deny,
+            TuiPendingApprovalAction::ChatTools {
+                agent_id,
+                state: chat_state,
+                tool_calls,
+                surface_messages,
+            },
+        ) => {
+            let sender_for_emit = sender.clone();
+            let mut emit = move |update| {
+                let _ = sender_for_emit.send(update);
+            };
+            resume_chat_approval_with_emit(
+                options,
+                ChatApprovalDecision::Deny,
+                agent_id,
+                chat_state,
+                tool_calls,
+                surface_messages,
+                cancellation,
+                &mut emit,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 fn restore_pending_approval(
     state: &mut TuiState,
     approval: TuiPendingApproval,
@@ -191,6 +348,33 @@ async fn approve_slash_tool(state: &mut TuiState, tool_name: String, input: Valu
     }
     let output = runtime.call_tool(&tool_name, input).await?;
     state.push_tool_message(Some(tool_name), pretty_json(&output));
+    Ok(())
+}
+
+async fn approve_slash_tool_with_updates(
+    options: TuiOptions,
+    tool_name: String,
+    input: Value,
+    sender: UnboundedSender<TuiUpdate>,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    let runtime = TuiRuntime::load_with_cancellation(&options, cancellation.clone()).await?;
+    let decision = runtime.tool_policy_decision(&tool_name);
+    if !decision.allowed {
+        return Err(miette!(
+            "tool '{}' is blocked by the current TUI tool policy",
+            tool_name
+        ));
+    }
+    let services = runtime.tool_services(None);
+    let output = services
+        .call_tool_with_cancellation(&tool_name, input, cancellation)
+        .await
+        .map_err(|err| miette!(err.record.message))?;
+    let _ = sender.send(TuiUpdate::ToolMessage {
+        title: Some(tool_name),
+        content: pretty_json(&output),
+    });
     Ok(())
 }
 

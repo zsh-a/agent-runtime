@@ -28,6 +28,7 @@ pub(super) fn start_natural_language_task(
     let mut messages = state.chat_messages.clone();
     messages.push(user_message(text.clone()));
     let options = state.options.clone();
+    let selected_agent_id = state.selected_agent_id.clone();
     let cancellation = CancellationToken::new();
     state.push_user_message(text);
     state.start_assistant_stream();
@@ -35,8 +36,14 @@ pub(super) fn start_natural_language_task(
     let join = tokio::spawn({
         let cancellation = cancellation.clone();
         async move {
-            if let Err(error) =
-                run_natural_language_stream(options, messages, sender.clone(), cancellation).await
+            if let Err(error) = run_natural_language_stream(
+                options,
+                selected_agent_id,
+                messages,
+                sender.clone(),
+                cancellation,
+            )
+            .await
             {
                 let _ = sender.send(TuiUpdate::Error(error.to_string()));
             }
@@ -53,7 +60,7 @@ pub(super) struct TuiTaskHandle {
 
 pub(super) async fn run_natural_language_command(state: &mut TuiState, text: &str) -> Result<()> {
     let runtime = TuiRuntime::load(&state.options).await?;
-    let agent_id = runtime.default_agent_id()?;
+    let agent_id = runtime.resolve_agent_id(state.selected_agent_id.as_deref())?;
     state.push_user_message(text.to_owned());
     run_chat_turn(state, &runtime, &agent_id, text).await
 }
@@ -72,22 +79,43 @@ pub(super) async fn resume_chat_approval(
     tool_calls: Vec<ChatToolCall>,
     surface_messages: Vec<LlmMessage>,
 ) -> Result<()> {
-    let runtime = TuiRuntime::load(&state.options).await?;
-    let provider = provider_from_options(&state.options.chat)?;
+    let cancellation = CancellationToken::new();
+    let options = state.options.clone();
+    let mut emit = |update| state.apply_update(update);
+    resume_chat_approval_with_emit(
+        options,
+        decision,
+        agent_id,
+        chat_state,
+        tool_calls,
+        surface_messages,
+        cancellation,
+        &mut emit,
+    )
+    .await
+}
+
+pub(super) async fn resume_chat_approval_with_emit<Emit>(
+    options: TuiOptions,
+    decision: ChatApprovalDecision,
+    agent_id: String,
+    chat_state: ChatTurnState,
+    tool_calls: Vec<ChatToolCall>,
+    surface_messages: Vec<LlmMessage>,
+    cancellation: CancellationToken,
+    emit: &mut Emit,
+) -> Result<()>
+where
+    Emit: FnMut(TuiUpdate),
+{
+    let runtime = TuiRuntime::load_with_cancellation(&options, cancellation.clone()).await?;
+    let provider = provider_from_options(&options.chat)?;
     let services = runtime.tool_services(Some(agent_id.clone()));
     let runner = ChatTurnRunner::new(provider, services);
-    let cancellation = CancellationToken::new();
-    let mut emit = |update| state.apply_update(update);
     let tool_results = match decision {
         ChatApprovalDecision::Approve => {
-            execute_chat_tool_calls(
-                &runtime,
-                &agent_id,
-                &tool_calls,
-                cancellation.clone(),
-                &mut emit,
-            )
-            .await
+            execute_chat_tool_calls(&runtime, &agent_id, &tool_calls, cancellation.clone(), emit)
+                .await
         }
         ChatApprovalDecision::Deny => denied_chat_tool_results(&tool_calls),
     };
@@ -141,12 +169,13 @@ async fn run_chat_turn(
 
 async fn run_natural_language_stream(
     options: TuiOptions,
+    selected_agent_id: Option<String>,
     messages: Vec<LlmMessage>,
     sender: UnboundedSender<TuiUpdate>,
     cancellation: CancellationToken,
 ) -> Result<()> {
     let runtime = TuiRuntime::load_with_cancellation(&options, cancellation.clone()).await?;
-    let agent_id = runtime.default_agent_id()?;
+    let agent_id = runtime.resolve_agent_id(selected_agent_id.as_deref())?;
     let provider = provider_from_options(&options.chat)?;
     let services = runtime.tool_services(Some(agent_id.clone()));
     let runner = ChatTurnRunner::new(provider, services);
@@ -262,7 +291,7 @@ where
                 approval.summary(),
             )));
             emit(TuiUpdate::SystemMessage(format!(
-                "Approval required for high-risk chat tool '{}'. Use /approve to run or /deny to cancel.",
+                "Approval required for high-risk chat tool '{}'. Use the approval card: Tab selects, Enter confirms. You can also type yes/no.",
                 approval.subject()
             )));
             return Ok(());

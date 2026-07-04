@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentError, AgentRegistry, AgentRuntimeCatalog, AgentServices, AgentSpec, AgentTrace,
-    PROTOCOL_VERSION, RunRequest, ToolError, ToolSpec,
+    AgentError, AgentRegistry, AgentRunStatus, AgentRuntimeCatalog, AgentServices, AgentSpec,
+    AgentTrace, PROTOCOL_VERSION, RunId, RunRequest, ToolError, ToolSpec, WorkflowRunRequest,
+    WorkflowRunResult,
 };
 use agent_llm::{LlmMessage, LlmRole};
 use agent_runtime::{
@@ -21,7 +22,7 @@ use crate::{
     config::{execution_policy, hook_manager},
     registry::load_registry,
     tools::CliServices,
-    trace_store::write_store_trace,
+    trace_store::{write_store_trace, write_workflow_traces},
 };
 
 use super::{
@@ -41,6 +42,7 @@ struct TuiRuntimeInner {
     catalog: Option<AgentRuntimeCatalog>,
     tool_specs: Vec<ToolSpec>,
     services: Arc<CliServices>,
+    run_store: Arc<dyn agent_core::AgentRunStore>,
     runner: AgentRunner,
     policy: TuiToolPolicy,
     cancellation: CancellationToken,
@@ -73,12 +75,13 @@ impl TuiRuntime {
                 .await
                 .into_diagnostic()?,
         );
+        let run_store: Arc<dyn agent_core::AgentRunStore> = store.clone();
         let lock_store = Arc::new(
             FileLockStore::new(options.store_path.clone())
                 .await
                 .into_diagnostic()?,
         );
-        let runner = AgentRunner::new(loaded.registry, store, runner_services)
+        let runner = AgentRunner::new(loaded.registry, run_store.clone(), runner_services)
             .with_lock_store(lock_store)
             .with_hooks(hook_manager(options.hooks.clone())?)
             .with_policy(execution_policy(
@@ -94,6 +97,7 @@ impl TuiRuntime {
                 catalog: loaded.catalog,
                 tool_specs: loaded.tool_specs,
                 services,
+                run_store,
                 runner,
                 policy: TuiToolPolicy::new(options.allow_high_risk_tools),
                 cancellation,
@@ -152,12 +156,84 @@ impl TuiRuntime {
             .map_err(|err| miette!(err.record.message))
     }
 
+    pub(super) async fn run_workflow(
+        &self,
+        request: WorkflowRunRequest,
+    ) -> Result<WorkflowRunResult> {
+        let result = self
+            .inner
+            .runner
+            .run_workflow(request)
+            .await
+            .into_diagnostic()?;
+        write_workflow_traces(&self.inner.options.store_path, &result).await?;
+        Ok(result)
+    }
+
+    pub(super) async fn cancel_run(&self, run_id: RunId) -> Result<TuiCancelRunResult> {
+        let Some(mut run) = self
+            .inner
+            .run_store
+            .get_run(&run_id)
+            .await
+            .into_diagnostic()?
+        else {
+            return Err(miette!("run '{}' was not found", run_id.0));
+        };
+        let status = run.status.clone();
+        if status == AgentRunStatus::Running {
+            run.request_cancellation(
+                time::OffsetDateTime::now_utc(),
+                Some("agent_tui".to_owned()),
+            );
+            self.inner
+                .run_store
+                .update_run(run)
+                .await
+                .into_diagnostic()?;
+            return Ok(TuiCancelRunResult {
+                run_id,
+                cancellation_requested: true,
+                status,
+                message: "cancellation intent persisted".to_owned(),
+            });
+        }
+        Ok(TuiCancelRunResult {
+            run_id,
+            cancellation_requested: false,
+            status,
+            message: "run is not active".to_owned(),
+        })
+    }
+
     pub(super) fn default_agent_id(&self) -> Result<String> {
         self.inner
             .agent_specs
             .first()
             .map(|agent| agent.id.clone())
             .ok_or_else(|| miette!("no default agent is available"))
+    }
+
+    pub(super) fn resolve_agent_id(&self, selected_agent_id: Option<&str>) -> Result<String> {
+        let Some(selected_agent_id) = selected_agent_id
+            .map(str::trim)
+            .filter(|agent_id| !agent_id.is_empty())
+        else {
+            return self.default_agent_id();
+        };
+        if self
+            .inner
+            .agent_specs
+            .iter()
+            .any(|agent| agent.id == selected_agent_id)
+        {
+            return Ok(selected_agent_id.to_owned());
+        }
+        Err(miette!("unknown agent '{selected_agent_id}'"))
+    }
+
+    pub(super) fn agent_specs(&self) -> &[AgentSpec] {
+        &self.inner.agent_specs
     }
 
     pub(super) fn chat_tools(&self) -> Vec<ToolSpec> {
@@ -222,6 +298,14 @@ impl TuiRuntime {
         }
         Some(sections.join("\n\n"))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiCancelRunResult {
+    pub(super) run_id: RunId,
+    pub(super) cancellation_requested: bool,
+    pub(super) status: AgentRunStatus,
+    pub(super) message: String,
 }
 
 struct LoadedRuntimeRegistry {

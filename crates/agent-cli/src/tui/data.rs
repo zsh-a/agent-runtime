@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use agent_chat::{ChatToolCall, ChatTurnState};
-use agent_core::{AgentRunRecord, ContextPolicy, HookSpec};
+use agent_core::{AgentRunRecord, AgentSpec, ContextPolicy, HookSpec};
 use agent_llm::LlmMessage;
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::{
     catalog::{CatalogSummary, read_catalog},
     chat::ChatLlmOptions,
+    registry::load_registry,
     tools::ToolOverrides,
 };
 
@@ -58,6 +59,94 @@ pub(super) struct TuiContextStatus {
     pub(super) omitted_block_count: u32,
     pub(super) compacted: bool,
     pub(super) compaction_strategy: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiAgentSummary {
+    pub(super) id: String,
+    pub(super) name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiRunSummary {
+    pub(super) run_id: String,
+    pub(super) agent_id: String,
+    pub(super) status: String,
+    pub(super) started_at: String,
+    pub(super) finished_at: Option<String>,
+    pub(super) cancellation_requested: bool,
+    pub(super) error: Option<String>,
+    pub(super) input_preview: String,
+    pub(super) output_preview: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiWorkflowSummary {
+    pub(super) workflow_id: String,
+    pub(super) status: String,
+    pub(super) node_count: usize,
+    pub(super) completed_count: usize,
+    pub(super) failed_count: usize,
+    pub(super) skipped_count: usize,
+    pub(super) compensation_count: usize,
+    pub(super) nodes: Vec<TuiWorkflowNodeSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiWorkflowNodeSummary {
+    pub(super) node_id: String,
+    pub(super) agent_id: String,
+    pub(super) status: String,
+    pub(super) run_id: Option<String>,
+    pub(super) depends_on: Vec<String>,
+    pub(super) reason: Option<String>,
+    pub(super) blocked_dependencies: Vec<String>,
+    pub(super) compensation: Option<TuiWorkflowCompensationSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiWorkflowCompensationSummary {
+    pub(super) agent_id: String,
+    pub(super) status: String,
+    pub(super) run_id: Option<String>,
+    pub(super) error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiProposalListSummary {
+    pub(super) total_count: usize,
+    pub(super) pending_count: usize,
+    pub(super) approved_count: usize,
+    pub(super) denied_count: usize,
+    pub(super) proposals: Vec<TuiProposalSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiProposalSummary {
+    pub(super) proposal_id: String,
+    pub(super) run_id: String,
+    pub(super) agent_id: String,
+    pub(super) kind: String,
+    pub(super) summary: String,
+    pub(super) status: String,
+    pub(super) risk: String,
+    pub(super) diff_count: usize,
+    pub(super) warning_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiTraceEventSummary {
+    pub(super) run_id: String,
+    pub(super) agent_id: String,
+    pub(super) event_count: usize,
+    pub(super) shown_count: usize,
+    pub(super) events: Vec<TuiTraceEventItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiTraceEventItem {
+    pub(super) kind: String,
+    pub(super) detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +218,35 @@ impl TuiActivityItem {
 pub(super) struct TuiPendingApproval {
     pub(super) risk: TuiToolRisk,
     pub(super) action: TuiPendingApprovalAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TuiApprovalSelection {
+    Approve,
+    Deny,
+}
+
+impl TuiApprovalSelection {
+    pub(super) fn toggled(self) -> Self {
+        match self {
+            Self::Approve => Self::Deny,
+            Self::Deny => Self::Approve,
+        }
+    }
+
+    pub(super) fn display(self) -> &'static str {
+        match self {
+            Self::Approve => "Approve",
+            Self::Deny => "Deny",
+        }
+    }
+
+    pub(super) fn command(self) -> &'static str {
+        match self {
+            Self::Approve => "yes",
+            Self::Deny => "no",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +346,8 @@ pub(crate) struct TuiOptions {
 
 pub(super) struct TuiState {
     pub(super) options: TuiOptions,
+    pub(super) selected_agent_id: Option<String>,
+    pub(super) agents: Vec<TuiAgentSummary>,
     pub(super) catalog_summary: Option<CatalogSummary>,
     pub(super) trace: Option<agent_core::AgentTrace>,
     pub(super) trace_label: Option<String>,
@@ -242,7 +362,12 @@ pub(super) struct TuiState {
     pub(super) activity: VecDeque<TuiActivityItem>,
     pub(super) tool_inventory: Option<TuiToolInventory>,
     pub(super) context_status: Option<TuiContextStatus>,
+    pub(super) latest_run: Option<TuiRunSummary>,
+    pub(super) latest_workflow: Option<TuiWorkflowSummary>,
+    pub(super) latest_proposals: Option<TuiProposalListSummary>,
+    pub(super) latest_events: Option<TuiTraceEventSummary>,
     pub(super) pending_approval: Option<TuiPendingApproval>,
+    pub(super) approval_selection: TuiApprovalSelection,
     pub(super) chat_messages: Vec<LlmMessage>,
     pub(super) chat_scroll: u16,
     pub(super) event_scroll: u16,
@@ -259,9 +384,18 @@ impl TuiState {
         let trace_label = options.trace_path.as_ref().map(ToString::to_string);
         let recent_runs = read_recent_runs(&options.store_path).await?;
         let tool_inventory = Some(load_tui_tool_inventory(&options).await?);
-        let status = status_line(&catalog_summary, &trace, recent_runs.len());
+        let agents = load_agent_summaries(&options).await?;
+        let selected_agent_id = agents.first().map(|agent| agent.id.clone());
+        let status = status_line(
+            selected_agent_id.as_deref(),
+            &catalog_summary,
+            &trace,
+            recent_runs.len(),
+        );
         let mut state = Self {
             options,
+            selected_agent_id,
+            agents,
             catalog_summary,
             trace,
             trace_label,
@@ -276,7 +410,12 @@ impl TuiState {
             activity: VecDeque::new(),
             tool_inventory,
             context_status: None,
+            latest_run: None,
+            latest_workflow: None,
+            latest_proposals: None,
+            latest_events: None,
             pending_approval: None,
+            approval_selection: TuiApprovalSelection::Approve,
             chat_messages: Vec::new(),
             chat_scroll: 0,
             event_scroll: 0,
@@ -285,13 +424,14 @@ impl TuiState {
             history_draft: None,
             busy: false,
         };
-        state.push_system_message("Ready. Type a message and press Enter. Use /help for commands.");
+        state.push_system_message(startup_message(&state));
         state.push_event("ready");
         Ok(state)
     }
 
     pub(super) async fn refresh(&mut self) -> Result<()> {
         self.catalog_summary = load_catalog_summary(self.options.catalog_path.as_ref()).await?;
+        self.agents = load_agent_summaries(&self.options).await?;
         self.tool_inventory = Some(load_tui_tool_inventory(&self.options).await?);
         if let Some(path) = &self.options.trace_path {
             self.trace = Some(read_trace(path.clone()).await?);
@@ -303,14 +443,53 @@ impl TuiState {
 
     pub(super) async fn refresh_runs(&mut self) -> Result<()> {
         self.recent_runs = read_recent_runs(&self.options.store_path).await?;
-        self.status = status_line(&self.catalog_summary, &self.trace, self.recent_runs.len());
+        self.update_status();
         Ok(())
+    }
+
+    pub(super) fn set_recent_runs(&mut self, runs: Vec<AgentRunRecord>) {
+        self.recent_runs = runs.into_iter().take(8).collect();
+        self.update_status();
     }
 
     pub(super) fn set_trace(&mut self, label: impl Into<String>, trace: agent_core::AgentTrace) {
         self.trace = Some(trace);
         self.trace_label = Some(label.into());
-        self.status = status_line(&self.catalog_summary, &self.trace, self.recent_runs.len());
+        self.update_status();
+    }
+
+    pub(super) fn set_selected_agent(&mut self, agent_id: impl Into<String>) {
+        self.selected_agent_id = Some(agent_id.into());
+        self.update_status();
+    }
+
+    pub(super) fn set_latest_workflow(&mut self, summary: TuiWorkflowSummary) {
+        self.latest_workflow = Some(summary);
+    }
+
+    pub(super) fn set_latest_run(&mut self, summary: TuiRunSummary) {
+        self.latest_run = Some(summary);
+    }
+
+    pub(super) fn set_latest_proposals(&mut self, summary: TuiProposalListSummary) {
+        self.latest_proposals = Some(summary);
+    }
+
+    pub(super) fn set_latest_events(&mut self, summary: TuiTraceEventSummary) {
+        self.latest_events = Some(summary);
+    }
+
+    pub(super) fn active_agent_label(&self) -> &str {
+        self.selected_agent_id.as_deref().unwrap_or("auto")
+    }
+
+    fn update_status(&mut self) {
+        self.status = status_line(
+            self.selected_agent_id.as_deref(),
+            &self.catalog_summary,
+            &self.trace,
+            self.recent_runs.len(),
+        );
     }
 
     pub(super) fn enter_command(&mut self, prefix: &str) {
@@ -343,7 +522,12 @@ impl TuiState {
         self.active_assistant_index = None;
         self.events.clear();
         self.activity.clear();
+        self.latest_run = None;
+        self.latest_workflow = None;
+        self.latest_proposals = None;
+        self.latest_events = None;
         self.pending_approval = None;
+        self.approval_selection = TuiApprovalSelection::Approve;
         self.chat_scroll = 0;
         self.event_scroll = 0;
     }
@@ -425,10 +609,37 @@ impl TuiState {
 
     pub(super) fn set_pending_approval(&mut self, approval: TuiPendingApproval) {
         self.pending_approval = Some(approval);
+        self.approval_selection = TuiApprovalSelection::Approve;
     }
 
     pub(super) fn take_pending_approval(&mut self) -> Option<TuiPendingApproval> {
-        self.pending_approval.take()
+        let approval = self.pending_approval.take();
+        if approval.is_some() {
+            self.approval_selection = TuiApprovalSelection::Approve;
+        }
+        approval
+    }
+
+    pub(super) fn toggle_approval_selection(&mut self) {
+        if self.pending_approval.is_some() {
+            self.approval_selection = self.approval_selection.toggled();
+        }
+    }
+
+    pub(super) fn select_approval(&mut self) {
+        if self.pending_approval.is_some() {
+            self.approval_selection = TuiApprovalSelection::Approve;
+        }
+    }
+
+    pub(super) fn select_denial(&mut self) {
+        if self.pending_approval.is_some() {
+            self.approval_selection = TuiApprovalSelection::Deny;
+        }
+    }
+
+    pub(super) fn approval_picker_active(&self) -> bool {
+        self.pending_approval.is_some() && self.command_input.trim().is_empty()
     }
 
     pub(super) fn apply_update(&mut self, update: TuiUpdate) {
@@ -438,6 +649,7 @@ impl TuiState {
                 self.context_status = Some(status);
             }
             TuiUpdate::PendingApproval(approval) => {
+                self.approval_selection = TuiApprovalSelection::Approve;
                 self.pending_approval = approval;
             }
             TuiUpdate::SystemMessage(content) => self.push_system_message(content),
@@ -766,6 +978,26 @@ async fn load_catalog_summary(path: Option<&Utf8PathBuf>) -> Result<Option<Catal
     }
 }
 
+async fn load_agent_summaries(options: &TuiOptions) -> Result<Vec<TuiAgentSummary>> {
+    if let Some(path) = &options.catalog_path {
+        let catalog = read_catalog(path.clone()).await?;
+        return Ok(agent_summaries(catalog.agents.iter()));
+    }
+    let registry = load_registry(options.registry_path.clone()).await?;
+    let specs = registry.list_specs();
+    Ok(agent_summaries(specs.iter()))
+}
+
+fn agent_summaries<'a>(agents: impl IntoIterator<Item = &'a AgentSpec>) -> Vec<TuiAgentSummary> {
+    agents
+        .into_iter()
+        .map(|agent| TuiAgentSummary {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+        })
+        .collect()
+}
+
 async fn load_trace(path: Option<&Utf8PathBuf>) -> Result<Option<agent_core::AgentTrace>> {
     match path {
         Some(path) => Ok(Some(read_trace(path.clone()).await?)),
@@ -811,21 +1043,43 @@ async fn read_json(path: Utf8PathBuf) -> Result<Value> {
 }
 
 fn status_line(
+    selected_agent_id: Option<&str>,
     catalog_summary: &Option<CatalogSummary>,
     trace: &Option<agent_core::AgentTrace>,
     run_count: usize,
 ) -> String {
     format!(
-        "catalog: {} | trace: {} | runs: {}",
+        "agent {} | catalog {} | trace {} | runs {}",
+        selected_agent_id.unwrap_or("auto"),
         catalog_summary
             .as_ref()
             .map(|summary| summary.agent_count.to_string())
-            .unwrap_or_else(|| "not loaded".to_owned()),
+            .unwrap_or_else(|| "-".to_owned()),
         trace
             .as_ref()
             .map(|trace| trace.run_id.0.clone())
-            .unwrap_or_else(|| "not loaded".to_owned()),
+            .unwrap_or_else(|| "-".to_owned()),
         run_count
+    )
+}
+
+fn startup_message(state: &TuiState) -> String {
+    let tool_count = state
+        .tool_inventory
+        .as_ref()
+        .map(TuiToolInventory::total_count)
+        .unwrap_or(0);
+    format!(
+        "Ready. Chatting with agent '{}'.\n\n\
+        Type a message and press Enter, or use slash commands.\n\
+        Quick commands: /status, /runs, /tools, /help <command>.\n\
+        Tab completes commands, agents, tools, runs, proposals, and help topics.\n\
+        Model: {} / {}. Tools: {}. Recent runs: {}.",
+        state.active_agent_label(),
+        state.options.chat.provider,
+        state.options.chat.model,
+        tool_count,
+        state.recent_runs.len()
     )
 }
 
@@ -865,6 +1119,11 @@ mod tests {
                 mouse_capture: false,
                 once: false,
             },
+            selected_agent_id: Some("echo_agent".to_owned()),
+            agents: vec![TuiAgentSummary {
+                id: "echo_agent".to_owned(),
+                name: "Echo Agent".to_owned(),
+            }],
             catalog_summary: None,
             trace: None,
             trace_label: None,
@@ -879,7 +1138,12 @@ mod tests {
             activity: VecDeque::new(),
             tool_inventory: None,
             context_status: None,
+            latest_run: None,
+            latest_workflow: None,
+            latest_proposals: None,
+            latest_events: None,
             pending_approval: None,
+            approval_selection: TuiApprovalSelection::Approve,
             chat_messages: Vec::new(),
             chat_scroll: 0,
             event_scroll: 0,
@@ -911,6 +1175,22 @@ mod tests {
             tool_execution: ChatToolExecution::Client,
         })
         .expect("chat state")
+    }
+
+    #[test]
+    fn startup_message_summarizes_next_steps() {
+        let state = test_state();
+
+        let message = startup_message(&state);
+
+        assert!(message.contains("Ready. Chatting with agent 'echo_agent'."));
+        assert!(message.contains("Quick commands: /status, /runs, /tools, /help <command>."));
+        assert!(
+            message.contains(
+                "Tab completes commands, agents, tools, runs, proposals, and help topics."
+            )
+        );
+        assert!(message.contains("Model: mock / mock-model."));
     }
 
     #[test]

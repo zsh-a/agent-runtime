@@ -2054,7 +2054,8 @@ fn tui_once_renders_catalog_and_trace_snapshot() {
     assert!(output.contains("Input"));
     assert!(output.contains("Enter sends"));
     assert!(output.contains("agent echo_agent@0.1.0"));
-    assert!(output.contains("Ready. Type a message"));
+    assert!(output.contains("Ready. Chatting with agent 'execution_review'."));
+    assert!(output.contains("Quick commands: /status, /runs, /tools, /help <command>."));
 }
 
 #[test]

@@ -10,7 +10,10 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::data::{TranscriptItem, TranscriptRole, TuiActivityItem, TuiActivityKind, TuiState};
+use super::data::{
+    TranscriptItem, TranscriptRole, TuiActivityItem, TuiActivityKind, TuiApprovalSelection,
+    TuiProposalListSummary, TuiRunSummary, TuiState, TuiTraceEventSummary, TuiWorkflowSummary,
+};
 
 const MAX_INPUT_HEIGHT: u16 = 8;
 const MIN_INPUT_HEIGHT: u16 = 3;
@@ -42,7 +45,7 @@ pub(super) fn render_tui_frame(frame: &mut Frame<'_>, state: &TuiState) {
         .split(root[1]);
     let side = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(11), Constraint::Min(8)])
+        .constraints([Constraint::Length(15), Constraint::Min(8)])
         .split(body[1]);
 
     frame.render_widget(status_line(state), root[0]);
@@ -97,6 +100,10 @@ fn context_panel(state: &TuiState) -> List<'static> {
         items.push(ListItem::new("catalog: not loaded"));
     }
     items.push(ListItem::new(format!(
+        "agent: {}",
+        state.active_agent_label()
+    )));
+    items.push(ListItem::new(format!(
         "trace: {}",
         state
             .trace_label
@@ -117,6 +124,18 @@ fn context_panel(state: &TuiState) -> List<'static> {
             inventory.high_risk_count(),
             inventory.blocked_count()
         )));
+    }
+    if let Some(run) = &state.latest_run {
+        items.extend(run_context_items(run));
+    }
+    if let Some(workflow) = &state.latest_workflow {
+        items.extend(workflow_context_items(workflow));
+    }
+    if let Some(proposals) = &state.latest_proposals {
+        items.extend(proposal_context_items(proposals));
+    }
+    if let Some(events) = &state.latest_events {
+        items.extend(trace_event_context_items(events));
     }
     if let Some(context) = &state.context_status {
         items.push(ListItem::new(""));
@@ -150,9 +169,155 @@ fn context_panel(state: &TuiState) -> List<'static> {
                 .add_modifier(Modifier::BOLD),
         )));
         items.push(ListItem::new(approval.summary()));
-        items.push(ListItem::new("/approve or /deny"));
+        items.push(ListItem::new("Tab selects, Enter confirms"));
     }
     List::new(items).block(panel_block("Context"))
+}
+
+fn run_context_items(run: &TuiRunSummary) -> Vec<ListItem<'static>> {
+    let mut items = vec![
+        ListItem::new(""),
+        ListItem::new(Line::styled(
+            "inspected run",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        ListItem::new(run.run_id.clone()),
+        ListItem::new(format!("status {}", run.status)),
+        ListItem::new(format!("agent {}", run.agent_id)),
+        ListItem::new(format!(
+            "started {}",
+            compact_render_text(&run.started_at, 24)
+        )),
+    ];
+    if let Some(finished_at) = &run.finished_at {
+        items.push(ListItem::new(format!(
+            "finished {}",
+            compact_render_text(finished_at, 23)
+        )));
+    }
+    if run.cancellation_requested {
+        items.push(ListItem::new("cancel requested"));
+    }
+    if let Some(error) = &run.error {
+        items.push(ListItem::new(format!(
+            "error {}",
+            compact_render_text(error, 24)
+        )));
+    }
+    items.push(ListItem::new(format!(
+        "input {}",
+        compact_render_text(&run.input_preview, 24)
+    )));
+    items.push(ListItem::new(format!(
+        "output {}",
+        compact_render_text(&run.output_preview, 24)
+    )));
+    items
+}
+
+fn workflow_context_items(workflow: &TuiWorkflowSummary) -> Vec<ListItem<'static>> {
+    let mut items = vec![
+        ListItem::new(""),
+        ListItem::new(Line::styled(
+            "workflow",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        ListItem::new(format!("{} [{}]", workflow.workflow_id, workflow.status)),
+        ListItem::new(format!(
+            "nodes {} ok {} fail {} skip {}",
+            workflow.node_count,
+            workflow.completed_count,
+            workflow.failed_count,
+            workflow.skipped_count
+        )),
+    ];
+    if workflow.compensation_count > 0 {
+        items.push(ListItem::new(format!(
+            "compensations {}",
+            workflow.compensation_count
+        )));
+    }
+    items.extend(workflow.nodes.iter().take(5).map(|node| {
+        let mut detail = format!("{} {}", node.node_id, node.status);
+        if let Some(reason) = &node.reason {
+            detail.push_str(" ");
+            detail.push_str(reason);
+        }
+        if !node.blocked_dependencies.is_empty() {
+            detail.push_str(" blocked=");
+            detail.push_str(&node.blocked_dependencies.join(","));
+        }
+        ListItem::new(detail)
+    }));
+    if workflow.nodes.len() > 5 {
+        items.push(ListItem::new(format!("+{} more", workflow.nodes.len() - 5)));
+    }
+    items
+}
+
+fn trace_event_context_items(events: &TuiTraceEventSummary) -> Vec<ListItem<'static>> {
+    let mut items = vec![
+        ListItem::new(""),
+        ListItem::new(Line::styled(
+            "events",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        ListItem::new(format!(
+            "{} {}/{}",
+            events.run_id, events.shown_count, events.event_count
+        )),
+    ];
+    items.extend(events.events.iter().take(4).map(|event| {
+        let detail = event
+            .detail
+            .as_deref()
+            .filter(|detail| !detail.is_empty())
+            .map(|detail| format!(" {detail}"))
+            .unwrap_or_default();
+        ListItem::new(format!("{}{}", event.kind, detail))
+    }));
+    if events.events.len() > 4 {
+        items.push(ListItem::new(format!("+{} more", events.events.len() - 4)));
+    }
+    items
+}
+
+fn proposal_context_items(proposals: &TuiProposalListSummary) -> Vec<ListItem<'static>> {
+    let mut items = vec![
+        ListItem::new(""),
+        ListItem::new(Line::styled(
+            "proposals",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        ListItem::new(format!(
+            "total {} pend {} ok {} deny {}",
+            proposals.total_count,
+            proposals.pending_count,
+            proposals.approved_count,
+            proposals.denied_count
+        )),
+    ];
+    items.extend(proposals.proposals.iter().take(4).map(|proposal| {
+        ListItem::new(format!(
+            "{} {} {}",
+            proposal.proposal_id, proposal.status, proposal.kind
+        ))
+    }));
+    if proposals.proposals.len() > 4 {
+        items.push(ListItem::new(format!(
+            "+{} more",
+            proposals.proposals.len() - 4
+        )));
+    }
+    items
 }
 
 fn chat_panel(state: &TuiState, area: Rect) -> Paragraph<'static> {
@@ -253,8 +418,10 @@ fn command_panel(state: &TuiState, area: Rect) -> InputPanel {
         .collect::<Vec<_>>();
     let title = if state.busy {
         "Input  Esc/Ctrl-C cancels"
+    } else if state.pending_approval.is_some() {
+        "Input  pending approval: Tab selects  Enter confirms"
     } else {
-        "Input  Enter sends  Shift+Enter newline"
+        "Input  Enter sends  Shift+Enter newline  Tab completes"
     };
 
     InputPanel {
@@ -294,7 +461,14 @@ fn input_lines(state: &TuiState, width: u16) -> BuiltInput {
     };
 
     if body.is_empty() {
-        let placeholder = if slash { "command" } else { "message or /help" };
+        if state.pending_approval.is_some() && !slash {
+            return approval_picker_lines(state, width);
+        }
+        let placeholder = if slash {
+            "command, Tab completes"
+        } else {
+            "message, /status, or /help"
+        };
         return BuiltInput {
             lines: vec![Line::from(vec![
                 Span::styled(prompt.to_owned(), prompt_style),
@@ -468,6 +642,59 @@ fn wrap_line(line: &str, width: u16, prefix: &str, style: Style) -> Vec<Line<'st
     lines
 }
 
+fn compact_render_text(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+    let mut truncated = compact
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn approval_picker_lines(state: &TuiState, width: u16) -> BuiltInput {
+    let approve_selected = state.approval_selection == TuiApprovalSelection::Approve;
+    let deny_selected = state.approval_selection == TuiApprovalSelection::Deny;
+    let approve = approval_option_span("Approve", approve_selected, Color::Green);
+    let deny = approval_option_span("Deny", deny_selected, Color::Red);
+    let cursor_x = if approve_selected { 2 } else { 14 }.min(width.saturating_sub(1));
+    BuiltInput {
+        lines: vec![
+            Line::from(vec![
+                Span::styled("> ", Style::default().fg(Color::Yellow)),
+                approve,
+                Span::raw("  "),
+                deny,
+            ]),
+            Line::from(vec![Span::styled(
+                "  Tab/Left/Right selects, Enter confirms. You can still type a message or slash command.",
+                Style::default().fg(Color::DarkGray),
+            )]),
+        ],
+        cursor_x,
+        cursor_y: 0,
+    }
+}
+
+fn approval_option_span(label: &'static str, selected: bool, color: Color) -> Span<'static> {
+    let text = if selected {
+        format!("[{label}]")
+    } else {
+        format!(" {label} ")
+    };
+    let style = if selected {
+        Style::default()
+            .fg(color)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    Span::styled(text, style)
+}
+
 fn bottom_window<T>(items: Vec<T>, height: usize, scroll_from_bottom: u16) -> Vec<T> {
     if height == 0 || items.is_empty() {
         return Vec::new();
@@ -559,7 +786,14 @@ fn buffer_to_string(buffer: &Buffer) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{chat::ChatLlmOptions, tools::ToolOverrides, tui::data::TuiOptions};
+    use crate::{
+        chat::ChatLlmOptions,
+        tools::ToolOverrides,
+        tui::{
+            data::{TuiAgentSummary, TuiOptions, TuiPendingApproval},
+            policy::TuiToolRisk,
+        },
+    };
     use camino::Utf8PathBuf;
     use std::{collections::VecDeque, vec};
 
@@ -591,6 +825,11 @@ mod tests {
                 mouse_capture: false,
                 once: false,
             },
+            selected_agent_id: Some("echo_agent".to_owned()),
+            agents: vec![TuiAgentSummary {
+                id: "echo_agent".to_owned(),
+                name: "Echo Agent".to_owned(),
+            }],
             catalog_summary: None,
             trace: None,
             trace_label: None,
@@ -605,7 +844,12 @@ mod tests {
             activity: VecDeque::new(),
             tool_inventory: None,
             context_status: None,
+            latest_run: None,
+            latest_workflow: None,
+            latest_proposals: None,
+            latest_events: None,
             pending_approval: None,
+            approval_selection: TuiApprovalSelection::Approve,
             chat_messages: Vec::new(),
             chat_scroll: 0,
             event_scroll: 0,
@@ -625,6 +869,59 @@ mod tests {
 
         assert_eq!(input.cursor_y, 0);
         assert_eq!(input.cursor_x, 6);
+    }
+
+    #[test]
+    fn input_lines_show_guided_placeholder() {
+        let mut state = test_state();
+        let input = input_lines(&state, 40);
+
+        assert_eq!(input.lines[0].to_string(), "> message, /status, or /help");
+
+        state.replace_command_input("/");
+        let slash_input = input_lines(&state, 40);
+
+        assert_eq!(slash_input.lines[0].to_string(), "/ command, Tab completes");
+    }
+
+    #[test]
+    fn command_panel_title_mentions_tab_completion() {
+        let state = test_state();
+        let rendered = render_tui_once(&state).expect("tui renders");
+
+        assert!(rendered.contains("Tab completes"));
+    }
+
+    #[test]
+    fn input_panel_prioritizes_pending_approval_guidance() {
+        let mut state = test_state();
+        state.pending_approval = Some(TuiPendingApproval::tool_call(
+            "agent.run",
+            TuiToolRisk::High,
+            serde_json::json!({}),
+        ));
+
+        let input = input_lines(&state, 40);
+        let rendered = render_tui_once(&state).expect("tui renders");
+
+        assert_eq!(input.lines[0].to_string(), "> [Approve]   Deny ");
+        assert!(rendered.contains("pending approval: Tab selects  Enter confirms"));
+        assert!(rendered.contains("Tab/Left/Right selects, Enter confirms"));
+    }
+
+    #[test]
+    fn approval_picker_renders_selected_deny_option() {
+        let mut state = test_state();
+        state.pending_approval = Some(TuiPendingApproval::tool_call(
+            "agent.run",
+            TuiToolRisk::High,
+            serde_json::json!({}),
+        ));
+        state.approval_selection = TuiApprovalSelection::Deny;
+
+        let input = input_lines(&state, 40);
+
+        assert_eq!(input.lines[0].to_string(), ">  Approve   [Deny]");
     }
 
     #[test]
