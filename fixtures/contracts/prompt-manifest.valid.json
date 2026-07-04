@@ -1,22 +1,22 @@
 {
   "protocol_version": "agent.v1",
-  "id": "execution_review_prompt",
-  "version": "execution_review.prompt.v1",
-  "agent_id": "execution_review",
+  "id": "ai_chat_prompt",
+  "version": "ai_chat.prompt.v1",
+  "agent_id": "ai_chat",
   "agent_version": "0.1.0",
   "catalog_version": "agent_catalog.v1",
   "generated_at": "2026-06-28T09:12:31Z",
-  "model_family": "openai",
-  "provider": "openai_compatible",
-  "model": "gpt-5-mini",
-  "tool_schema_version": "tool_schema.v1",
-  "active_domains": ["finance"],
+  "model_family": "anthropic",
+  "provider": "anthropic",
+  "model": "stepfun-ai/Step-3.7-Flash",
+  "tool_schema_version": "chat.tools.v1",
+  "active_domains": ["chat"],
   "blocks": [
     {
       "index": 0,
       "source": "catalog.prompt_blocks[0]",
-      "content_hash": "blake3:d838ad239f1e6a938780f02c79833321e8fbf2d5d13800030ed4edc40e687796",
-      "text": "Finance prompt block"
+      "content_hash": "blake3:f4d4a59a0aed2318f1a9443b2a51a518cc8296305e2f8db1e1192aac1cc7cd02",
+      "text": "You are the default interactive agent in the Agent Runtime TUI. Answer in the user's language, keep responses concise and practical, ask clarifying questions only when required, and use available tools when they materially improve the answer. When a tool or approval is needed, explain the action and wait for the runtime approval flow."
     }
   ]
 }

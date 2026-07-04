@@ -25,7 +25,7 @@ fn catalog_summary_reads_flutter_export_shape() {
     let json: Value = serde_json::from_slice(&output).expect("summary is JSON");
     assert_eq!(json["protocol_version"], "agent.v1");
     assert_eq!(json["catalog_version"], "agent_catalog.v1");
-    assert_eq!(json["active_domains"], serde_json::json!(["finance"]));
+    assert_eq!(json["active_domains"], serde_json::json!(["chat"]));
     assert_eq!(json["agent_count"], 1);
     assert_eq!(json["tool_count"], 1);
     assert_eq!(json["proposal_kind_count"], 1);
@@ -46,7 +46,7 @@ fn catalog_agents_and_tools_are_printable() {
         .stdout
         .clone();
     let agents: Value = serde_json::from_slice(&agents).expect("agents are JSON");
-    assert_eq!(agents[0]["id"], "execution_review");
+    assert_eq!(agents[0]["id"], "ai_chat");
 
     let tools = agent_cmd()
         .args([
@@ -80,16 +80,16 @@ fn catalog_prompt_manifest_records_prompt_model_and_block_hashes() {
         .clone();
     let manifest: Value = serde_json::from_slice(&output).expect("prompt manifest is JSON");
     assert_eq!(manifest["protocol_version"], "agent.v1");
-    assert_eq!(manifest["id"], "execution_review_prompt");
-    assert_eq!(manifest["version"], "execution_review.prompt.v1");
-    assert_eq!(manifest["agent_id"], "execution_review");
-    assert_eq!(manifest["model_family"], "openai");
-    assert_eq!(manifest["provider"], "openai_compatible");
-    assert_eq!(manifest["model"], "gpt-5-mini");
-    assert_eq!(manifest["tool_schema_version"], "tool_schema.v1");
+    assert_eq!(manifest["id"], "ai_chat_prompt");
+    assert_eq!(manifest["version"], "ai_chat.prompt.v1");
+    assert_eq!(manifest["agent_id"], "ai_chat");
+    assert_eq!(manifest["model_family"], "anthropic");
+    assert_eq!(manifest["provider"], "anthropic");
+    assert_eq!(manifest["model"], "stepfun-ai/Step-3.7-Flash");
+    assert_eq!(manifest["tool_schema_version"], "chat.tools.v1");
     assert_eq!(
         manifest["blocks"][0]["content_hash"],
-        "blake3:d838ad239f1e6a938780f02c79833321e8fbf2d5d13800030ed4edc40e687796"
+        "blake3:f4d4a59a0aed2318f1a9443b2a51a518cc8296305e2f8db1e1192aac1cc7cd02"
     );
 }
 
@@ -332,7 +332,7 @@ fn run_can_use_catalog_backed_dry_run_registry() {
     let output = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -351,11 +351,11 @@ fn run_can_use_catalog_backed_dry_run_registry() {
         .clone();
 
     let result: Value = serde_json::from_slice(&output).expect("result is JSON");
-    assert_eq!(result["agent_id"], "execution_review");
+    assert_eq!(result["agent_id"], "ai_chat");
     assert_eq!(result["status"], "completed");
     assert_eq!(result["summary"], "catalog dry-run completed");
     assert_eq!(result["output"]["mode"], "catalog_dry_run");
-    assert_eq!(result["output"]["agent"]["id"], "execution_review");
+    assert_eq!(result["output"]["agent"]["id"], "ai_chat");
     assert_eq!(result["output"]["input"]["protocol_version"], "agent.v1");
     let run_id = result["run_id"].as_str().expect("run id is string");
     let inspected = agent_cmd()
@@ -377,7 +377,7 @@ fn run_can_use_catalog_backed_dry_run_registry() {
     let trace: Value =
         serde_json::from_slice(&std::fs::read(trace).expect("trace file was written"))
             .expect("trace is JSON");
-    assert_eq!(trace["agent_id"], "execution_review");
+    assert_eq!(trace["agent_id"], "ai_chat");
     assert_eq!(trace["events"][1]["kind"], "catalog_dry_run.agent_selected");
 }
 
@@ -395,12 +395,12 @@ fn workflow_cli_runs_dag_and_persists_node_traces() {
   "nodes": [
     {
       "node_id": "collect",
-      "agent_id": "execution_review",
+      "agent_id": "ai_chat",
       "input": {"message": "collect"}
     },
     {
       "node_id": "summarize",
-      "agent_id": "execution_review",
+      "agent_id": "ai_chat",
       "depends_on": ["collect"],
       "input": {"message": "summarize"},
       "input_mappings": [
@@ -520,7 +520,7 @@ fn replay_can_execute_from_trace() {
     agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -553,7 +553,7 @@ fn replay_can_execute_from_trace() {
 
     let report: Value = serde_json::from_slice(&output).expect("replay report is JSON");
     assert_eq!(report["mode"], "live");
-    assert_eq!(report["agent_id"], "execution_review");
+    assert_eq!(report["agent_id"], "ai_chat");
     assert_eq!(report["result"]["status"], "completed");
     assert_eq!(report["output_matches"], true);
     assert_ne!(report["source_run_id"], report["replay_run_id"]);
@@ -674,7 +674,7 @@ fn replay_can_run_deterministically_from_trace_without_writing_store() {
     let output = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -774,7 +774,7 @@ fn inspect_and_debug_bundle_export_use_file_store() {
     let output = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -813,7 +813,7 @@ fn inspect_and_debug_bundle_export_use_file_store() {
             .as_str()
             .is_some_and(|key| key.starts_with("idem_"))
     );
-    assert_eq!(record["agent_id"], "execution_review");
+    assert_eq!(record["agent_id"], "ai_chat");
     assert_eq!(record["status"], "completed");
 
     let created_proposal = agent_cmd()
@@ -825,7 +825,7 @@ fn inspect_and_debug_bundle_export_use_file_store() {
             "--run-id",
             run_id,
             "--agent-id",
-            "execution_review",
+            "ai_chat",
             "--kind",
             "fake",
             "--summary",
@@ -943,7 +943,7 @@ fn inspect_and_debug_bundle_export_use_file_store() {
     let manifest: Value = serde_json::from_slice(&manifest).expect("manifest is JSON");
     assert_eq!(manifest["bundle_version"], "debug_bundle.v1");
     assert_eq!(manifest["run_id"], run_id);
-    assert_eq!(manifest["agent_id"], "execution_review");
+    assert_eq!(manifest["agent_id"], "ai_chat");
     assert_eq!(manifest["agent_version"], "0.1.0");
     assert_eq!(manifest["files"]["manifest"], "manifest.json");
     assert_eq!(manifest["files"]["trace"], "trace.json");
@@ -1016,7 +1016,7 @@ fn inspect_and_debug_bundle_export_use_file_store() {
 
     let replay_config = read_json(bundle.join("replay_config.json"));
     assert_eq!(replay_config["run_id"], run_id);
-    assert_eq!(replay_config["agent_id"], "execution_review");
+    assert_eq!(replay_config["agent_id"], "ai_chat");
     assert_eq!(replay_config["replay_mode"], "trace_execute");
     assert_eq!(replay_config["assets"]["trace"], "trace.json");
     assert_eq!(replay_config["assets"]["events"], "events.jsonl");
@@ -1148,7 +1148,7 @@ fn inspect_and_debug_bundle_export_use_file_store() {
 
     let state_snapshot = read_json(bundle.join("state_snapshot.json"));
     assert_eq!(state_snapshot["run_id"], run_id);
-    assert_eq!(state_snapshot["agent_id"], "execution_review");
+    assert_eq!(state_snapshot["agent_id"], "ai_chat");
     assert_eq!(state_snapshot["run_status"], "completed");
     assert_eq!(state_snapshot["session_id"], session_id);
     assert_eq!(state_snapshot["thread_id"], thread_id);
@@ -1182,16 +1182,16 @@ fn inspect_and_debug_bundle_export_use_file_store() {
     }));
 
     let agent_spec = read_json(bundle.join("agent_spec.json"));
-    assert_eq!(agent_spec["id"], "execution_review");
+    assert_eq!(agent_spec["id"], "ai_chat");
 
     let prompt_manifest = read_json(bundle.join("prompt_manifest.json"));
-    assert_eq!(prompt_manifest["id"], "execution_review_prompt");
-    assert_eq!(prompt_manifest["version"], "execution_review.prompt.v1");
-    assert_eq!(prompt_manifest["agent_id"], "execution_review");
-    assert_eq!(prompt_manifest["model"], "gpt-5-mini");
+    assert_eq!(prompt_manifest["id"], "ai_chat_prompt");
+    assert_eq!(prompt_manifest["version"], "ai_chat.prompt.v1");
+    assert_eq!(prompt_manifest["agent_id"], "ai_chat");
+    assert_eq!(prompt_manifest["model"], "stepfun-ai/Step-3.7-Flash");
     assert_eq!(
         prompt_manifest["blocks"][0]["content_hash"],
-        "blake3:d838ad239f1e6a938780f02c79833321e8fbf2d5d13800030ed4edc40e687796"
+        "blake3:f4d4a59a0aed2318f1a9443b2a51a518cc8296305e2f8db1e1192aac1cc7cd02"
     );
 }
 
@@ -1204,7 +1204,7 @@ fn recover_abandons_stale_running_runs_in_file_store() {
     let stale_run = serde_json::json!({
         "protocol_version": "agent.v1",
         "run_id": "run_stale_cli",
-        "agent_id": "execution_review",
+        "agent_id": "ai_chat",
         "status": "running",
         "scope": {"type": "global"},
         "started_at": "2020-01-01T00:00:00Z",
@@ -1267,7 +1267,7 @@ fn catalog_dry_run_can_call_process_tool_host() {
     let output = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -1369,7 +1369,7 @@ fn catalog_dry_run_retries_retryable_process_tool_errors() {
     let output = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -1446,7 +1446,7 @@ fn metrics_summary_counts_runs_tools_and_proposals() {
     let run_output = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -1525,13 +1525,13 @@ fn metrics_summary_counts_runs_tools_and_proposals() {
     assert_eq!(metrics["runs_by_status"]["completed"], 1);
     assert_eq!(metrics["tool_call_count"], 1);
     assert_eq!(metrics["failed_tool_call_count"], 0);
-    assert_eq!(metrics["runs_by_agent"]["execution_review"]["run_count"], 1);
+    assert_eq!(metrics["runs_by_agent"]["ai_chat"]["run_count"], 1);
     assert_eq!(
-        metrics["runs_by_agent"]["execution_review"]["successful_run_count"],
+        metrics["runs_by_agent"]["ai_chat"]["successful_run_count"],
         1
     );
     assert_eq!(
-        metrics["runs_by_agent"]["execution_review"]["runs_by_status"]["completed"],
+        metrics["runs_by_agent"]["ai_chat"]["runs_by_status"]["completed"],
         1
     );
     assert_eq!(metrics["tool_calls_by_tool"]["echo"]["tool_call_count"], 1);
@@ -1605,7 +1605,7 @@ fn catalog_dry_run_can_call_mock_tool_from_file() {
     let output = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -2060,7 +2060,7 @@ fn tui_once_renders_catalog_and_trace_snapshot() {
     assert!(output.contains("Input"));
     assert!(output.contains("Enter sends"));
     assert!(output.contains("agent echo_agent@0.1.0"));
-    assert!(output.contains("Ready. Chatting with agent 'execution_review'."));
+    assert!(output.contains("Ready. Chatting with agent 'ai_chat'."));
     assert!(output.contains("Quick commands: /status, /runs, /tools, /help <command>."));
 }
 
@@ -2086,7 +2086,7 @@ fn tui_once_reads_unified_runtime_config() {
         format!(
             r#"[runtime]
 store = "{}"
-default_agent = "execution_review"
+default_agent = "ai_chat"
 timeout_seconds = 5
 
 [runtime.sources]
@@ -2125,7 +2125,7 @@ max_tool_rounds = 2
         .clone();
     let output = String::from_utf8(output).expect("stdout is utf8");
     assert!(output.contains("mock / configured-model"));
-    assert!(output.contains("Ready. Chatting with agent 'execution_review'."));
+    assert!(output.contains("Ready. Chatting with agent 'ai_chat'."));
     assert!(output.contains("Model: mock / configured-model."));
     assert!(output.contains("catalog 1 agents / 1 tools"));
     assert!(output.contains("tools 4 high 1 blocked 0"));
@@ -2139,7 +2139,7 @@ fn stdio_server_handles_catalog_summary_and_agent_run() {
     let input = concat!(
         r#"{"jsonrpc":"2.0","id":"summary","method":"catalog.summary","params":{}}"#,
         "\n",
-        r#"{"jsonrpc":"2.0","id":"run","method":"agent.run","params":{"agent_id":"execution_review","input":{"message":"via stdio","tool_call":{"name":"stdio_external","input":{"ok":true}}}}}"#,
+        r#"{"jsonrpc":"2.0","id":"run","method":"agent.run","params":{"agent_id":"ai_chat","input":{"message":"via stdio","tool_call":{"name":"stdio_external","input":{"ok":true}}}}}"#,
         "\n"
     );
 
@@ -2221,12 +2221,12 @@ fn http_server_handles_catalog_summary_and_agent_run() {
     let run = http_json_request(
         port,
         "POST",
-        "/agents/execution_review/run",
+        "/agents/ai_chat/run",
         Some(
             r#"{"input":{"message":"via http"},"trigger":"webhook","trigger_envelope":{"source":"github.webhook","id":"evt_http_1","payload":{"action":"opened"}},"user":{"user_id":"user_http_1"},"scope":{"type":"tenant","id":"tenant_http_1"},"workflow":{"workflow_id":"workflow_http_test","root_run_id":"run_http_root","dependencies":[{"run_id":"run_http_dependency","edge":"after","metadata":{"fixture":"catalog_cli"}}],"metadata":{"case":"catalog_cli"}},"metadata":{"delivery_attempt":1}}"#,
         ),
     );
-    assert_eq!(run["result"]["agent_id"], "execution_review");
+    assert_eq!(run["result"]["agent_id"], "ai_chat");
     assert_eq!(run["result"]["status"], "completed");
     assert_eq!(run["result"]["output"]["mode"], "catalog_dry_run");
     assert_eq!(
@@ -2248,13 +2248,13 @@ fn http_server_handles_catalog_summary_and_agent_run() {
     );
 
     let run_id = run["result"]["run_id"].as_str().expect("run_id is string");
-    let runs = http_json_request(port, "GET", "/runs?agent_id=execution_review&limit=1", None);
+    let runs = http_json_request(port, "GET", "/runs?agent_id=ai_chat&limit=1", None);
     assert_eq!(runs[0]["run_id"], run_id);
-    assert_eq!(runs[0]["agent_id"], "execution_review");
+    assert_eq!(runs[0]["agent_id"], "ai_chat");
 
     let inspected_run = http_json_request(port, "GET", &format!("/runs/{run_id}"), None);
     assert_eq!(inspected_run["run_id"], run_id);
-    assert_eq!(inspected_run["agent_id"], "execution_review");
+    assert_eq!(inspected_run["agent_id"], "ai_chat");
     assert_eq!(inspected_run["status"], "completed");
     assert_eq!(inspected_run["scope"]["type"], "tenant");
     assert_eq!(inspected_run["scope"]["id"], "tenant_http_1");
@@ -2274,7 +2274,7 @@ fn http_server_handles_catalog_summary_and_agent_run() {
 
     let inspected_trace = http_json_request(port, "GET", &format!("/runs/{run_id}/trace"), None);
     assert_eq!(inspected_trace["run_id"], run_id);
-    assert_eq!(inspected_trace["agent_id"], "execution_review");
+    assert_eq!(inspected_trace["agent_id"], "ai_chat");
     assert_eq!(
         inspected_trace["workflow"]["metadata"]["case"],
         "catalog_cli"
@@ -2304,7 +2304,7 @@ fn http_server_handles_catalog_summary_and_agent_run() {
         .as_str()
         .expect("replay run id is string");
     assert_eq!(replay["source_run_id"], run_id);
-    assert_eq!(replay["agent_id"], "execution_review");
+    assert_eq!(replay["agent_id"], "ai_chat");
     assert_eq!(replay["result"]["status"], "completed");
     assert_eq!(replay["output_matches"], true);
     assert_ne!(replay_run_id, run_id);
@@ -2353,7 +2353,7 @@ fn http_server_runs_workflow_dag_and_persists_node_traces() {
         "POST",
         "/workflows/run",
         Some(
-            r#"{"protocol_version":"agent.v1","workflow_id":"workflow_http_dag","nodes":[{"node_id":"collect","agent_id":"execution_review","input":{"message":"collect"}},{"node_id":"summarize","agent_id":"execution_review","depends_on":["collect"],"input":{"message":"summarize"},"input_mappings":[{"from_node":"collect","from_path":"/input/message","to_path":"/from_collect"}]}],"metadata":{"case":"http_workflow"}}"#,
+            r#"{"protocol_version":"agent.v1","workflow_id":"workflow_http_dag","nodes":[{"node_id":"collect","agent_id":"ai_chat","input":{"message":"collect"}},{"node_id":"summarize","agent_id":"ai_chat","depends_on":["collect"],"input":{"message":"summarize"},"input_mappings":[{"from_node":"collect","from_path":"/input/message","to_path":"/from_collect"}]}],"metadata":{"case":"http_workflow"}}"#,
         ),
     );
 
@@ -2412,7 +2412,7 @@ fn http_server_can_cancel_active_run_and_stream_live_events() {
 
     let run_id = "run_http_cancel";
     let run_body = format!(r#"{{"run_id":"{run_id}","input":{{"sleep_ms":3000}}}}"#);
-    let run_path = "/agents/execution_review/run".to_owned();
+    let run_path = "/agents/ai_chat/run".to_owned();
     let run_handle = std::thread::spawn({
         let run_body = run_body.clone();
         move || http_json_request(port, "POST", &run_path, Some(&run_body))
@@ -2494,7 +2494,7 @@ fn http_server_persists_cancel_intent_for_running_run_record() {
         serde_json::to_vec_pretty(&serde_json::json!({
             "protocol_version": "agent.v1",
             "run_id": run_id,
-            "agent_id": "execution_review",
+            "agent_id": "ai_chat",
             "status": "running",
             "scope": {"type": "global"},
             "started_at": "2026-07-03T00:00:00Z",
@@ -2555,7 +2555,7 @@ fn http_server_validates_json_request_schemas() {
     let run_error = try_http_text_request(
         port,
         "POST",
-        "/agents/execution_review/run",
+        "/agents/ai_chat/run",
         Some(r#"{"input":{},"unexpected":true}"#),
     )
     .expect_err("extra run field is rejected");
@@ -2625,7 +2625,7 @@ fn http_server_streams_chat_turn_events() {
         "POST",
         "/chat/turn",
         Some(
-            r#"{"protocol_version":"agent.v1","turn_id":"turn_http_1","agent_id":"execution_review","provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}],"metadata":{"source":"http_test"}}"#,
+            r#"{"protocol_version":"agent.v1","turn_id":"turn_http_1","agent_id":"ai_chat","provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}],"metadata":{"source":"http_test"}}"#,
         ),
     );
 
@@ -2687,7 +2687,7 @@ fn http_server_resumes_chat_turn_and_records_session_steps() {
             "mode": "chat",
             "session_id": session_id,
             "thread_id": thread_id,
-            "agent_id": "execution_review",
+            "agent_id": "ai_chat",
             "provider": "mock",
             "model": "mock-model",
             "messages": [
@@ -2866,7 +2866,7 @@ fn http_server_persists_and_decides_proposals() {
     let run = http_json_request(
         port,
         "POST",
-        "/agents/execution_review/run",
+        "/agents/ai_chat/run",
         Some(r#"{"input":{"message":"proposal trace seed"}}"#),
     );
     let run_id = run["result"]["run_id"].as_str().expect("run_id is string");
@@ -2876,7 +2876,7 @@ fn http_server_persists_and_decides_proposals() {
         "POST",
         "/proposals",
         Some(&format!(
-            r#"{{"run_id":"{run_id}","agent_id":"execution_review","kind":"fake","summary":"HTTP proposal","payload":{{"value":11}},"diffs":[{{"path":"/value","operation":"replace","before":10,"after":11}}],"warnings":[{{"severity":"danger","code":"http_review","message":"HTTP proposal needs review"}}]}}"#
+            r#"{{"run_id":"{run_id}","agent_id":"ai_chat","kind":"fake","summary":"HTTP proposal","payload":{{"value":11}},"diffs":[{{"path":"/value","operation":"replace","before":10,"after":11}}],"warnings":[{{"severity":"danger","code":"http_review","message":"HTTP proposal needs review"}}]}}"#
         )),
     );
     let proposal_id = created["proposal_id"]
@@ -3006,7 +3006,7 @@ fn http_server_applies_proposal_kind_policy() {
     let run = http_json_request(
         port,
         "POST",
-        "/agents/execution_review/run",
+        "/agents/ai_chat/run",
         Some(r#"{"input":{"message":"proposal policy trace seed"}}"#),
     );
     let run_id = run["result"]["run_id"].as_str().expect("run_id is string");
@@ -3015,7 +3015,7 @@ fn http_server_applies_proposal_kind_policy() {
         "POST",
         "/proposals",
         Some(&format!(
-            r#"{{"run_id":"{run_id}","agent_id":"execution_review","kind":"fake","summary":"Auto proposal","payload":{{"value":17}}}}"#
+            r#"{{"run_id":"{run_id}","agent_id":"ai_chat","kind":"fake","summary":"Auto proposal","payload":{{"value":17}}}}"#
         )),
     );
     let proposal_id = created["proposal_id"]
@@ -3081,7 +3081,7 @@ hooks = [
     let run = http_json_request(
         port,
         "POST",
-        "/agents/execution_review/run",
+        "/agents/ai_chat/run",
         Some(r#"{"input":{"message":"proposal create policy trace seed"}}"#),
     );
     let run_id = run["result"]["run_id"].as_str().expect("run_id is string");
@@ -3091,7 +3091,7 @@ hooks = [
         "POST",
         "/proposals",
         Some(&format!(
-            r#"{{"run_id":"{run_id}","agent_id":"execution_review","kind":"fake","summary":"Denied HTTP proposal","payload":{{"value":17}}}}"#
+            r#"{{"run_id":"{run_id}","agent_id":"ai_chat","kind":"fake","summary":"Denied HTTP proposal","payload":{{"value":17}}}}"#
         )),
     );
     assert_eq!(status, 403);
@@ -3165,7 +3165,7 @@ hooks = [
     let run = http_json_request(
         port,
         "POST",
-        "/agents/execution_review/run",
+        "/agents/ai_chat/run",
         Some(r#"{"input":{"message":"proposal apply policy trace seed"}}"#),
     );
     let run_id = run["result"]["run_id"].as_str().expect("run_id is string");
@@ -3175,7 +3175,7 @@ hooks = [
         "POST",
         "/proposals",
         Some(&format!(
-            r#"{{"run_id":"{run_id}","agent_id":"execution_review","kind":"fake","summary":"HTTP apply denied proposal","payload":{{"value":19}}}}"#
+            r#"{{"run_id":"{run_id}","agent_id":"ai_chat","kind":"fake","summary":"HTTP apply denied proposal","payload":{{"value":19}}}}"#
         )),
     );
     let proposal_id = created["proposal_id"]
@@ -3268,12 +3268,7 @@ fn http_server_persists_sessions_threads_and_steps() {
     let run_body = format!(
         r#"{{"session_id":"{session_id}","thread_id":"{thread_id}","input":{{"message":"http session"}}}}"#
     );
-    let run = http_json_request(
-        port,
-        "POST",
-        "/agents/execution_review/run",
-        Some(&run_body),
-    );
+    let run = http_json_request(port, "POST", "/agents/ai_chat/run", Some(&run_body));
     let run_id = run["result"]["run_id"].as_str().expect("run id is string");
     assert_eq!(run["result"]["status"], "completed");
 
@@ -3325,7 +3320,7 @@ fn eval_runs_catalog_dry_run_and_checks_expectations() {
     let report: Value = serde_json::from_slice(&output).expect("eval report is JSON");
     assert_eq!(report["id"], "catalog_dry_run_basic");
     assert_eq!(report["passed"], true);
-    assert_eq!(report["agent_id"], "execution_review");
+    assert_eq!(report["agent_id"], "ai_chat");
     assert_eq!(report["status"], "completed");
     assert!(
         report["checked"]
@@ -3433,13 +3428,13 @@ fn eval_runs_scoring_hook_and_reports_score() {
         &eval_file,
         format!(
             r#"id: scored_eval
-agent_id: execution_review
+agent_id: ai_chat
 catalog: "{}"
 input:
   message: scored fixture
 expect:
   status: completed
-  agent_id: execution_review
+  agent_id: ai_chat
   output_mode: catalog_dry_run
 scoring_hook:
   command:
@@ -3487,10 +3482,7 @@ scoring_hook:
         serde_json::json!("eval.scoring_hook")
     );
     assert_eq!(report["hooks"][0]["status"], serde_json::json!("completed"));
-    assert_eq!(
-        report["hooks"][0]["agent_id"],
-        serde_json::json!("execution_review")
-    );
+    assert_eq!(report["hooks"][0]["agent_id"], serde_json::json!("ai_chat"));
     assert_eq!(report["hooks"][0]["output"]["score"], 1.0);
     assert!(
         report["hooks"][0]["duration_ms"]
@@ -3553,7 +3545,7 @@ fn eval_create_generates_case_and_golden_trace_from_run_store() {
     let output = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -3593,18 +3585,18 @@ fn eval_create_generates_case_and_golden_trace_from_run_store() {
         serde_json::from_slice(&create_report).expect("create report is JSON");
     assert_eq!(create_report["id"], "generated_from_run");
     assert_eq!(create_report["run_id"], run_id);
-    assert_eq!(create_report["agent_id"], "execution_review");
+    assert_eq!(create_report["agent_id"], "ai_chat");
 
     let generated = std::fs::read_to_string(&eval_file).expect("eval file exists");
     assert!(generated.contains("id: generated_from_run"));
     assert!(generated.contains("golden_trace: golden/generated_from_run.trace.json"));
     assert!(generated.contains("prompt_manifest:"));
-    assert!(generated.contains("id: execution_review_prompt"));
-    assert!(generated.contains("version: execution_review.prompt.v1"));
-    assert!(generated.contains("tool_schema_version: tool_schema.v1"));
+    assert!(generated.contains("id: ai_chat_prompt"));
+    assert!(generated.contains("version: ai_chat.prompt.v1"));
+    assert!(generated.contains("tool_schema_version: chat.tools.v1"));
     assert!(
         generated
-            .contains("blake3:d838ad239f1e6a938780f02c79833321e8fbf2d5d13800030ed4edc40e687796")
+            .contains("blake3:f4d4a59a0aed2318f1a9443b2a51a518cc8296305e2f8db1e1192aac1cc7cd02")
     );
     assert!(
         dir.path()
@@ -3663,7 +3655,7 @@ fn eval_create_generates_proposal_expectations_from_run_store() {
     let output = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -3746,7 +3738,7 @@ fn proposal_cli_persists_and_decides_proposals() {
             "--run-id",
             "run_test",
             "--agent-id",
-            "execution_review",
+            "ai_chat",
             "--kind",
             "fake",
             "--summary",
@@ -3908,7 +3900,7 @@ hooks = [
     let run = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -3933,7 +3925,7 @@ hooks = [
             "--run-id",
             run_id,
             "--agent-id",
-            "execution_review",
+            "ai_chat",
             "--kind",
             "fake",
             "--summary",
@@ -4022,7 +4014,7 @@ hooks = [
     let run = agent_cmd()
         .args([
             "run",
-            "execution_review",
+            "ai_chat",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
@@ -4049,7 +4041,7 @@ hooks = [
             "--run-id",
             run_id,
             "--agent-id",
-            "execution_review",
+            "ai_chat",
             "--kind",
             "fake",
             "--summary",
@@ -4099,7 +4091,7 @@ fn proposal_cli_requires_sufficient_approval_level() {
             "--run-id",
             "run_test",
             "--agent-id",
-            "execution_review",
+            "ai_chat",
             "--kind",
             "fake",
             "--summary",
@@ -4186,7 +4178,7 @@ fn proposal_cli_accumulates_multi_approver_decisions() {
             "--run-id",
             "run_test",
             "--agent-id",
-            "execution_review",
+            "ai_chat",
             "--kind",
             "fake",
             "--summary",
@@ -4311,7 +4303,7 @@ fn proposal_cli_rejects_expired_apply() {
             "--run-id",
             "run_test",
             "--agent-id",
-            "execution_review",
+            "ai_chat",
             "--kind",
             "fake",
             "--summary",

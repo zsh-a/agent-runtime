@@ -553,7 +553,7 @@ The wire contract is schema-checked at
 Dry-run an agent spec from a Flutter-exported catalog through the Rust runner:
 
 ```bash
-rtk cargo run -p agent-cli -- run execution_review \
+rtk cargo run -p agent-cli -- run ai_chat \
   --catalog fixtures/contracts/catalog.valid.json \
   --input fixtures/contracts/run-request.valid.json \
   --trace-out /private/tmp/agent-runtime-catalog-dry-run-trace.json \
@@ -584,7 +584,7 @@ step.
 Run requests can set an explicit scope:
 
 ```bash
-rtk cargo run -p agent-cli -- run execution_review \
+rtk cargo run -p agent-cli -- run ai_chat \
   --catalog fixtures/contracts/catalog.valid.json \
   --scope tenant:tenant_acme
 ```
@@ -633,7 +633,7 @@ duration plus completion status. The payload shape is captured by
 Dry-run with an external process tool host:
 
 ```bash
-rtk cargo run -p agent-cli -- run execution_review \
+rtk cargo run -p agent-cli -- run ai_chat \
   --catalog fixtures/contracts/catalog.valid.json \
   --input /private/tmp/catalog-tool-call.json \
   --tool-host target/debug/agent dev-tool-host \
@@ -669,7 +669,7 @@ tests; production hosts should implement the same `tool.call` method.
 Dry-run with deterministic mock tool output:
 
 ```bash
-rtk cargo run -p agent-cli -- run execution_review \
+rtk cargo run -p agent-cli -- run ai_chat \
   --catalog fixtures/contracts/catalog.valid.json \
   --input /private/tmp/catalog-tool-call.json \
   --mock-tool 'example_tool={"ok":true}' \
@@ -679,7 +679,7 @@ rtk cargo run -p agent-cli -- run execution_review \
 For larger outputs, point the mock at a JSON fixture:
 
 ```bash
-rtk cargo run -p agent-cli -- run execution_review \
+rtk cargo run -p agent-cli -- run ai_chat \
   --catalog fixtures/contracts/catalog.valid.json \
   --input /private/tmp/catalog-tool-call.json \
   --mock-tool example_tool=@fixtures/contracts/mock-tool-output.json
@@ -830,7 +830,7 @@ Create and inspect a proposal envelope:
 rtk cargo run -p agent-cli -- proposal create \
   --store /private/tmp/agent-runtime-store \
   --run-id run_01975d8c-72f5-7f1e-9b7e-c7ef3e0a1000 \
-  --agent-id execution_review \
+  --agent-id ai_chat \
   --kind fake \
   --summary 'Review fake proposal' \
   --payload-json '{"value":7}' \
@@ -1044,7 +1044,7 @@ response per line:
 
 ```json
 {"jsonrpc":"2.0","id":"summary","method":"catalog.summary","params":{}}
-{"jsonrpc":"2.0","id":"run","method":"agent.run","params":{"agent_id":"execution_review","input":{"message":"hello"}}}
+{"jsonrpc":"2.0","id":"run","method":"agent.run","params":{"agent_id":"ai_chat","input":{"message":"hello"}}}
 ```
 
 Start the headless HTTP server over the same catalog:
@@ -1128,7 +1128,7 @@ agent trace export-otel trace.json \
 Example run request:
 
 ```bash
-rtk curl -s http://127.0.0.1:8765/agents/execution_review/run \
+rtk curl -s http://127.0.0.1:8765/agents/ai_chat/run \
   -H 'content-type: application/json' \
   -d '{"input":{"message":"hello from HTTP"}}'
 ```
@@ -1140,7 +1140,7 @@ initial OpenAPI 3.1 contract lives at `openapi/agent-runtime-api.yaml`.
 Inspect an HTTP-created run and trace:
 
 ```bash
-rtk curl -s 'http://127.0.0.1:8765/runs?agent_id=execution_review&limit=20'
+rtk curl -s 'http://127.0.0.1:8765/runs?agent_id=ai_chat&limit=20'
 
 rtk curl -s http://127.0.0.1:8765/runs/run_01
 
@@ -1164,7 +1164,7 @@ rtk curl -s http://127.0.0.1:8765/sessions \
   -H 'content-type: application/json' \
   -d '{"title":"Execution debug"}'
 
-rtk curl -s http://127.0.0.1:8765/agents/execution_review/run \
+rtk curl -s http://127.0.0.1:8765/agents/ai_chat/run \
   -H 'content-type: application/json' \
   -d '{"session_id":"session_01","thread_id":"thread_01","input":{"message":"hello"}}'
 
@@ -1191,7 +1191,7 @@ Example HTTP proposal approval flow:
 ```bash
 rtk curl -s http://127.0.0.1:8765/proposals \
   -H 'content-type: application/json' \
-  -d '{"run_id":"run_01","agent_id":"execution_review","kind":"fake","summary":"Review fake proposal","payload":{"value":7}}'
+  -d '{"run_id":"run_01","agent_id":"ai_chat","kind":"fake","summary":"Review fake proposal","payload":{"value":7}}'
 
 rtk curl -s 'http://127.0.0.1:8765/proposals?run_id=run_01'
 
@@ -1282,11 +1282,11 @@ evals until the expected version/hash is deliberately updated:
 expect:
   status: completed
   prompt_manifest:
-    version: execution_review.prompt.v1
-    model: gpt-5-mini
-    tool_schema_version: tool_schema.v1
+    version: ai_chat.prompt.v1
+    model: stepfun-ai/Step-3.7-Flash
+    tool_schema_version: chat.tools.v1
     block_hashes:
-      - blake3:d838ad239f1e6a938780f02c79833321e8fbf2d5d13800030ed4edc40e687796
+      - blake3:f4d4a59a0aed2318f1a9443b2a51a518cc8296305e2f8db1e1192aac1cc7cd02
 ```
 
 Eval cases may include a process scoring hook:
@@ -1353,15 +1353,15 @@ rtk cargo run -p agent-cli -- cmd create \
   --store /private/tmp/agent-runtime-catalog-dry-run-store \
   --out .agent-runtime/commands/execution-review.md \
   --registry examples/agents.yaml \
-  --description 'Replay execution review fixture'
+  --description 'Replay chat fixture'
 ```
 
 The command file uses YAML frontmatter plus a captured JSON input fence:
 
 ````markdown
 ---
-description: Replay execution review fixture
-agent: execution_review
+description: Replay chat fixture
+agent: ai_chat
 registry: examples/agents.yaml
 source_run_id: run_01975d8c-72f5-7f1e-9b7e-c7ef3e0a1000
 source_run_status: completed
@@ -1488,7 +1488,7 @@ Use a profile config for repeatable local, CI, and server runs:
 [runtime]
 profile = "local-dev"
 store = ".agent-runtime/store"
-default_agent = "execution_review"
+default_agent = "ai_chat"
 timeout_seconds = 60
 max_retries = 1
 retry_backoff_ms = 250

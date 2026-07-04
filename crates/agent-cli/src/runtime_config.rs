@@ -292,7 +292,7 @@ mod tests {
             .map(|agent| agent.id.as_str())
             .collect::<Vec<_>>();
         assert!(ids.contains(&"echo_agent"));
-        assert!(ids.contains(&"execution_review"));
+        assert!(ids.contains(&"ai_chat"));
     }
 
     #[tokio::test]
@@ -309,7 +309,7 @@ mod tests {
         .await
         .expect("composition loads");
 
-        let messages = composition.chat_messages("execution_review", vec![user_message("hello")]);
+        let messages = composition.chat_messages("ai_chat", vec![user_message("hello")]);
 
         assert_eq!(messages[0].role, LlmRole::System);
         assert!(
@@ -317,7 +317,7 @@ mod tests {
                 .content
                 .as_str()
                 .expect("system prompt is a string")
-                .contains("Finance prompt block")
+                .contains("default interactive agent in the Agent Runtime TUI")
         );
     }
 }

@@ -1,5 +1,5 @@
 id: catalog_dry_run_tool_call_sequence
-agent_id: execution_review
+agent_id: ai_chat
 catalog: ../fixtures/contracts/catalog.valid.json
 input:
   message: eval tool call fixture
@@ -9,7 +9,7 @@ input:
       value: 7
 expect:
   status: completed
-  agent_id: execution_review
+  agent_id: ai_chat
   output_mode: catalog_dry_run
   trace_events:
     - run_started

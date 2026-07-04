@@ -8,13 +8,13 @@
       "kind": "run_started",
       "payload": {
         "trigger": "manual",
-        "agent_id": "execution_review"
+        "agent_id": "ai_chat"
       }
     },
     {
       "kind": "catalog_dry_run.agent_selected",
       "payload": {
-        "agent_id": "execution_review",
+        "agent_id": "ai_chat",
         "agent_version": "0.1.0",
         "source": "agent_catalog.v1"
       }
@@ -26,7 +26,7 @@
       }
     }
   ],
-  "agent_id": "execution_review",
+  "agent_id": "ai_chat",
   "agent_version": "0.1.0",
   "scope": {
     "type": "global"
@@ -35,27 +35,28 @@
     "mode": "catalog_dry_run",
     "agent": {
       "protocol_version": "agent.v1",
-      "id": "execution_review",
-      "name": "Execution Review",
+      "id": "ai_chat",
+      "name": "AI Chat",
+      "description": "Default conversational agent for the TUI.",
       "version": "0.1.0",
       "schedule": {
-        "type": "interval",
-        "every_seconds": 86400,
-        "preferred_hour_local": 9,
-        "jitter_seconds": 300
+        "type": "manual"
       },
       "capabilities": [
-        "scheduled_agent"
+        "chat_agent",
+        "natural_language"
       ],
       "metadata": {
-        "domain": "execution",
-        "dart_type": "ExecutionReviewAgent",
-        "prompt_id": "execution_review_prompt",
-        "prompt_version": "execution_review.prompt.v1",
-        "model_family": "openai",
-        "provider": "openai_compatible",
-        "model": "gpt-5-mini",
-        "tool_schema_version": "tool_schema.v1"
+        "domain": "chat",
+        "agent_type": "chat",
+        "surface": "agent_tui",
+        "dart_type": "AiChatAgent",
+        "prompt_id": "ai_chat_prompt",
+        "prompt_version": "ai_chat.prompt.v1",
+        "model_family": "anthropic",
+        "provider": "anthropic",
+        "model": "stepfun-ai/Step-3.7-Flash",
+        "tool_schema_version": "chat.tools.v1"
       }
     },
     "input": {

@@ -1,6 +1,6 @@
 [runtime]
 store = ".agent-runtime/tui-store"
-default_agent = "execution_review"
+default_agent = "ai_chat"
 timeout_seconds = 60
 max_retries = 0
 retry_backoff_ms = 0

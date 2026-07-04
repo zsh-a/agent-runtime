@@ -1068,14 +1068,14 @@ mod tests {
             .call_tool(
                 AGENT_RUN_TOOL_NAME,
                 json!({
-                    "agent_id": "execution_review",
+                    "agent_id": "ai_chat",
                     "input": {"message": "from server chat"}
                 }),
             )
             .await
             .expect("agent.run executes");
 
-        assert_eq!(output["result"]["agent_id"], "execution_review");
+        assert_eq!(output["result"]["agent_id"], "ai_chat");
         let run_id = output["result"]["run_id"]
             .as_str()
             .expect("subagent run id");
