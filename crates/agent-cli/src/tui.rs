@@ -4,6 +4,7 @@ mod chat_events;
 mod commands;
 mod data;
 mod format;
+mod layout;
 mod policy;
 mod render;
 mod runtime;

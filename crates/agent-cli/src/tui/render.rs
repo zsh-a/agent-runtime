@@ -3,17 +3,20 @@ use ratatui::{
     Frame, Terminal,
     backend::TestBackend,
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::data::{
-    TranscriptItem, TranscriptRole, TuiActivityItem, TuiActivityKind, TuiApprovalSelection,
-    TuiFocusPanel, TuiProposalListSummary, TuiRunSummary, TuiState, TuiTraceEventSummary,
-    TuiWorkflowSummary,
+use super::{
+    data::{
+        TranscriptItem, TranscriptRole, TuiActivityItem, TuiActivityKind, TuiApprovalSelection,
+        TuiFocusPanel, TuiProposalListSummary, TuiRunSummary, TuiState, TuiTextSelection,
+        TuiTraceEventSummary, TuiWorkflowSummary,
+    },
+    layout::TuiLayout,
 };
 
 const MAX_INPUT_HEIGHT: u16 = 8;
@@ -26,18 +29,18 @@ pub(super) enum TuiContextClickAction {
 }
 
 struct ContextPanelItem {
-    item: ListItem<'static>,
+    line: Line<'static>,
     action: Option<TuiContextClickAction>,
 }
 
 impl ContextPanelItem {
-    fn inert(item: ListItem<'static>) -> Self {
-        Self { item, action: None }
+    fn inert(line: Line<'static>) -> Self {
+        Self { line, action: None }
     }
 
-    fn clickable(item: ListItem<'static>, action: TuiContextClickAction) -> Self {
+    fn clickable(line: Line<'static>, action: TuiContextClickAction) -> Self {
         Self {
-            item,
+            line,
             action: Some(action),
         }
     }
@@ -55,34 +58,19 @@ pub(super) fn render_tui_once(state: &TuiState) -> Result<String> {
 pub(super) fn render_tui_frame(frame: &mut Frame<'_>, state: &TuiState) {
     let area = frame.area();
     let input_height = input_panel_height(state, area);
-    let root = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(8),
-            Constraint::Length(input_height),
-        ])
-        .split(area);
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(72), Constraint::Percentage(28)])
-        .split(root[1]);
-    let side = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(15), Constraint::Min(8)])
-        .split(body[1]);
+    let layout = TuiLayout::new(area, state.pane_sizing, input_height);
 
-    frame.render_widget(status_line(state), root[0]);
-    frame.render_widget(chat_panel(state, body[0]), body[0]);
-    frame.render_widget(context_panel(state, side[0]), side[0]);
-    frame.render_widget(activity_panel(state, side[1]), side[1]);
+    frame.render_widget(status_line(state), layout.status);
+    frame.render_widget(chat_panel(state, layout.chat), layout.chat);
+    frame.render_widget(context_panel(state, layout.context), layout.context);
+    frame.render_widget(activity_panel(state, layout.activity), layout.activity);
 
-    let input = command_panel(state, root[2]);
-    frame.render_widget(input.paragraph, root[2]);
-    if state.input_mode && root[2].width > 2 && root[2].height > 2 {
+    let input = command_panel(state, layout.input);
+    frame.render_widget(input.paragraph, layout.input);
+    if state.input_mode && layout.input.width > 2 && layout.input.height > 2 {
         frame.set_cursor_position((
-            root[2].x + 1 + input.cursor_x,
-            root[2].y + 1 + input.cursor_y,
+            layout.input.x + 1 + input.cursor_x,
+            layout.input.y + 1 + input.cursor_y,
         ));
     }
 }
@@ -111,17 +99,24 @@ fn status_line(state: &TuiState) -> Paragraph<'static> {
 }
 
 fn context_panel(state: &TuiState, area: Rect) -> List<'static> {
-    let items = context_panel_items(state);
+    let items = visible_context_items(state, area);
+    let lines = items
+        .into_iter()
+        .enumerate()
+        .map(|(row, item)| {
+            ListItem::new(highlight_selection_line(
+                state,
+                TuiFocusPanel::Context,
+                row,
+                item.line,
+            ))
+        })
+        .collect::<Vec<_>>();
     let height = area.height.saturating_sub(2) as usize;
-    let max_scroll = items.len().saturating_sub(height);
+    let max_scroll = context_panel_items(state).len().saturating_sub(height);
     let scroll = usize::from(state.context_scroll).min(max_scroll);
     let title = context_panel_title(scroll, max_scroll);
-    List::new(top_window(
-        items.into_iter().map(|item| item.item).collect(),
-        height,
-        scroll,
-    ))
-    .block(focused_panel_block(state, TuiFocusPanel::Context, title))
+    List::new(lines).block(focused_panel_block(state, TuiFocusPanel::Context, title))
 }
 
 pub(super) fn context_action_for_click(
@@ -149,6 +144,14 @@ pub(super) fn context_action_for_click(
     let scroll = usize::from(state.context_scroll).min(max_scroll);
     let index = scroll.saturating_add(usize::from(row.saturating_sub(content_y)));
     items.get(index).and_then(|item| item.action.clone())
+}
+
+fn visible_context_items(state: &TuiState, area: Rect) -> Vec<ContextPanelItem> {
+    let height = area.height.saturating_sub(2) as usize;
+    let items = context_panel_items(state);
+    let max_scroll = items.len().saturating_sub(height);
+    let scroll = usize::from(state.context_scroll).min(max_scroll);
+    top_window(items, height, scroll)
 }
 
 fn context_panel_items(state: &TuiState) -> Vec<ContextPanelItem> {
@@ -239,8 +242,8 @@ fn context_panel_items(state: &TuiState) -> Vec<ContextPanelItem> {
     items
 }
 
-fn context_item(content: impl Into<Text<'static>>) -> ContextPanelItem {
-    ContextPanelItem::inert(ListItem::new(content))
+fn context_item(content: impl Into<Line<'static>>) -> ContextPanelItem {
+    ContextPanelItem::inert(content.into())
 }
 
 fn context_panel_title(scroll: usize, max_scroll: usize) -> String {
@@ -386,7 +389,7 @@ fn proposal_context_items(proposals: &TuiProposalListSummary) -> Vec<ContextPane
     ];
     items.extend(proposals.proposals.iter().take(4).map(|proposal| {
         ContextPanelItem::clickable(
-            ListItem::new(format!(
+            Line::from(format!(
                 "{} {} {}",
                 proposal.proposal_id, proposal.status, proposal.kind
             )),
@@ -402,11 +405,18 @@ fn proposal_context_items(proposals: &TuiProposalListSummary) -> Vec<ContextPane
     items
 }
 
-fn chat_panel(state: &TuiState, area: Rect) -> Paragraph<'static> {
+fn visible_chat_lines(state: &TuiState, area: Rect) -> Vec<Line<'static>> {
     let width = area.width.saturating_sub(2).max(1);
     let height = area.height.saturating_sub(2) as usize;
-    let lines = chat_lines(state, width);
-    let visible = bottom_window(lines, height, state.chat_scroll);
+    bottom_window(chat_lines(state, width), height, state.chat_scroll)
+}
+
+fn chat_panel(state: &TuiState, area: Rect) -> Paragraph<'static> {
+    let visible = visible_chat_lines(state, area)
+        .into_iter()
+        .enumerate()
+        .map(|(row, line)| highlight_selection_line(state, TuiFocusPanel::Chat, row, line))
+        .collect::<Vec<_>>();
     let title = if state.chat_scroll == 0 {
         "Chat".to_owned()
     } else {
@@ -421,38 +431,18 @@ fn chat_panel(state: &TuiState, area: Rect) -> Paragraph<'static> {
 }
 
 fn activity_panel(state: &TuiState, area: Rect) -> List<'static> {
-    let mut items = Vec::new();
-    if state.activity.is_empty() {
-        items.push(ListItem::new(Line::styled(
-            "no activity",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        items.extend(state.activity.iter().map(activity_item));
-    }
-    if !state.recent_runs.is_empty() {
-        items.push(ListItem::new(""));
-        items.push(ListItem::new(Line::styled(
-            "recent runs",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
-        items.extend(state.recent_runs.iter().take(4).map(|run| {
-            ListItem::new(Line::from(vec![
-                Span::styled(run.run_id.0.clone(), Style::default().fg(Color::Cyan)),
-                Span::raw(" "),
-                Span::raw(run.agent_id.clone()),
-                Span::styled(
-                    format!(" {:?}", run.status),
-                    Style::default().fg(Color::Gray),
-                ),
-            ]))
-        }));
-    }
-
-    let height = area.height.saturating_sub(2) as usize;
-    let visible = bottom_window(items, height, state.event_scroll);
+    let visible = visible_activity_lines(state, area)
+        .into_iter()
+        .enumerate()
+        .map(|(row, line)| {
+            ListItem::new(highlight_selection_line(
+                state,
+                TuiFocusPanel::Activity,
+                row,
+                line,
+            ))
+        })
+        .collect::<Vec<_>>();
     let title = if state.event_scroll == 0 {
         "Activity".to_owned()
     } else {
@@ -461,7 +451,42 @@ fn activity_panel(state: &TuiState, area: Rect) -> List<'static> {
     List::new(visible).block(focused_panel_block(state, TuiFocusPanel::Activity, title))
 }
 
-fn activity_item(activity: &TuiActivityItem) -> ListItem<'static> {
+fn visible_activity_lines(state: &TuiState, area: Rect) -> Vec<Line<'static>> {
+    let mut items = Vec::new();
+    if state.activity.is_empty() {
+        items.push(Line::styled(
+            "no activity",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        items.extend(state.activity.iter().map(activity_item_line));
+    }
+    if !state.recent_runs.is_empty() {
+        items.push(Line::from(""));
+        items.push(Line::styled(
+            "recent runs",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        items.extend(state.recent_runs.iter().take(4).map(|run| {
+            Line::from(vec![
+                Span::styled(run.run_id.0.clone(), Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::raw(run.agent_id.clone()),
+                Span::styled(
+                    format!(" {:?}", run.status),
+                    Style::default().fg(Color::Gray),
+                ),
+            ])
+        }));
+    }
+
+    let height = area.height.saturating_sub(2) as usize;
+    bottom_window(items, height, state.event_scroll)
+}
+
+fn activity_item_line(activity: &TuiActivityItem) -> Line<'static> {
     let mut spans = vec![
         Span::styled(
             format!("{:<7}", activity.kind.label()),
@@ -476,7 +501,118 @@ fn activity_item(activity: &TuiActivityItem) -> ListItem<'static> {
             Span::styled(detail.clone(), Style::default().fg(Color::DarkGray)),
         ]);
     }
-    ListItem::new(Line::from(spans))
+    Line::from(spans)
+}
+
+pub(super) fn selected_text_for_layout(state: &TuiState, layout: TuiLayout) -> Option<String> {
+    let selection = state.text_selection.as_ref()?;
+    if selection.is_empty() {
+        return None;
+    }
+    let lines = visible_text_lines_for_panel(state, layout, selection.panel);
+    selected_text_from_lines(&lines, selection)
+}
+
+fn visible_text_lines_for_panel(
+    state: &TuiState,
+    layout: TuiLayout,
+    panel: TuiFocusPanel,
+) -> Vec<String> {
+    match panel {
+        TuiFocusPanel::Chat => visible_chat_lines(state, layout.chat),
+        TuiFocusPanel::Context => visible_context_items(state, layout.context)
+            .into_iter()
+            .map(|item| item.line)
+            .collect(),
+        TuiFocusPanel::Activity => visible_activity_lines(state, layout.activity),
+    }
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect()
+}
+
+fn highlight_selection_line(
+    state: &TuiState,
+    panel: TuiFocusPanel,
+    row: usize,
+    line: Line<'static>,
+) -> Line<'static> {
+    let Some(selection) = state.text_selection.as_ref() else {
+        return line;
+    };
+    if selection.panel != panel || selection.is_empty() {
+        return line;
+    }
+    let Some((start_col, end_col)) = selected_columns_for_row(selection, row) else {
+        return line;
+    };
+    let text = line.to_string();
+    let (before, selected, after) = split_display_columns(&text, start_col, end_col);
+    if selected.is_empty() {
+        return line;
+    }
+    Line::from(vec![
+        Span::raw(before),
+        Span::styled(selected, selection_style()),
+        Span::raw(after),
+    ])
+}
+
+fn selected_text_from_lines(lines: &[String], selection: &TuiTextSelection) -> Option<String> {
+    let (start, end) = selection.ordered_points();
+    let mut selected = Vec::new();
+    for row in start.row..=end.row {
+        let Some(line) = lines.get(usize::from(row)) else {
+            break;
+        };
+        let start_col = if row == start.row { start.column } else { 0 };
+        let end_col = if row == end.row { end.column } else { u16::MAX };
+        selected.push(
+            split_display_columns(line, start_col, end_col)
+                .1
+                .trim_end()
+                .to_owned(),
+        );
+    }
+    let text = selected.join("\n").trim_end().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+fn selected_columns_for_row(selection: &TuiTextSelection, row: usize) -> Option<(u16, u16)> {
+    let (start, end) = selection.ordered_points();
+    let row = u16::try_from(row).ok()?;
+    if row < start.row || row > end.row {
+        return None;
+    }
+    let start_col = if row == start.row { start.column } else { 0 };
+    let end_col = if row == end.row { end.column } else { u16::MAX };
+    (end_col > start_col).then_some((start_col, end_col))
+}
+
+fn split_display_columns(text: &str, start_col: u16, end_col: u16) -> (String, String, String) {
+    let mut before = String::new();
+    let mut selected = String::new();
+    let mut after = String::new();
+    let mut col = 0u16;
+
+    for ch in text.chars() {
+        let width = ch.width().unwrap_or(0) as u16;
+        let next_col = col.saturating_add(width);
+        if next_col <= start_col {
+            before.push(ch);
+        } else if col >= end_col {
+            after.push(ch);
+        } else {
+            selected.push(ch);
+        }
+        col = next_col;
+    }
+
+    (before, selected, after)
+}
+
+fn selection_style() -> Style {
+    Style::default().fg(Color::Black).bg(Color::Cyan)
 }
 
 struct InputPanel {
@@ -1052,7 +1188,7 @@ mod tests {
         chat::ChatLlmOptions,
         tools::ToolOverrides,
         tui::{
-            data::{TuiAgentSummary, TuiOptions, TuiPendingApproval},
+            data::{TuiAgentSummary, TuiOptions, TuiPendingApproval, TuiSelectionPoint},
             policy::TuiToolRisk,
         },
     };
@@ -1117,6 +1253,8 @@ mod tests {
             context_scroll: 0,
             event_scroll: 0,
             focused_panel: TuiFocusPanel::Chat,
+            pane_sizing: Default::default(),
+            text_selection: None,
             input_history: VecDeque::new(),
             history_cursor: None,
             history_draft: None,
@@ -1189,6 +1327,20 @@ mod tests {
         let rendered = render_tui_once(&state).expect("tui renders");
 
         assert!(rendered.contains("> Activity"));
+    }
+
+    #[test]
+    fn selected_text_uses_panel_local_columns() {
+        let mut state = test_state();
+        state.push_user_message("alpha");
+        state.begin_text_selection(TuiFocusPanel::Chat, TuiSelectionPoint::new(2, 1));
+        state.update_text_selection(TuiFocusPanel::Chat, TuiSelectionPoint::new(7, 1));
+        let area = Rect::new(0, 0, 80, 24);
+        let layout = TuiLayout::new(area, state.pane_sizing, input_panel_height(&state, area));
+
+        let selected = selected_text_for_layout(&state, layout).expect("selection has text");
+
+        assert_eq!(selected, "alpha");
     }
 
     #[test]

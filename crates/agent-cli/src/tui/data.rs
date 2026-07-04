@@ -256,6 +256,59 @@ pub(super) enum TuiFocusPanel {
     Activity,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct TuiPaneSizing {
+    pub(super) side_width: Option<u16>,
+    pub(super) context_height: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TuiSelectionPoint {
+    pub(super) column: u16,
+    pub(super) row: u16,
+}
+
+impl TuiSelectionPoint {
+    pub(super) fn new(column: u16, row: u16) -> Self {
+        Self { column, row }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiTextSelection {
+    pub(super) panel: TuiFocusPanel,
+    pub(super) anchor: TuiSelectionPoint,
+    pub(super) focus: TuiSelectionPoint,
+}
+
+impl TuiTextSelection {
+    pub(super) fn new(panel: TuiFocusPanel, point: TuiSelectionPoint) -> Self {
+        Self {
+            panel,
+            anchor: point,
+            focus: point,
+        }
+    }
+
+    pub(super) fn update(&mut self, point: TuiSelectionPoint) {
+        self.focus = point;
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.anchor == self.focus
+    }
+
+    pub(super) fn ordered_points(&self) -> (TuiSelectionPoint, TuiSelectionPoint) {
+        let start_key = (self.anchor.row, self.anchor.column);
+        let end_key = (self.focus.row, self.focus.column);
+        if start_key <= end_key {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum TuiPendingApprovalAction {
     SlashTool {
@@ -380,6 +433,8 @@ pub(super) struct TuiState {
     pub(super) context_scroll: u16,
     pub(super) event_scroll: u16,
     pub(super) focused_panel: TuiFocusPanel,
+    pub(super) pane_sizing: TuiPaneSizing,
+    pub(super) text_selection: Option<TuiTextSelection>,
     pub(super) input_history: VecDeque<String>,
     pub(super) history_cursor: Option<usize>,
     pub(super) history_draft: Option<String>,
@@ -430,6 +485,8 @@ impl TuiState {
             context_scroll: 0,
             event_scroll: 0,
             focused_panel: TuiFocusPanel::Chat,
+            pane_sizing: TuiPaneSizing::default(),
+            text_selection: None,
             input_history: VecDeque::new(),
             history_cursor: None,
             history_draft: None,
@@ -894,6 +951,28 @@ impl TuiState {
         self.focused_panel = panel;
     }
 
+    pub(super) fn begin_text_selection(&mut self, panel: TuiFocusPanel, point: TuiSelectionPoint) {
+        self.text_selection = Some(TuiTextSelection::new(panel, point));
+    }
+
+    pub(super) fn update_text_selection(&mut self, panel: TuiFocusPanel, point: TuiSelectionPoint) {
+        match self.text_selection.as_mut() {
+            Some(selection) if selection.panel == panel => selection.update(point),
+            _ => self.begin_text_selection(panel, point),
+        }
+    }
+
+    pub(super) fn finish_text_selection(&mut self) -> bool {
+        let Some(selection) = self.text_selection.as_ref() else {
+            return false;
+        };
+        !selection.is_empty()
+    }
+
+    pub(super) fn clear_text_selection(&mut self) {
+        self.text_selection = None;
+    }
+
     pub(super) fn scroll_focused_panel_up(&mut self) {
         match self.focused_panel {
             TuiFocusPanel::Chat => self.scroll_chat_up(),
@@ -1199,6 +1278,8 @@ mod tests {
             context_scroll: 0,
             event_scroll: 0,
             focused_panel: TuiFocusPanel::Chat,
+            pane_sizing: TuiPaneSizing::default(),
+            text_selection: None,
             input_history: VecDeque::new(),
             history_cursor: None,
             history_draft: None,

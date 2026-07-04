@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Stdout},
+    io::{self, Stdout, Write},
     time::Duration,
 };
 
@@ -16,11 +16,13 @@ use super::{
     chat::{TuiTaskHandle, start_natural_language_task},
     commands::execute_command,
     data::{
-        TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiFocusPanel, TuiState, TuiUpdate,
+        TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiFocusPanel, TuiSelectionPoint,
+        TuiState, TuiUpdate,
     },
+    layout::{TuiLayout, TuiResizeHandle, contains},
     render::{
         TuiContextClickAction, context_action_for_click, input_cursor_for_click,
-        input_panel_height, render_tui_frame,
+        input_panel_height, render_tui_frame, selected_text_for_layout,
     },
 };
 
@@ -54,6 +56,7 @@ async fn run_tui_event_loop(
 ) -> Result<()> {
     let (sender, mut receiver) = unbounded_channel();
     let mut active_task: Option<TuiTaskHandle> = None;
+    let mut mouse_drag: Option<TuiMouseDrag> = None;
     loop {
         drain_updates(state, &mut receiver);
         if active_task
@@ -106,13 +109,14 @@ async fn run_tui_event_loop(
                 }
                 Event::Mouse(mouse) if mouse_capture => {
                     let size = terminal.size().into_diagnostic()?;
-                    handle_mouse_event(
+                    handle_mouse_event_with_drag(
                         state,
                         mouse,
                         size.width,
                         size.height,
                         &sender,
                         &mut active_task,
+                        &mut mouse_drag,
                     );
                 }
                 _ => {}
@@ -318,6 +322,7 @@ fn drain_updates(state: &mut TuiState, receiver: &mut UnboundedReceiver<TuiUpdat
     }
 }
 
+#[cfg(test)]
 fn handle_mouse_event(
     state: &mut TuiState,
     mouse: MouseEvent,
@@ -325,6 +330,33 @@ fn handle_mouse_event(
     terminal_height: u16,
     sender: &UnboundedSender<TuiUpdate>,
     active_task: &mut Option<TuiTaskHandle>,
+) {
+    let mut mouse_drag = None;
+    handle_mouse_event_with_drag(
+        state,
+        mouse,
+        terminal_width,
+        terminal_height,
+        sender,
+        active_task,
+        &mut mouse_drag,
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiMouseDrag {
+    Resize(TuiResizeHandle),
+    Select(TuiFocusPanel),
+}
+
+fn handle_mouse_event_with_drag(
+    state: &mut TuiState,
+    mouse: MouseEvent,
+    terminal_width: u16,
+    terminal_height: u16,
+    sender: &UnboundedSender<TuiUpdate>,
+    active_task: &mut Option<TuiTaskHandle>,
+    mouse_drag: &mut Option<TuiMouseDrag>,
 ) {
     let layout = mouse_layout(state, terminal_width, terminal_height);
     match mouse.kind {
@@ -335,50 +367,137 @@ fn handle_mouse_event(
             scroll_at_position(state, &layout, mouse.column, mouse.row, false)
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(handle) = layout.resize_handle_at(mouse.column, mouse.row) {
+                *mouse_drag = Some(TuiMouseDrag::Resize(handle));
+                resize_panes(state, layout, handle, mouse.column, mouse.row);
+                state.clear_text_selection();
+                return;
+            }
+            if let Some(panel) = layout.focus_panel_at(mouse.column, mouse.row) {
+                state.begin_text_selection(
+                    panel,
+                    selection_point_for_panel(layout, panel, mouse.column, mouse.row),
+                );
+                *mouse_drag = Some(TuiMouseDrag::Select(panel));
+            } else {
+                *mouse_drag = None;
+                state.clear_text_selection();
+            }
             handle_mouse_click(state, &layout, mouse.column, mouse.row, sender, active_task)
+        }
+        MouseEventKind::Drag(MouseButton::Left) => match *mouse_drag {
+            Some(TuiMouseDrag::Resize(handle)) => {
+                resize_panes(state, layout, handle, mouse.column, mouse.row);
+            }
+            Some(TuiMouseDrag::Select(panel)) => {
+                state.update_text_selection(
+                    panel,
+                    selection_point_for_panel(layout, panel, mouse.column, mouse.row),
+                );
+            }
+            None => {}
+        },
+        MouseEventKind::Up(MouseButton::Left) => {
+            if matches!(mouse_drag.take(), Some(TuiMouseDrag::Select(_)))
+                && state.finish_text_selection()
+                && let Some(text) = selected_text_for_layout(state, layout)
+            {
+                copy_selected_text(state, &text);
+            }
         }
         _ => {}
     }
 }
 
-#[derive(Clone, Copy)]
-struct TuiMouseLayout {
-    chat: Rect,
-    context: Rect,
-    activity: Rect,
-    input: Rect,
+fn mouse_layout(state: &TuiState, terminal_width: u16, terminal_height: u16) -> TuiLayout {
+    let area = Rect::new(0, 0, terminal_width, terminal_height);
+    TuiLayout::new(area, state.pane_sizing, input_panel_height(state, area))
 }
 
-fn mouse_layout(state: &TuiState, terminal_width: u16, terminal_height: u16) -> TuiMouseLayout {
-    let area = Rect::new(0, 0, terminal_width, terminal_height);
-    let input_height = input_panel_height(state, area).min(terminal_height);
-    let input_y = terminal_height.saturating_sub(input_height);
-    let body_y = terminal_height.min(1);
-    let body_height = input_y.saturating_sub(body_y);
-    let chat_width = terminal_width.saturating_mul(72) / 100;
-    let side_width = terminal_width.saturating_sub(chat_width);
-    let context_height = body_height.min(15);
-    let activity_y = body_y.saturating_add(context_height);
-    TuiMouseLayout {
-        chat: Rect::new(0, body_y, chat_width, body_height),
-        context: Rect::new(chat_width, body_y, side_width, context_height),
-        activity: Rect::new(
-            chat_width,
-            activity_y,
-            side_width,
-            body_height.saturating_sub(context_height),
-        ),
-        input: Rect::new(0, input_y, terminal_width, input_height),
+fn resize_panes(
+    state: &mut TuiState,
+    layout: TuiLayout,
+    handle: TuiResizeHandle,
+    column: u16,
+    row: u16,
+) {
+    let sizing = layout.resize(handle, column, row);
+    match handle {
+        TuiResizeHandle::Side => state.pane_sizing.side_width = sizing.side_width,
+        TuiResizeHandle::ContextActivity => {
+            state.pane_sizing.context_height = sizing.context_height;
+        }
     }
 }
 
-fn scroll_at_position(
-    state: &mut TuiState,
-    layout: &TuiMouseLayout,
+fn selection_point_for_panel(
+    layout: TuiLayout,
+    panel: TuiFocusPanel,
     column: u16,
     row: u16,
-    up: bool,
-) {
+) -> TuiSelectionPoint {
+    let area = match panel {
+        TuiFocusPanel::Chat => layout.chat,
+        TuiFocusPanel::Context => layout.context,
+        TuiFocusPanel::Activity => layout.activity,
+    };
+    let content_x = area.x.saturating_add(1);
+    let content_y = area.y.saturating_add(1);
+    let content_width = area.width.saturating_sub(2);
+    let content_height = area.height.saturating_sub(2);
+    TuiSelectionPoint::new(
+        column.saturating_sub(content_x).min(content_width),
+        row.saturating_sub(content_y)
+            .min(content_height.saturating_sub(1)),
+    )
+}
+
+fn copy_selected_text(state: &mut TuiState, text: &str) {
+    match write_osc52_clipboard(text) {
+        Ok(()) => state.push_activity(TuiActivityItem::with_detail(
+            TuiActivityKind::System,
+            "selection copied",
+            format!("{} chars", text.chars().count()),
+        )),
+        Err(error) => state.push_activity(TuiActivityItem::with_detail(
+            TuiActivityKind::Error,
+            "selection copy failed",
+            error.to_string(),
+        )),
+    }
+}
+
+fn write_osc52_clipboard(text: &str) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b]52;c;{}\x07", base64_encode(text.as_bytes()))?;
+    stdout.flush()
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let a = chunk[0];
+        let b = *chunk.get(1).unwrap_or(&0);
+        let c = *chunk.get(2).unwrap_or(&0);
+        let triple = ((a as u32) << 16) | ((b as u32) << 8) | c as u32;
+        output.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+        output.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[((triple >> 6) & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(triple & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
+}
+
+fn scroll_at_position(state: &mut TuiState, layout: &TuiLayout, column: u16, row: u16, up: bool) {
     if contains(layout.input, column, row) {
         state.input_mode = true;
         if up {
@@ -412,7 +531,7 @@ fn scroll_at_position(
 
 fn handle_mouse_click(
     state: &mut TuiState,
-    layout: &TuiMouseLayout,
+    layout: &TuiLayout,
     column: u16,
     row: u16,
     sender: &UnboundedSender<TuiUpdate>,
@@ -424,7 +543,7 @@ fn handle_mouse_click(
             state.set_input_cursor(cursor);
         }
     }
-    if let Some(panel) = focus_panel_at_position(layout, column, row) {
+    if let Some(panel) = layout.focus_panel_at(column, row) {
         state.focus_panel(panel);
     }
     if contains(layout.context, column, row)
@@ -505,22 +624,6 @@ fn activity_recent_run_id_at_position(
         .map(|run| run.run_id.0.clone())
 }
 
-fn focus_panel_at_position(
-    layout: &TuiMouseLayout,
-    column: u16,
-    row: u16,
-) -> Option<TuiFocusPanel> {
-    if contains(layout.chat, column, row) {
-        Some(TuiFocusPanel::Chat)
-    } else if contains(layout.context, column, row) {
-        Some(TuiFocusPanel::Context)
-    } else if contains(layout.activity, column, row) {
-        Some(TuiFocusPanel::Activity)
-    } else {
-        None
-    }
-}
-
 fn approval_selection_at_input_position(
     input: Rect,
     column: u16,
@@ -539,13 +642,6 @@ fn approval_selection_at_input_position(
     } else {
         None
     }
-}
-
-fn contains(rect: Rect, column: u16, row: u16) -> bool {
-    column >= rect.x
-        && column < rect.x.saturating_add(rect.width)
-        && row >= rect.y
-        && row < rect.y.saturating_add(rect.height)
 }
 
 fn cancel_active_task(state: &mut TuiState, active_task: &mut Option<TuiTaskHandle>) {
@@ -1182,6 +1278,78 @@ mod tests {
         .expect("page up handled");
 
         assert_eq!(state.event_scroll, 4);
+    }
+
+    #[tokio::test]
+    async fn mouse_drag_resizes_tui_panes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+        let (sender, _receiver) = unbounded_channel();
+        let mut active_task = None;
+        let mut mouse_drag = None;
+
+        let layout = mouse_layout(&state, 100, 30);
+        handle_mouse_event_with_drag(
+            &mut state,
+            mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                layout.context.x,
+                layout.chat.y + 5,
+            ),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+            &mut mouse_drag,
+        );
+        handle_mouse_event_with_drag(
+            &mut state,
+            mouse_event(
+                MouseEventKind::Drag(MouseButton::Left),
+                62,
+                layout.chat.y + 5,
+            ),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+            &mut mouse_drag,
+        );
+
+        let resized = mouse_layout(&state, 100, 30);
+        assert_eq!(resized.context.x, 62);
+        assert_eq!(state.pane_sizing.side_width, Some(38));
+
+        handle_mouse_event_with_drag(
+            &mut state,
+            mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                resized.context.x + 4,
+                resized.activity.y,
+            ),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+            &mut mouse_drag,
+        );
+        handle_mouse_event_with_drag(
+            &mut state,
+            mouse_event(
+                MouseEventKind::Drag(MouseButton::Left),
+                resized.context.x + 4,
+                resized.context.y + 10,
+            ),
+            100,
+            30,
+            &sender,
+            &mut active_task,
+            &mut mouse_drag,
+        );
+
+        let resized = mouse_layout(&state, 100, 30);
+        assert_eq!(resized.context.height, 10);
+        assert_eq!(state.pane_sizing.context_height, Some(10));
     }
 
     #[tokio::test]

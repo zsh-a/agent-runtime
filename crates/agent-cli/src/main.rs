@@ -397,8 +397,10 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         retry_backoff_ms: u64,
         #[arg(
-            long,
-            help = "Capture mouse wheel events; disables terminal-native text selection"
+            long = "no-mouse",
+            action = clap::ArgAction::SetFalse,
+            default_value_t = true,
+            help = "Disable mouse pane resizing, panel selection, and wheel events"
         )]
         mouse_capture: bool,
         #[arg(long)]
