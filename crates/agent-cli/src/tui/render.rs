@@ -1186,6 +1186,7 @@ mod tests {
     use super::*;
     use crate::{
         chat::ChatLlmOptions,
+        runtime_config::ResolvedRuntimeSources,
         tools::ToolOverrides,
         tui::{
             data::{TuiAgentSummary, TuiOptions, TuiPendingApproval, TuiSelectionPoint},
@@ -1198,10 +1199,12 @@ mod tests {
     fn test_state() -> TuiState {
         TuiState {
             options: TuiOptions {
-                catalog_path: None,
+                runtime_sources: ResolvedRuntimeSources::new(
+                    Utf8PathBuf::from("agents.yaml"),
+                    None,
+                ),
                 trace_path: None,
                 store_path: Utf8PathBuf::from("store"),
-                registry_path: Utf8PathBuf::from("agents.yaml"),
                 tool_overrides: ToolOverrides::default(),
                 allow_high_risk_tools: true,
                 chat: ChatLlmOptions {
@@ -1220,6 +1223,7 @@ mod tests {
                 retry_backoff_ms: 0,
                 hooks: Vec::new(),
                 context_policy: Default::default(),
+                default_agent: None,
                 mouse_capture: false,
                 once: false,
             },

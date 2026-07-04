@@ -21,6 +21,7 @@ mod otel_export;
 mod proposal;
 mod registry;
 mod replay;
+mod runtime_config;
 mod runtime_server;
 mod server;
 mod session;
@@ -47,12 +48,14 @@ use dev_stdio::{run_dev_mcp_server, run_dev_tool_host};
 use eval::{create_eval_from_run, run_dev_score_hook, run_eval_path};
 use metrics::build_metrics_summary;
 use otel_export::{DEFAULT_OTLP_TIMEOUT_SECONDS, ExportOtelTraceOptions, export_otel_trace_file};
-use registry::load_registry;
 use replay::{ReplayMode, ReplayTraceOptions, replay_trace};
+use runtime_config::{
+    ResolvedRuntimeSources, RuntimeSourceOptions, RuntimeSources, compose_runtime_sources,
+};
 use runtime_server::RuntimeServer;
 use server::{serve_http, serve_stdio};
 use shell_tool_host::run_shell_tool_host;
-use tools::tool_overrides;
+use tools::{ToolOverrides, tool_overrides};
 use trace_store::read_json;
 use tui::{TuiOptions, run_tui};
 
@@ -87,21 +90,41 @@ impl AppContext {
         &self.config
     }
 
-    fn registry(&self, value: Utf8PathBuf) -> Utf8PathBuf {
-        config::configured_path(
-            value,
-            DEFAULT_REGISTRY,
-            self.config.runtime.registry.as_ref(),
-        )
-    }
-
     fn catalog(&self, value: Option<Utf8PathBuf>) -> Option<Utf8PathBuf> {
-        value.or_else(|| self.config.runtime.catalog.clone())
+        value.or_else(|| self.config.runtime.sources.catalog.clone())
     }
 
-    fn required_catalog(&self, value: Option<Utf8PathBuf>) -> Result<Utf8PathBuf> {
-        self.catalog(value)
-            .ok_or_else(|| miette!("--catalog or runtime.catalog in config is required"))
+    fn runtime_sources(
+        &self,
+        registry: Utf8PathBuf,
+        catalog: Option<Utf8PathBuf>,
+    ) -> ResolvedRuntimeSources {
+        let mut sources = self.config.runtime.sources.clone();
+        if registry != Utf8PathBuf::from(DEFAULT_REGISTRY) || sources.registry.is_none() {
+            sources.registry = Some(registry);
+        }
+        if catalog.is_some() {
+            sources.catalog = catalog;
+        }
+        ResolvedRuntimeSources::from_sources(sources, DEFAULT_REGISTRY)
+    }
+
+    fn command_runtime_sources(
+        &self,
+        registry: Option<Utf8PathBuf>,
+        catalog: Option<Utf8PathBuf>,
+    ) -> RuntimeSources {
+        let mut sources = self.config.runtime.sources.clone();
+        sources.merge(RuntimeSources::new(registry, catalog));
+        sources
+    }
+
+    fn configured_runtime_sources(&self) -> RuntimeSources {
+        self.config.runtime.sources.clone()
+    }
+
+    fn default_agent(&self) -> Option<String> {
+        self.config.runtime.default_agent.clone()
     }
 
     fn store(&self, value: Utf8PathBuf) -> Utf8PathBuf {
@@ -188,6 +211,8 @@ enum Command {
     List {
         #[arg(long, default_value = DEFAULT_REGISTRY)]
         registry: Utf8PathBuf,
+        #[arg(long)]
+        catalog: Option<Utf8PathBuf>,
     },
     Run {
         agent_id: String,
@@ -223,6 +248,8 @@ enum Command {
     Tick {
         #[arg(long, default_value = DEFAULT_REGISTRY)]
         registry: Utf8PathBuf,
+        #[arg(long)]
+        catalog: Option<Utf8PathBuf>,
         #[arg(long, default_value = DEFAULT_STORE)]
         store: Utf8PathBuf,
     },
@@ -317,6 +344,8 @@ enum Command {
         command: CmdCommand,
     },
     Serve {
+        #[arg(long, default_value = DEFAULT_REGISTRY)]
+        registry: Utf8PathBuf,
         #[arg(long)]
         catalog: Option<Utf8PathBuf>,
         #[arg(long, default_value = DEFAULT_STORE)]
@@ -586,10 +615,14 @@ async fn main() -> Result<()> {
     init_logging(log_mode_for_command(&cli.command, &context));
 
     match cli.command {
-        Command::List { registry } => {
-            let registry = context.registry(registry);
-            let registry = load_registry(registry).await?;
-            let specs = registry.list_specs();
+        Command::List { registry, catalog } => {
+            let sources = context.runtime_sources(registry, catalog);
+            let composition = compose_runtime_sources(RuntimeSourceOptions {
+                sources,
+                tool_overrides: ToolOverrides::default(),
+            })
+            .await?;
+            let specs = composition.agent_specs;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&specs).into_diagnostic()?
@@ -612,16 +645,14 @@ async fn main() -> Result<()> {
             max_retries,
             retry_backoff_ms,
         } => {
-            let catalog = context.catalog(catalog);
-            let registry = context.registry(registry);
+            let sources = context.runtime_sources(registry, catalog);
             let tool_source = context.tool_sources(tool_source);
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
             let hooks = context.hooks()?;
             run_agent_once(RunCliOptions {
                 agent_id,
-                registry,
-                catalog,
+                sources,
                 tool_overrides: tool_overrides(tool_host, mock_tool, tool_source).await?,
                 input,
                 trace_out,
@@ -636,12 +667,16 @@ async fn main() -> Result<()> {
             })
             .await?;
         }
-        Command::Tick { registry, store } => {
-            let registry = context.registry(registry);
+        Command::Tick {
+            registry,
+            catalog,
+            store,
+        } => {
+            let sources = context.runtime_sources(registry, catalog);
             let store = context.store(store);
             let hooks = context.hooks()?;
             tick_agents(TickCliOptions {
-                registry,
+                sources,
                 store,
                 hooks,
             })
@@ -662,8 +697,7 @@ async fn main() -> Result<()> {
             max_retries,
             retry_backoff_ms,
         } => {
-            let catalog = context.catalog(catalog);
-            let registry = context.registry(registry);
+            let sources = context.runtime_sources(registry, catalog);
             let tool_source = context.tool_sources(tool_source);
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
@@ -682,8 +716,7 @@ async fn main() -> Result<()> {
                     replay_trace(ReplayTraceOptions {
                         trace_file,
                         mode,
-                        registry,
-                        catalog,
+                        sources,
                         tool_host,
                         mock_tool,
                         tool_source,
@@ -792,10 +825,10 @@ async fn main() -> Result<()> {
                 retry_backoff_ms,
             } => {
                 let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
+                let sources = context.runtime_sources(registry, catalog);
                 let result = run_workflow_request(WorkflowRunCliOptions {
                     input,
-                    registry: context.registry(registry),
-                    catalog: context.catalog(catalog),
+                    sources,
                     store: context.store(store),
                     tool_host,
                     mock_tool,
@@ -884,9 +917,9 @@ async fn main() -> Result<()> {
                 catalog,
                 registry,
             } => {
+                let sources = context.command_runtime_sources(registry, catalog);
                 let report =
-                    create_command_from_run(from_run, store, out, description, catalog, registry)
-                        .await?;
+                    create_command_from_run(from_run, store, out, description, sources).await?;
                 print_json(&report)?;
             }
             CmdCommand::Run {
@@ -904,8 +937,8 @@ async fn main() -> Result<()> {
             } => {
                 let report = run_command_template(CommandRunOptions {
                     command_file,
-                    catalog,
-                    registry,
+                    configured_sources: context.configured_runtime_sources(),
+                    source_overrides: RuntimeSources::new(registry, catalog),
                     store,
                     tool_host,
                     mock_tool,
@@ -921,6 +954,7 @@ async fn main() -> Result<()> {
             }
         },
         Command::Serve {
+            registry,
             catalog,
             store,
             tool_host,
@@ -939,7 +973,7 @@ async fn main() -> Result<()> {
             max_output_tokens,
             max_tool_rounds,
         } => {
-            let catalog = context.required_catalog(catalog)?;
+            let sources = context.runtime_sources(registry, catalog);
             let store = context.store(store);
             let tool_source = context.tool_sources(tool_source);
             let stdio = context.stdio(stdio);
@@ -947,11 +981,12 @@ async fn main() -> Result<()> {
             let port = context.port(port);
             let hooks = context.hooks()?;
             let server = RuntimeServer::new(
-                catalog,
+                sources,
                 store,
                 tool_overrides(tool_host, mock_tool, tool_source).await?,
                 hooks,
                 context.context_policy(),
+                context.default_agent(),
                 chat::ChatLlmOptions {
                     provider,
                     model,
@@ -995,16 +1030,14 @@ async fn main() -> Result<()> {
             mouse_capture,
             once,
         } => {
-            let catalog = context.catalog(catalog);
-            let registry = context.registry(registry);
+            let sources = context.runtime_sources(registry, catalog);
             let store = context.store(store);
             let tool_source = context.tool_sources(tool_source);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
             run_tui(TuiOptions {
-                catalog_path: catalog,
+                runtime_sources: sources,
                 trace_path: trace,
                 store_path: store,
-                registry_path: registry,
                 tool_overrides: tool_overrides(tool_host, mock_tool, tool_source).await?,
                 allow_high_risk_tools: !deny_high_risk_tools,
                 chat: chat::ChatLlmOptions {
@@ -1023,6 +1056,7 @@ async fn main() -> Result<()> {
                 retry_backoff_ms: execution.retry_backoff_ms,
                 hooks: context.hook_specs(),
                 context_policy: context.context_policy(),
+                default_agent: context.default_agent(),
                 mouse_capture,
                 once,
             })

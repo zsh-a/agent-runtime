@@ -101,13 +101,16 @@ pub(crate) fn string_metadata(metadata: &Value, key: &str) -> Option<String> {
 }
 
 pub(crate) fn registry_from_catalog(catalog: &AgentRuntimeCatalog) -> Arc<InMemoryAgentRegistry> {
-    let agents = catalog
+    InMemoryAgentRegistry::shared(agents_from_catalog(catalog))
+}
+
+pub(crate) fn agents_from_catalog(catalog: &AgentRuntimeCatalog) -> Vec<Arc<dyn Agent>> {
+    catalog
         .agents
         .iter()
         .cloned()
         .map(|spec| Arc::new(CatalogDryRunAgent { spec }) as Arc<dyn Agent>)
-        .collect::<Vec<_>>();
-    InMemoryAgentRegistry::shared(agents)
+        .collect()
 }
 
 struct CatalogDryRunAgent {

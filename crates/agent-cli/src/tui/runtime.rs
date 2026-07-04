@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentError, AgentRegistry, AgentRunStatus, AgentRuntimeCatalog, AgentServices, AgentSpec,
-    AgentTrace, PROTOCOL_VERSION, RunId, RunRequest, ToolError, ToolSpec, WorkflowRunRequest,
-    WorkflowRunResult,
+    AgentError, AgentRunStatus, AgentServices, AgentSpec, AgentTrace, PROTOCOL_VERSION, RunId,
+    RunRequest, ToolError, ToolSpec, WorkflowRunRequest, WorkflowRunResult,
 };
-use agent_llm::{LlmMessage, LlmRole};
+use agent_llm::LlmMessage;
 use agent_runtime::{
     AGENT_RUN_TOOL_NAME, AgentRunToolContext, AgentRunner, RunControl, RunOutcome,
     call_agent_run_tool,
@@ -18,9 +17,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    catalog::{read_catalog, registry_from_catalog},
     config::{execution_policy, hook_manager},
-    registry::load_registry,
+    runtime_config::{RuntimeComposition, RuntimeSourceOptions, compose_runtime_sources},
     tools::CliServices,
     trace_store::{write_store_trace, write_workflow_traces},
 };
@@ -28,7 +26,6 @@ use crate::{
 use super::{
     data::TuiOptions,
     policy::{TuiToolPolicy, TuiToolPolicyDecision},
-    tool_inventory::chat_tools_from_catalog,
 };
 
 #[derive(Clone)]
@@ -38,9 +35,7 @@ pub(super) struct TuiRuntime {
 
 struct TuiRuntimeInner {
     options: TuiOptions,
-    agent_specs: Vec<AgentSpec>,
-    catalog: Option<AgentRuntimeCatalog>,
-    tool_specs: Vec<ToolSpec>,
+    composition: RuntimeComposition,
     services: Arc<CliServices>,
     run_store: Arc<dyn agent_core::AgentRunStore>,
     runner: AgentRunner,
@@ -57,14 +52,18 @@ impl TuiRuntime {
         options: &TuiOptions,
         cancellation: CancellationToken,
     ) -> Result<Self> {
-        let loaded = load_runtime_registry(options).await?;
+        let composition = compose_runtime_sources(RuntimeSourceOptions {
+            sources: options.runtime_sources.clone(),
+            tool_overrides: options.tool_overrides.clone(),
+        })
+        .await?;
         let proposal_store = Arc::new(
             FileProposalStore::new(options.store_path.clone())
                 .await
                 .into_diagnostic()?,
         );
         let mut tool_overrides = options.tool_overrides.clone();
-        tool_overrides.extend_tool_specs(loaded.tool_specs.clone());
+        tool_overrides.extend_tool_specs(composition.tool_specs.clone());
         let services = Arc::new(CliServices::with_proposal_store(
             tool_overrides,
             proposal_store,
@@ -81,21 +80,23 @@ impl TuiRuntime {
                 .await
                 .into_diagnostic()?,
         );
-        let runner = AgentRunner::new(loaded.registry, run_store.clone(), runner_services)
-            .with_lock_store(lock_store)
-            .with_hooks(hook_manager(options.hooks.clone())?)
-            .with_policy(execution_policy(
-                options.timeout_seconds,
-                options.max_retries,
-                options.retry_backoff_ms,
-            ));
+        let runner = AgentRunner::new(
+            composition.registry.clone(),
+            run_store.clone(),
+            runner_services,
+        )
+        .with_lock_store(lock_store)
+        .with_hooks(hook_manager(options.hooks.clone())?)
+        .with_policy(execution_policy(
+            options.timeout_seconds,
+            options.max_retries,
+            options.retry_backoff_ms,
+        ));
 
         Ok(Self {
             inner: Arc::new(TuiRuntimeInner {
                 options: options.clone(),
-                agent_specs: loaded.agent_specs,
-                catalog: loaded.catalog,
-                tool_specs: loaded.tool_specs,
+                composition,
                 services,
                 run_store,
                 runner,
@@ -208,6 +209,7 @@ impl TuiRuntime {
 
     pub(super) fn default_agent_id(&self) -> Result<String> {
         self.inner
+            .composition
             .agent_specs
             .first()
             .map(|agent| agent.id.clone())
@@ -223,6 +225,7 @@ impl TuiRuntime {
         };
         if self
             .inner
+            .composition
             .agent_specs
             .iter()
             .any(|agent| agent.id == selected_agent_id)
@@ -233,17 +236,21 @@ impl TuiRuntime {
     }
 
     pub(super) fn agent_specs(&self) -> &[AgentSpec] {
-        &self.inner.agent_specs
+        &self.inner.composition.agent_specs
     }
 
     pub(super) fn chat_tools(&self) -> Vec<ToolSpec> {
-        self.inner.tool_specs.clone()
+        self.inner.composition.tool_specs.clone()
     }
 
     pub(super) fn tool_policy_decision(&self, name: &str) -> TuiToolPolicyDecision {
-        self.inner
-            .policy
-            .evaluate(self.inner.tool_specs.iter().find(|tool| tool.name == name))
+        self.inner.policy.evaluate(
+            self.inner
+                .composition
+                .tool_specs
+                .iter()
+                .find(|tool| tool.name == name),
+        )
     }
 
     pub(super) fn chat_request_messages(
@@ -251,52 +258,11 @@ impl TuiRuntime {
         agent_id: &str,
         messages: Vec<LlmMessage>,
     ) -> Vec<LlmMessage> {
-        let Some(system_prompt) = self.catalog_system_prompt(agent_id) else {
-            return messages;
-        };
-        let mut request_messages = Vec::with_capacity(messages.len() + 1);
-        request_messages.push(LlmMessage {
-            role: LlmRole::System,
-            content: Value::String(system_prompt),
-            name: None,
-            metadata: json!({"source": "agent_catalog"}),
-        });
-        request_messages.extend(messages);
-        request_messages
+        self.inner.composition.chat_messages(agent_id, messages)
     }
 
     async fn persist_trace(&self, trace: &AgentTrace) -> Result<()> {
         write_store_trace(&self.inner.options.store_path, trace).await
-    }
-
-    fn catalog_system_prompt(&self, agent_id: &str) -> Option<String> {
-        let catalog = self.inner.catalog.as_ref()?;
-        let agent = catalog.agents.iter().find(|agent| agent.id == agent_id)?;
-
-        let mut sections = vec![format!("You are {}.", agent.name)];
-        if let Some(description) = agent
-            .description
-            .as_deref()
-            .map(str::trim)
-            .filter(|description| !description.is_empty())
-        {
-            sections.push(description.to_owned());
-        }
-        let mut prompt_blocks = catalog.prompt_blocks.clone();
-        prompt_blocks.sort_by_key(|block| block.index);
-        for block in prompt_blocks {
-            let text = block.text.trim();
-            if !text.is_empty() {
-                sections.push(text.to_owned());
-            }
-        }
-        if !catalog.tools.is_empty() {
-            sections.push(
-                "Use the provided tools when they are necessary. Keep normal replies concise and direct."
-                    .to_owned(),
-            );
-        }
-        Some(sections.join("\n\n"))
     }
 }
 
@@ -306,43 +272,6 @@ pub(super) struct TuiCancelRunResult {
     pub(super) cancellation_requested: bool,
     pub(super) status: AgentRunStatus,
     pub(super) message: String,
-}
-
-struct LoadedRuntimeRegistry {
-    registry: Arc<dyn AgentRegistry>,
-    agent_specs: Vec<AgentSpec>,
-    catalog: Option<AgentRuntimeCatalog>,
-    tool_specs: Vec<ToolSpec>,
-}
-
-async fn load_runtime_registry(options: &TuiOptions) -> Result<LoadedRuntimeRegistry> {
-    match &options.catalog_path {
-        Some(path) => {
-            let catalog = read_catalog(path.clone()).await?;
-            let registry: Arc<dyn AgentRegistry> = registry_from_catalog(&catalog);
-            let agent_specs = catalog.agents.clone();
-            let tool_specs = chat_tools_from_catalog(Some(&catalog), options);
-            Ok(LoadedRuntimeRegistry {
-                registry,
-                agent_specs,
-                catalog: Some(catalog),
-                tool_specs,
-            })
-        }
-        None => {
-            let registry_config = load_registry(options.registry_path.clone()).await?;
-            let agent_specs = registry_config.list_specs();
-            let registry = registry_config.into_agent_registry();
-            let registry: Arc<dyn AgentRegistry> = registry;
-            let tool_specs = chat_tools_from_catalog(None, options);
-            Ok(LoadedRuntimeRegistry {
-                registry,
-                agent_specs,
-                catalog: None,
-                tool_specs,
-            })
-        }
-    }
 }
 
 struct TuiToolServices {
@@ -365,6 +294,7 @@ impl AgentServices for TuiToolServices {
     ) -> std::result::Result<Value, ToolError> {
         let decision = self.runtime.policy.evaluate(
             self.runtime
+                .composition
                 .tool_specs
                 .iter()
                 .find(|tool| tool.name == name),

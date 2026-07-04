@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
 
-use crate::catalog::{read_catalog, registry_from_catalog};
 use crate::config::execution_policy;
-use crate::registry::load_registry;
+use crate::runtime_config::{
+    ResolvedRuntimeSources, RuntimeSourceOptions, RuntimeSources, compose_runtime_sources,
+};
 use crate::tools::{CliServices, tool_overrides};
 use crate::trace_store::{
     read_json, write_json, write_store_trace, write_text, write_workflow_traces,
@@ -52,8 +53,8 @@ struct CommandTemplate {
 
 pub(crate) struct CommandRunOptions {
     pub(crate) command_file: Utf8PathBuf,
-    pub(crate) catalog: Option<Utf8PathBuf>,
-    pub(crate) registry: Option<Utf8PathBuf>,
+    pub(crate) configured_sources: RuntimeSources,
+    pub(crate) source_overrides: RuntimeSources,
     pub(crate) store: Utf8PathBuf,
     pub(crate) tool_host: Vec<String>,
     pub(crate) mock_tool: Vec<String>,
@@ -67,8 +68,7 @@ pub(crate) struct CommandRunOptions {
 
 pub(crate) struct WorkflowRunCliOptions {
     pub(crate) input: Utf8PathBuf,
-    pub(crate) registry: Utf8PathBuf,
-    pub(crate) catalog: Option<Utf8PathBuf>,
+    pub(crate) sources: ResolvedRuntimeSources,
     pub(crate) store: Utf8PathBuf,
     pub(crate) tool_host: Vec<String>,
     pub(crate) mock_tool: Vec<String>,
@@ -87,12 +87,6 @@ pub(crate) struct CommandRunReport {
     trace: agent_core::AgentTrace,
 }
 
-#[derive(Debug)]
-enum CommandRegistryPath {
-    Catalog(Utf8PathBuf),
-    Registry(Utf8PathBuf),
-}
-
 pub(crate) async fn run_workflow_request(
     options: WorkflowRunCliOptions,
 ) -> Result<WorkflowRunResult> {
@@ -102,14 +96,12 @@ pub(crate) async fn run_workflow_request(
         .map_err(|e| miette!("failed to parse workflow request at {}: {e}", options.input))?;
     let mut overrides =
         tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?;
-    let registry = match options.catalog {
-        Some(path) => {
-            let catalog = read_catalog(path).await?;
-            overrides.extend_tool_specs(catalog.tools.clone());
-            registry_from_catalog(&catalog)
-        }
-        None => load_registry(options.registry).await?.into_agent_registry(),
-    };
+    let composition = compose_runtime_sources(RuntimeSourceOptions {
+        sources: options.sources,
+        tool_overrides: overrides.clone(),
+    })
+    .await?;
+    overrides.extend_tool_specs(composition.tool_specs.clone());
     let store = Arc::new(
         FileRunStore::new(options.store.clone())
             .await
@@ -126,7 +118,7 @@ pub(crate) async fn run_workflow_request(
             .into_diagnostic()?,
     );
     let services = Arc::new(CliServices::with_proposal_store(overrides, proposal_store));
-    let runner = AgentRunner::new(registry, store, services)
+    let runner = AgentRunner::new(composition.registry, store, services)
         .with_lock_store(lock_store)
         .with_hooks(options.hooks)
         .with_policy(execution_policy(
@@ -165,12 +157,8 @@ pub(crate) async fn create_command_from_run(
     store_path: Utf8PathBuf,
     out: Utf8PathBuf,
     description: Option<String>,
-    catalog: Option<Utf8PathBuf>,
-    registry: Option<Utf8PathBuf>,
+    sources: RuntimeSources,
 ) -> Result<CommandCreateReport> {
-    if catalog.is_some() && registry.is_some() {
-        return Err(miette!("use only one of --catalog or --registry"));
-    }
     let store = FileRunStore::new(store_path).await.into_diagnostic()?;
     let run_id = RunId(run_id);
     let record = store
@@ -188,8 +176,8 @@ pub(crate) async fn create_command_from_run(
             )
         })),
         agent: record.agent_id.clone(),
-        catalog: catalog.map(|path| path.to_string()),
-        registry: registry.map(|path| path.to_string()),
+        catalog: sources.catalog.map(|path| path.to_string()),
+        registry: sources.registry.map(|path| path.to_string()),
         source_run_id: Some(record.run_id.0.clone()),
         source_run_status: Some(record.status.clone()),
         created_at: Some(
@@ -209,25 +197,23 @@ pub(crate) async fn create_command_from_run(
 }
 
 pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<CommandRunReport> {
-    if options.catalog.is_some() && options.registry.is_some() {
-        return Err(miette!("use only one of --catalog or --registry"));
-    }
     let text = fs_err::tokio::read_to_string(&options.command_file)
         .await
         .map_err(|e| miette!("failed to read command at {}: {e}", options.command_file))?;
     let template = parse_command_template(&text, &options.command_file)?;
-    let registry_path =
-        resolve_command_registry_path(&template.frontmatter, options.catalog, options.registry)?;
+    let sources = resolve_command_runtime_sources(
+        &template.frontmatter,
+        options.configured_sources,
+        options.source_overrides,
+    );
     let mut overrides =
         tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?;
-    let registry = match registry_path {
-        CommandRegistryPath::Catalog(path) => {
-            let catalog = read_catalog(path).await?;
-            overrides.extend_tool_specs(catalog.tools.clone());
-            registry_from_catalog(&catalog)
-        }
-        CommandRegistryPath::Registry(path) => load_registry(path).await?.into_agent_registry(),
-    };
+    let composition = compose_runtime_sources(RuntimeSourceOptions {
+        sources,
+        tool_overrides: overrides.clone(),
+    })
+    .await?;
+    overrides.extend_tool_specs(composition.tool_specs.clone());
     let store = Arc::new(
         FileRunStore::new(options.store.clone())
             .await
@@ -244,7 +230,7 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
             .into_diagnostic()?,
     );
     let services = Arc::new(CliServices::with_proposal_store(overrides, proposal_store));
-    let runner = AgentRunner::new(registry, store, services)
+    let runner = AgentRunner::new(composition.registry, store, services)
         .with_lock_store(lock_store)
         .with_hooks(options.hooks)
         .with_policy(execution_policy(
@@ -285,27 +271,17 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
     })
 }
 
-fn resolve_command_registry_path(
+fn resolve_command_runtime_sources(
     frontmatter: &CommandFrontmatter,
-    catalog: Option<Utf8PathBuf>,
-    registry: Option<Utf8PathBuf>,
-) -> Result<CommandRegistryPath> {
-    if let Some(path) = catalog {
-        return Ok(CommandRegistryPath::Catalog(path));
-    }
-    if let Some(path) = registry {
-        return Ok(CommandRegistryPath::Registry(path));
-    }
-    match (&frontmatter.catalog, &frontmatter.registry) {
-        (Some(_), Some(_)) => Err(miette!(
-            "command frontmatter must not contain both catalog and registry"
-        )),
-        (Some(path), None) => Ok(CommandRegistryPath::Catalog(Utf8PathBuf::from(path))),
-        (None, Some(path)) => Ok(CommandRegistryPath::Registry(Utf8PathBuf::from(path))),
-        (None, None) => Ok(CommandRegistryPath::Registry(Utf8PathBuf::from(
-            "examples/agents.yaml",
-        ))),
-    }
+    mut sources: RuntimeSources,
+    overrides: RuntimeSources,
+) -> ResolvedRuntimeSources {
+    sources.merge(RuntimeSources::new(
+        frontmatter.registry.as_ref().map(Utf8PathBuf::from),
+        frontmatter.catalog.as_ref().map(Utf8PathBuf::from),
+    ));
+    sources.merge(overrides);
+    ResolvedRuntimeSources::from_sources(sources, "examples/agents.yaml")
 }
 
 fn render_command_markdown(frontmatter: &CommandFrontmatter, input: &Value) -> Result<String> {

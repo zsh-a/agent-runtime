@@ -6,6 +6,8 @@ use camino::Utf8PathBuf;
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
 
+use crate::runtime_config::RuntimeSources;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct AgentConfigFile {
     #[serde(default)]
@@ -22,10 +24,10 @@ pub(crate) struct RuntimeProfile {
     pub(crate) store: Option<Utf8PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) eval_store: Option<Utf8PathBuf>,
+    #[serde(default, skip_serializing_if = "RuntimeSources::is_empty")]
+    pub(crate) sources: RuntimeSources,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) registry: Option<Utf8PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) catalog: Option<Utf8PathBuf>,
+    pub(crate) default_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tool_sources: Option<Vec<Utf8PathBuf>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,11 +113,9 @@ impl RuntimeProfile {
         if overlay.eval_store.is_some() {
             self.eval_store = overlay.eval_store;
         }
-        if overlay.registry.is_some() {
-            self.registry = overlay.registry;
-        }
-        if overlay.catalog.is_some() {
-            self.catalog = overlay.catalog;
+        self.sources.merge(overlay.sources);
+        if overlay.default_agent.is_some() {
+            self.default_agent = overlay.default_agent;
         }
         if overlay.tool_sources.is_some() {
             self.tool_sources = overlay.tool_sources;
@@ -294,9 +294,13 @@ mod tests {
             r#"
 [runtime]
 timeout_seconds = 10
+default_agent = "echo_agent"
 hooks = [
   { name = "audit_run", event = "RunStart", kind = "process", effect = "observe", command = ["audit-hook"], timeout_ms = 1000 },
 ]
+
+[runtime.sources]
+registry = "../../examples/agents.yaml"
 
 [runtime.context]
 max_input_tokens = 1000
@@ -325,6 +329,7 @@ compact_when_over_budget = false
         let hooks = config.runtime.hooks.expect("profile hooks");
 
         assert_eq!(config.runtime.timeout_seconds, Some(20));
+        assert_eq!(config.runtime.default_agent.as_deref(), Some("echo_agent"));
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].name, "guard_tool");
         assert_eq!(

@@ -1,6 +1,6 @@
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::{chat::ChatLlmOptions, tools::ToolOverrides};
+use crate::{chat::ChatLlmOptions, runtime_config::ResolvedRuntimeSources, tools::ToolOverrides};
 
 use super::data::{TuiOptions, TuiState};
 
@@ -28,10 +28,12 @@ pub(super) fn test_options(
     allow_high_risk_tools: bool,
 ) -> TuiOptions {
     TuiOptions {
-        catalog_path: None,
+        runtime_sources: ResolvedRuntimeSources::new(
+            Utf8PathBuf::from("../../examples/agents.yaml"),
+            None,
+        ),
         trace_path: None,
         store_path: temp_store_path(dir),
-        registry_path: Utf8PathBuf::from("../../examples/agents.yaml"),
         tool_overrides: ToolOverrides::default(),
         allow_high_risk_tools,
         chat: test_chat_options(response),
@@ -40,6 +42,7 @@ pub(super) fn test_options(
         retry_backoff_ms: 0,
         hooks: Vec::new(),
         context_policy: Default::default(),
+        default_agent: None,
         mouse_capture: false,
         once: false,
     }
@@ -51,7 +54,10 @@ pub(super) fn catalog_options(
     catalog_path: impl AsRef<Utf8Path>,
 ) -> TuiOptions {
     TuiOptions {
-        catalog_path: Some(catalog_path.as_ref().to_owned()),
+        runtime_sources: ResolvedRuntimeSources::new(
+            Utf8PathBuf::from("../../examples/agents.yaml"),
+            Some(catalog_path.as_ref().to_owned()),
+        ),
         ..test_options(dir, response, true)
     }
 }

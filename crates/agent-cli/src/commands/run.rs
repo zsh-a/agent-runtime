@@ -9,10 +9,9 @@ use serde_json::json;
 use tracing::info;
 
 use crate::{
-    catalog::{read_catalog, registry_from_catalog},
     config::execution_policy,
     print_json,
-    registry::load_registry,
+    runtime_config::{ResolvedRuntimeSources, RuntimeSourceOptions, compose_runtime_sources},
     session::{record_session_step, run_metadata},
     tools::{CliServices, ToolOverrides},
     trace_store::{read_json, write_json, write_store_trace},
@@ -20,8 +19,7 @@ use crate::{
 
 pub(crate) struct RunCliOptions {
     pub(crate) agent_id: String,
-    pub(crate) registry: Utf8PathBuf,
-    pub(crate) catalog: Option<Utf8PathBuf>,
+    pub(crate) sources: ResolvedRuntimeSources,
     pub(crate) tool_overrides: ToolOverrides,
     pub(crate) input: Option<Utf8PathBuf>,
     pub(crate) trace_out: Option<Utf8PathBuf>,
@@ -38,8 +36,8 @@ pub(crate) struct RunCliOptions {
 pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
     info!(
         agent_id = %options.agent_id,
-        registry = %options.registry,
-        catalog = options.catalog.as_ref().map(|path| path.as_str()).unwrap_or("none"),
+        registry = %options.sources.registry,
+        catalog = options.sources.catalog.as_ref().map(|path| path.as_str()).unwrap_or("none"),
         store = %options.store,
         input = options.input.as_ref().map(|path| path.as_str()).unwrap_or("none"),
         trace_out = options.trace_out.as_ref().map(|path| path.as_str()).unwrap_or("none"),
@@ -53,14 +51,12 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
         None => json!({}),
     };
     let mut tool_overrides = options.tool_overrides;
-    let registry = match options.catalog {
-        Some(path) => {
-            let catalog = read_catalog(path).await?;
-            tool_overrides.extend_tool_specs(catalog.tools.clone());
-            registry_from_catalog(&catalog)
-        }
-        None => load_registry(options.registry).await?.into_agent_registry(),
-    };
+    let composition = compose_runtime_sources(RuntimeSourceOptions {
+        sources: options.sources,
+        tool_overrides: tool_overrides.clone(),
+    })
+    .await?;
+    tool_overrides.extend_tool_specs(composition.tool_specs.clone());
     let store_path = options.store;
     let metadata = run_metadata(options.session.as_deref(), options.thread.as_deref());
     let scope = parse_run_scope(options.scope.as_deref())?;
@@ -83,7 +79,7 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
         tool_overrides,
         proposal_store,
     ));
-    let runner = AgentRunner::new(registry, store, services)
+    let runner = AgentRunner::new(composition.registry, store, services)
         .with_lock_store(lock_store)
         .with_hooks(options.hooks)
         .with_policy(execution_policy(
@@ -124,18 +120,25 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
 }
 
 pub(crate) struct TickCliOptions {
-    pub(crate) registry: Utf8PathBuf,
+    pub(crate) sources: ResolvedRuntimeSources,
     pub(crate) store: Utf8PathBuf,
     pub(crate) hooks: HookManager,
 }
 
 pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
     info!(
-        registry = %options.registry,
+        registry = %options.sources.registry,
+        catalog = options.sources.catalog.as_ref().map(|path| path.as_str()).unwrap_or("none"),
         store = %options.store,
         "starting scheduler tick",
     );
-    let registry = load_registry(options.registry).await?;
+    let mut tool_overrides = ToolOverrides::default();
+    let composition = compose_runtime_sources(RuntimeSourceOptions {
+        sources: options.sources,
+        tool_overrides: tool_overrides.clone(),
+    })
+    .await?;
+    tool_overrides.extend_tool_specs(composition.tool_specs.clone());
     let store_path = options.store;
     let store = Arc::new(
         FileRunStore::new(store_path.clone())
@@ -153,10 +156,10 @@ pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
             .into_diagnostic()?,
     );
     let services = Arc::new(CliServices::with_proposal_store(
-        ToolOverrides::default(),
+        tool_overrides,
         proposal_store,
     ));
-    let runner = AgentRunner::new(registry.into_agent_registry(), store, services)
+    let runner = AgentRunner::new(composition.registry, store, services)
         .with_lock_store(lock_store)
         .with_hooks(options.hooks);
     let outcomes = runner

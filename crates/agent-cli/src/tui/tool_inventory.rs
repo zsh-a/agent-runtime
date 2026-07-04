@@ -1,8 +1,7 @@
-use agent_core::{AgentRuntimeCatalog, ToolSpec};
-use agent_runtime::{AGENT_RUN_TOOL_NAME, ensure_agent_run_tool};
+use agent_core::ToolSpec;
 use miette::Result;
 
-use crate::{catalog::read_catalog, tools::builtin_tools};
+use crate::runtime_config::{RuntimeSourceOptions, compose_runtime_sources, tool_source_label};
 
 use super::{data::TuiOptions, policy::TuiToolPolicy, policy::TuiToolRisk};
 
@@ -50,32 +49,15 @@ impl TuiToolInventory {
 }
 
 pub(super) async fn load_tui_tool_inventory(options: &TuiOptions) -> Result<TuiToolInventory> {
-    let catalog = match &options.catalog_path {
-        Some(path) => Some(read_catalog(path.clone()).await?),
-        None => None,
-    };
-    let tools = chat_tools_from_catalog(catalog.as_ref(), options);
+    let composition = compose_runtime_sources(RuntimeSourceOptions {
+        sources: options.runtime_sources.clone(),
+        tool_overrides: options.tool_overrides.clone(),
+    })
+    .await?;
     Ok(tool_inventory_from_specs(
-        &tools,
+        &composition.tool_specs,
         TuiToolPolicy::new(options.allow_high_risk_tools),
     ))
-}
-
-pub(super) fn chat_tools_from_catalog(
-    catalog: Option<&AgentRuntimeCatalog>,
-    options: &TuiOptions,
-) -> Vec<ToolSpec> {
-    let mut tools = catalog
-        .map(|catalog| catalog.tools.clone())
-        .unwrap_or_default();
-    tools.extend(options.tool_overrides.source_specs.clone());
-    ensure_agent_run_tool(&mut tools);
-    for tool in builtin_tools() {
-        if !tools.iter().any(|existing| existing.name == tool.name) {
-            tools.push(tool);
-        }
-    }
-    tools
 }
 
 fn tool_inventory_from_specs(tools: &[ToolSpec], policy: TuiToolPolicy) -> TuiToolInventory {
@@ -94,21 +76,4 @@ fn tool_inventory_from_specs(tools: &[ToolSpec], policy: TuiToolPolicy) -> TuiTo
         .collect::<Vec<_>>();
     items.sort_by(|left, right| left.name.cmp(&right.name));
     TuiToolInventory { items }
-}
-
-fn tool_source_label(tool: &ToolSpec) -> String {
-    if let Some(source) = tool
-        .metadata
-        .get("source")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|source| !source.is_empty())
-    {
-        return source.to_owned();
-    }
-    match tool.name.as_str() {
-        AGENT_RUN_TOOL_NAME => "agent_runtime_builtin".to_owned(),
-        "echo" => "agent_cli_builtin".to_owned(),
-        _ => "catalog".to_owned(),
-    }
 }

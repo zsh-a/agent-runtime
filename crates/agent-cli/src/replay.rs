@@ -10,10 +10,9 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::{
-    catalog::{read_catalog, registry_from_catalog},
     config::execution_policy,
     print_json,
-    registry::load_registry,
+    runtime_config::{ResolvedRuntimeSources, RuntimeSourceOptions, compose_runtime_sources},
     tools::{CliServices, tool_overrides},
     trace_store::{read_trace, write_json, write_store_trace},
 };
@@ -40,8 +39,7 @@ pub(crate) struct ReplayExecutionReport {
 pub(crate) struct ReplayTraceOptions {
     pub(crate) trace_file: Utf8PathBuf,
     pub(crate) mode: ReplayMode,
-    pub(crate) registry: Utf8PathBuf,
-    pub(crate) catalog: Option<Utf8PathBuf>,
+    pub(crate) sources: ResolvedRuntimeSources,
     pub(crate) tool_host: Vec<String>,
     pub(crate) mock_tool: Vec<String>,
     pub(crate) tool_source: Vec<Utf8PathBuf>,
@@ -64,14 +62,12 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
     }
     let mut overrides =
         tool_overrides(options.tool_host, options.mock_tool, options.tool_source).await?;
-    let registry = match options.catalog {
-        Some(path) => {
-            let catalog = read_catalog(path).await?;
-            overrides.extend_tool_specs(catalog.tools.clone());
-            registry_from_catalog(&catalog)
-        }
-        None => load_registry(options.registry).await?.into_agent_registry(),
-    };
+    let composition = compose_runtime_sources(RuntimeSourceOptions {
+        sources: options.sources,
+        tool_overrides: overrides.clone(),
+    })
+    .await?;
+    overrides.extend_tool_specs(composition.tool_specs.clone());
     let store = Arc::new(
         FileRunStore::new(options.store.clone())
             .await
@@ -88,7 +84,7 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
             .into_diagnostic()?,
     );
     let services = Arc::new(CliServices::with_proposal_store(overrides, proposal_store));
-    let runner = AgentRunner::new(registry, store, services)
+    let runner = AgentRunner::new(composition.registry, store, services)
         .with_lock_store(lock_store)
         .with_hooks(options.hooks)
         .with_policy(execution_policy(

@@ -218,14 +218,16 @@ fn config_profile_drives_run_defaults() {
         format!(
             r#"[runtime]
 profile = "ci"
-registry = "{}"
 store = "{}"
+
+[runtime.sources]
+registry = "{}"
 
 [profiles.ci]
 timeout_seconds = 5
 "#,
-            registry.display(),
-            store.display()
+            store.display(),
+            registry.display()
         ),
     )
     .expect("config written");
@@ -274,8 +276,10 @@ fn config_profile_installs_process_hooks_for_run() {
         &config_path,
         format!(
             r#"[runtime]
-registry = "{}"
 store = "{}"
+
+[runtime.sources]
+registry = "{}"
 
 [[runtime.hooks]]
 name = "audit_run"
@@ -285,8 +289,8 @@ effect = "observe"
 command = ["sh", "-c", "cat >/dev/null; printf '{{\"observed\":true}}'"]
 timeout_ms = 1000
 "#,
-            registry.display(),
-            store.display()
+            store.display(),
+            registry.display()
         ),
     )
     .expect("config written");
@@ -2692,14 +2696,16 @@ fn config_profile_drives_http_serve_defaults() {
 profile = "local"
 
 [profiles.local]
-catalog = "{}"
 store = "{}"
 host = "127.0.0.1"
 port = {}
+
+[profiles.local.sources]
+catalog = "{}"
 "#,
-            catalog.display(),
             store.display(),
-            port
+            port,
+            catalog.display()
         ),
     )
     .expect("config written");

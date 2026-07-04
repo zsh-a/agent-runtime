@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use agent_core::{Agent, AgentContext, AgentError, AgentRunResult, AgentSpec, TraceEvent};
-use agent_runtime::InMemoryAgentRegistry;
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use miette::{Result, miette};
@@ -27,12 +26,8 @@ pub(crate) struct CliRegistry {
 }
 
 impl CliRegistry {
-    pub(crate) fn list_specs(&self) -> Vec<AgentSpec> {
-        self.agents.iter().map(|agent| agent.spec()).collect()
-    }
-
-    pub(crate) fn into_agent_registry(self) -> Arc<InMemoryAgentRegistry> {
-        InMemoryAgentRegistry::shared(self.agents)
+    pub(crate) fn into_agents(self) -> Vec<Arc<dyn Agent>> {
+        self.agents
     }
 }
 

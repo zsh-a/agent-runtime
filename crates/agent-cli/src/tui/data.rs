@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::{
     catalog::{CatalogSummary, read_catalog},
     chat::ChatLlmOptions,
-    registry::load_registry,
+    runtime_config::{ResolvedRuntimeSources, RuntimeSourceOptions, compose_runtime_sources},
     tools::ToolOverrides,
 };
 
@@ -388,10 +388,9 @@ pub(super) enum TuiUpdate {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TuiOptions {
-    pub(crate) catalog_path: Option<Utf8PathBuf>,
+    pub(crate) runtime_sources: ResolvedRuntimeSources,
     pub(crate) trace_path: Option<Utf8PathBuf>,
     pub(crate) store_path: Utf8PathBuf,
-    pub(crate) registry_path: Utf8PathBuf,
     pub(crate) tool_overrides: ToolOverrides,
     pub(crate) allow_high_risk_tools: bool,
     pub(crate) chat: ChatLlmOptions,
@@ -400,6 +399,7 @@ pub(crate) struct TuiOptions {
     pub(crate) retry_backoff_ms: u64,
     pub(crate) hooks: Vec<HookSpec>,
     pub(crate) context_policy: ContextPolicy,
+    pub(crate) default_agent: Option<String>,
     pub(crate) mouse_capture: bool,
     pub(crate) once: bool,
 }
@@ -443,13 +443,13 @@ pub(super) struct TuiState {
 
 impl TuiState {
     pub(super) async fn load(options: TuiOptions) -> Result<Self> {
-        let catalog_summary = load_catalog_summary(options.catalog_path.as_ref()).await?;
+        let catalog_summary = load_catalog_summary(options.runtime_sources.catalog_path()).await?;
         let trace = load_trace(options.trace_path.as_ref()).await?;
         let trace_label = options.trace_path.as_ref().map(ToString::to_string);
         let recent_runs = read_recent_runs(&options.store_path).await?;
         let tool_inventory = Some(load_tui_tool_inventory(&options).await?);
         let agents = load_agent_summaries(&options).await?;
-        let selected_agent_id = agents.first().map(|agent| agent.id.clone());
+        let selected_agent_id = select_initial_agent(options.default_agent.as_deref(), &agents)?;
         let status = status_line(
             selected_agent_id.as_deref(),
             &catalog_summary,
@@ -498,7 +498,8 @@ impl TuiState {
     }
 
     pub(super) async fn refresh(&mut self) -> Result<()> {
-        self.catalog_summary = load_catalog_summary(self.options.catalog_path.as_ref()).await?;
+        self.catalog_summary =
+            load_catalog_summary(self.options.runtime_sources.catalog_path()).await?;
         self.agents = load_agent_summaries(&self.options).await?;
         self.tool_inventory = Some(load_tui_tool_inventory(&self.options).await?);
         if let Some(path) = &self.options.trace_path {
@@ -1098,23 +1099,37 @@ impl TuiState {
     }
 }
 
-async fn load_catalog_summary(path: Option<&Utf8PathBuf>) -> Result<Option<CatalogSummary>> {
+fn select_initial_agent(
+    default_agent: Option<&str>,
+    agents: &[TuiAgentSummary],
+) -> Result<Option<String>> {
+    if let Some(default_agent) = default_agent.filter(|agent_id| !agent_id.trim().is_empty()) {
+        if agents.iter().any(|agent| agent.id == default_agent) {
+            return Ok(Some(default_agent.to_owned()));
+        }
+        return Err(miette!(
+            "configured default agent '{default_agent}' was not found"
+        ));
+    }
+    Ok(agents.first().map(|agent| agent.id.clone()))
+}
+
+async fn load_catalog_summary(path: Option<&Utf8Path>) -> Result<Option<CatalogSummary>> {
     match path {
         Some(path) => Ok(Some(CatalogSummary::from_catalog(
-            &read_catalog(path.clone()).await?,
+            &read_catalog(path.to_owned()).await?,
         ))),
         None => Ok(None),
     }
 }
 
 async fn load_agent_summaries(options: &TuiOptions) -> Result<Vec<TuiAgentSummary>> {
-    if let Some(path) = &options.catalog_path {
-        let catalog = read_catalog(path.clone()).await?;
-        return Ok(agent_summaries(catalog.agents.iter()));
-    }
-    let registry = load_registry(options.registry_path.clone()).await?;
-    let specs = registry.list_specs();
-    Ok(agent_summaries(specs.iter()))
+    let composition = compose_runtime_sources(RuntimeSourceOptions {
+        sources: options.runtime_sources.clone(),
+        tool_overrides: options.tool_overrides.clone(),
+    })
+    .await?;
+    Ok(agent_summaries(composition.agent_specs.iter()))
 }
 
 fn agent_summaries<'a>(agents: impl IntoIterator<Item = &'a AgentSpec>) -> Vec<TuiAgentSummary> {
@@ -1223,10 +1238,12 @@ mod tests {
     fn test_state() -> TuiState {
         TuiState {
             options: TuiOptions {
-                catalog_path: None,
+                runtime_sources: ResolvedRuntimeSources::new(
+                    Utf8PathBuf::from("agents.yaml"),
+                    None,
+                ),
                 trace_path: None,
                 store_path: Utf8PathBuf::from("store"),
-                registry_path: Utf8PathBuf::from("agents.yaml"),
                 tool_overrides: ToolOverrides::default(),
                 allow_high_risk_tools: true,
                 chat: ChatLlmOptions {
@@ -1245,6 +1262,7 @@ mod tests {
                 retry_backoff_ms: 0,
                 hooks: Vec::new(),
                 context_policy: ContextPolicy::default(),
+                default_agent: None,
                 mouse_capture: false,
                 once: false,
             },
@@ -1308,6 +1326,42 @@ mod tests {
             tool_execution: ChatToolExecution::Client,
         })
         .expect("chat state")
+    }
+
+    #[test]
+    fn initial_agent_prefers_configured_default() {
+        let agents = vec![
+            TuiAgentSummary {
+                id: "echo_agent".to_owned(),
+                name: "Echo Agent".to_owned(),
+            },
+            TuiAgentSummary {
+                id: "review_agent".to_owned(),
+                name: "Review Agent".to_owned(),
+            },
+        ];
+
+        let selected =
+            select_initial_agent(Some("review_agent"), &agents).expect("default agent resolves");
+
+        assert_eq!(selected.as_deref(), Some("review_agent"));
+    }
+
+    #[test]
+    fn initial_agent_rejects_unknown_configured_default() {
+        let agents = vec![TuiAgentSummary {
+            id: "echo_agent".to_owned(),
+            name: "Echo Agent".to_owned(),
+        }];
+
+        let error =
+            select_initial_agent(Some("missing_agent"), &agents).expect_err("unknown is rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("configured default agent 'missing_agent' was not found")
+        );
     }
 
     #[test]

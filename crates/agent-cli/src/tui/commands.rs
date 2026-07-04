@@ -1534,7 +1534,7 @@ mod tests {
         )
         .expect("registry writes");
         let mut options = test_options(dir, "mock response", true);
-        options.registry_path =
+        options.runtime_sources.registry =
             Utf8PathBuf::from_path_buf(registry_path).expect("registry path is utf8");
         TuiState::load(options).await.expect("state loads")
     }

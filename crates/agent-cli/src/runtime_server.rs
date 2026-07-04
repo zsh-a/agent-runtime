@@ -26,7 +26,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
-    catalog::{read_catalog, registry_from_catalog},
     chat::{ChatLlmOptions, provider_from_options},
     metrics::{RuntimeMetricsSummary, build_metrics_summary},
     proposal::{
@@ -38,6 +37,9 @@ use crate::{
         proposal_kind_spec,
     },
     replay::{ReplayExecutionReport, ReplayMode, replay_source_trace},
+    runtime_config::{
+        ResolvedRuntimeSources, RuntimeComposition, RuntimeSourceOptions, compose_runtime_sources,
+    },
     session::{
         HttpSessionCreateParams, HttpSessionCreateResponse, HttpThreadForkParams,
         SessionShowReport, ThreadForkReport, ThreadWithSteps, ensure_thread,
@@ -50,10 +52,12 @@ use crate::{
 #[derive(Clone)]
 pub(crate) struct RuntimeServer {
     pub(crate) catalog: Arc<AgentRuntimeCatalog>,
+    composition: Arc<RuntimeComposition>,
     runner: Arc<AgentRunner>,
     services: Arc<CliServices>,
     chat: ChatLlmOptions,
     context_policy: ContextPolicy,
+    default_agent: Option<String>,
     hooks: HookManager,
     run_store: Arc<FileRunStore>,
     proposal_store: Arc<FileProposalStore>,
@@ -195,24 +199,29 @@ fn merge_run_metadata(metadata: Value, session_id: Option<&str>, thread_id: Opti
 
 impl RuntimeServer {
     pub(crate) async fn new(
-        catalog_path: Utf8PathBuf,
+        sources: ResolvedRuntimeSources,
         store_path: Utf8PathBuf,
         mut tool_overrides: ToolOverrides,
         hooks: HookManager,
         context_policy: ContextPolicy,
+        default_agent: Option<String>,
         chat: ChatLlmOptions,
     ) -> Result<Self> {
         info!(
-            catalog = %catalog_path,
+            registry = %sources.registry,
+            catalog = sources.catalog.as_ref().map(|path| path.as_str()).unwrap_or("none"),
             store = %store_path,
             "initializing runtime server",
         );
-        let mut catalog = read_catalog(catalog_path).await?;
-        let source_specs = tool_overrides.source_specs.clone();
-        tool_overrides.extend_tool_specs(catalog.tools.clone());
-        catalog.tools.extend(source_specs);
-        ensure_agent_run_tool(&mut catalog.tools);
-        let catalog = Arc::new(catalog);
+        let composition = Arc::new(
+            compose_runtime_sources(RuntimeSourceOptions {
+                sources,
+                tool_overrides: tool_overrides.clone(),
+            })
+            .await?,
+        );
+        tool_overrides.extend_tool_specs(composition.tool_specs.clone());
+        let catalog = Arc::new(composition.catalog_view.clone());
         info!(
             agent_count = catalog.agents.len(),
             tool_count = catalog.tools.len(),
@@ -220,7 +229,6 @@ impl RuntimeServer {
             active_domains = ?catalog.active_domains,
             "runtime server catalog loaded",
         );
-        let registry = registry_from_catalog(&catalog);
         let store = Arc::new(
             FileRunStore::new(store_path.clone())
                 .await
@@ -241,9 +249,13 @@ impl RuntimeServer {
                 .into_diagnostic()?,
         );
         let runner = Arc::new(
-            AgentRunner::new(registry, store.clone(), services.clone())
-                .with_lock_store(lock_store)
-                .with_hooks(hooks.clone()),
+            AgentRunner::new(
+                composition.registry.clone(),
+                store.clone(),
+                services.clone(),
+            )
+            .with_lock_store(lock_store)
+            .with_hooks(hooks.clone()),
         );
         let session_store = Arc::new(
             FileSessionStore::new(store_path.clone())
@@ -252,10 +264,12 @@ impl RuntimeServer {
         );
         Ok(Self {
             catalog,
+            composition,
             runner,
             services,
             chat,
             context_policy,
+            default_agent,
             hooks,
             run_store: store,
             proposal_store,
@@ -269,10 +283,18 @@ impl RuntimeServer {
         &self,
         mut request: ChatTurnRequest,
     ) -> Result<ChatEventStream> {
+        if request.agent_id.is_none() {
+            request.agent_id = self.default_agent.clone();
+        }
         if request.tools.is_empty() {
             request.tools = self.catalog.tools.clone();
         }
         ensure_agent_run_tool(&mut request.tools);
+        if let Some(agent_id) = request.agent_id.as_deref() {
+            request.messages = self
+                .composition
+                .chat_messages(agent_id, std::mem::take(&mut request.messages));
+        }
         apply_default_context_policy(&mut request.context_policy, &self.context_policy);
         info!(
             turn_id = request.turn_id.as_deref().unwrap_or("none"),
@@ -299,10 +321,18 @@ impl RuntimeServer {
         &self,
         mut request: ChatResumeRequest,
     ) -> Result<ChatEventStream> {
+        if request.state.agent_id.is_none() {
+            request.state.agent_id = self.default_agent.clone();
+        }
         if request.state.tools.is_empty() {
             request.state.tools = self.catalog.tools.clone();
         }
         ensure_agent_run_tool(&mut request.state.tools);
+        if let Some(agent_id) = request.state.agent_id.as_deref() {
+            request.state.messages = self
+                .composition
+                .chat_messages(agent_id, std::mem::take(&mut request.state.messages));
+        }
         apply_default_context_policy(&mut request.state.context_policy, &self.context_policy);
         info!(
             turn_id = request.state.turn_id.as_deref().unwrap_or("none"),
@@ -1009,13 +1039,15 @@ mod tests {
     async fn server_chat_services_execute_agent_run_tool() {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("utf8 store");
+        let registry = Utf8PathBuf::from("../../examples/agents.yaml");
         let catalog = Utf8PathBuf::from("../../fixtures/contracts/catalog.valid.json");
         let server = RuntimeServer::new(
-            catalog,
+            ResolvedRuntimeSources::new(registry, Some(catalog)),
             store.clone(),
             ToolOverrides::default(),
             HookManager::default(),
             ContextPolicy::default(),
+            None,
             ChatLlmOptions {
                 provider: "mock".to_owned(),
                 model: "mock-model".to_owned(),
@@ -1059,13 +1091,15 @@ mod tests {
     async fn server_catalog_tools_include_agent_run_for_list_surface() {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("utf8 store");
+        let registry = Utf8PathBuf::from("../../examples/agents.yaml");
         let catalog = Utf8PathBuf::from("../../fixtures/contracts/catalog.valid.json");
         let server = RuntimeServer::new(
-            catalog,
+            ResolvedRuntimeSources::new(registry, Some(catalog)),
             store,
             ToolOverrides::default(),
             HookManager::default(),
             ContextPolicy::default(),
+            None,
             ChatLlmOptions {
                 provider: "mock".to_owned(),
                 model: "mock-model".to_owned(),

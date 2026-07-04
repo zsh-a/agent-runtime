@@ -1487,12 +1487,15 @@ Use a profile config for repeatable local, CI, and server runs:
 ```toml
 [runtime]
 profile = "local-dev"
-registry = "examples/agents.yaml"
-catalog = "fixtures/contracts/catalog.valid.json"
 store = ".agent-runtime/store"
+default_agent = "execution_review"
 timeout_seconds = 60
 max_retries = 1
 retry_backoff_ms = 250
+
+[runtime.sources]
+registry = "examples/agents.yaml"
+catalog = "fixtures/contracts/catalog.valid.json"
 
 [profiles.ci]
 store = "/private/tmp/agent-runtime-ci-store"
@@ -1500,10 +1503,12 @@ timeout_seconds = 10
 max_retries = 0
 
 [profiles.server]
-catalog = "fixtures/contracts/catalog.valid.json"
 store = ".agent-runtime/server-store"
 host = "127.0.0.1"
 port = 8765
+
+[profiles.server.sources]
+catalog = "fixtures/contracts/catalog.valid.json"
 
 [[profiles.server.hooks]]
 name = "audit_run"
