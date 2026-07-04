@@ -1,5 +1,5 @@
 use agent_core::{
-    AgentError, AgentRuntimeCatalog, RunId, RunRequest, ToolCallId, ToolSpec, catalog_version,
+    AgentError, AgentRuntimeCatalog, EffectId, RunId, RunRequest, ToolSpec, catalog_version,
     protocol_version,
 };
 use serde_json::{Map, Value, json};
@@ -87,7 +87,7 @@ impl RunLoop {
             Some(status) => {
                 let error = effect_response_error_payload(&effect_response).unwrap_or(Value::Null);
                 let effect_results_json = EffectResultRecord::to_values(&effect_results);
-                let mut value = json!({
+                json!({
                     "protocol_version": protocol_version(),
                     "run_id": run_id,
                     "agent_id": agent.id,
@@ -98,15 +98,7 @@ impl RunLoop {
                     "effect_response": effect_response,
                     "effect_results": effect_results_json,
                     "error": error,
-                });
-                attach_kind_specific_fields(
-                    &mut value,
-                    previous_kind,
-                    effect_call,
-                    effect_response,
-                    &effect_results,
-                );
-                value
+                })
             }
             None => match next_effect_request_from_continuation(
                 previous_continuation,
@@ -152,39 +144,15 @@ pub enum RunEffectKind {
 }
 
 impl RunEffectKind {
-    fn requested_status(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
-            Self::Tool => "tool_call_requested",
-            Self::Subagent => "subagent_requested",
-        }
-    }
-
-    fn call_field(self) -> &'static str {
-        match self {
-            Self::Tool => "tool_call",
-            Self::Subagent => "subagent_call",
-        }
-    }
-
-    fn response_field(self) -> &'static str {
-        match self {
-            Self::Tool => "tool_response",
-            Self::Subagent => "subagent_response",
-        }
-    }
-
-    fn results_field(self) -> &'static str {
-        match self {
-            Self::Tool => "tool_results",
-            Self::Subagent => "subagent_results",
+            Self::Tool => "tool",
+            Self::Subagent => "subagent",
         }
     }
 
     fn id_field(self) -> &'static str {
-        match self {
-            Self::Tool => "tool_call_id",
-            Self::Subagent => "subagent_call_id",
-        }
+        "effect_id"
     }
 
     fn trace_tool_name(self, call: &Value) -> Value {
@@ -204,8 +172,8 @@ impl RunEffectKind {
 
 #[derive(Debug, Clone)]
 enum RequestedEffect {
-    Tool(RequestedToolCall),
-    Subagent(RequestedSubagentCall),
+    Tool(RequestedToolEffect),
+    Subagent(RequestedSubagentEffect),
 }
 
 impl RequestedEffect {
@@ -218,13 +186,13 @@ impl RequestedEffect {
 }
 
 #[derive(Debug, Clone)]
-struct RequestedToolCall {
+struct RequestedToolEffect {
     name: String,
     input: Value,
 }
 
 #[derive(Debug, Clone)]
-struct RequestedSubagentCall {
+struct RequestedSubagentEffect {
     agent_id: String,
     input: Value,
     run_id: Option<Value>,
@@ -258,35 +226,19 @@ impl EffectResultRecord {
         let object = value
             .as_object()
             .ok_or_else(|| validation(format!("{label} must be an object")))?;
-        let (kind, effect_call) = match (object.get("tool_call"), object.get("subagent_call")) {
-            (Some(tool_call), None) => (RunEffectKind::Tool, tool_call),
-            (None, Some(subagent_call)) => (RunEffectKind::Subagent, subagent_call),
-            _ => {
-                let effect = object
-                    .get("effect")
-                    .ok_or_else(|| validation(format!("{label}.effect is required")))?;
-                (effect_kind_from_call(effect)?, effect)
-            }
-        };
+        let effect_call = object
+            .get("effect")
+            .ok_or_else(|| validation(format!("{label}.effect is required")))?;
+        let kind = effect_kind_from_call(effect_call)?;
         require_previous_effect_catalog_entry(catalog, agent_id, effect_call, kind)?;
-        let response_field = kind.response_field();
         let effect_response = object
-            .get(response_field)
-            .or_else(|| object.get("effect_response"))
-            .ok_or_else(|| validation(format!("{label}.{response_field} is required")))?;
+            .get("effect_response")
+            .ok_or_else(|| validation(format!("{label}.effect_response is required")))?;
         require_effect_response_envelope(effect_response).map_err(|error| {
-            validation(format!(
-                "{label}.{response_field}: {}",
-                error.record.message
-            ))
+            validation(format!("{label}.effect_response: {}", error.record.message))
         })?;
         require_matching_effect_response_id(effect_call, effect_response, kind).map_err(
-            |error| {
-                validation(format!(
-                    "{label}.{response_field}: {}",
-                    error.record.message
-                ))
-            },
+            |error| validation(format!("{label}.effect_response: {}", error.record.message)),
         )?;
         Ok(Self::new(
             kind,
@@ -306,11 +258,6 @@ impl EffectResultRecord {
         );
         object.insert("effect".to_owned(), self.effect_call.clone());
         object.insert("effect_response".to_owned(), self.effect_response.clone());
-        object.insert(self.kind.call_field().to_owned(), self.effect_call.clone());
-        object.insert(
-            self.kind.response_field().to_owned(),
-            self.effect_response.clone(),
-        );
         Value::Object(object)
     }
 
@@ -361,17 +308,14 @@ impl RuntimeContinuation {
         let object = value
             .as_object()
             .ok_or_else(|| validation("continuation must be an object"))?;
-        let effects = match object.get("effects").or_else(|| object.get("tool_plan")) {
+        let effects = match object.get("effects") {
             Some(value) => value
                 .as_array()
                 .cloned()
-                .ok_or_else(|| validation("continuation.tool_plan must be an array"))?,
+                .ok_or_else(|| validation("continuation.effects must be an array"))?,
             None => Vec::new(),
         };
-        let effect_results = match object
-            .get("effect_results")
-            .or_else(|| object.get("tool_results"))
-        {
+        let effect_results = match object.get("effect_results") {
             Some(value) => Self::effect_results_from_value(value, catalog, agent_id)?,
             None => Vec::new(),
         };
@@ -401,13 +345,11 @@ impl RuntimeContinuation {
         RuntimeContinuationCounts {
             remaining_effect_count: continuation
                 .get("effects")
-                .or_else(|| continuation.get("tool_plan"))
                 .and_then(Value::as_array)
                 .map(Vec::len)
                 .unwrap_or(0),
             effect_result_count: continuation
                 .get("effect_results")
-                .or_else(|| continuation.get("tool_results"))
                 .and_then(Value::as_array)
                 .map(Vec::len)
                 .unwrap_or(0),
@@ -421,14 +363,14 @@ impl RuntimeContinuation {
     ) -> Result<Vec<EffectResultRecord>, AgentError> {
         let results = value
             .as_array()
-            .ok_or_else(|| validation("continuation.tool_results must be an array"))?;
+            .ok_or_else(|| validation("continuation.effect_results must be an array"))?;
         results
             .iter()
             .enumerate()
             .map(|(index, result)| {
                 EffectResultRecord::from_value(
                     result,
-                    &format!("continuation.tool_results[{index}]"),
+                    &format!("continuation.effect_results[{index}]"),
                     catalog,
                     agent_id,
                 )
@@ -443,10 +385,10 @@ impl RuntimeContinuation {
     ) -> Result<(), AgentError> {
         for (index, effect) in self.effects.iter().enumerate() {
             let requested =
-                parse_requested_effect(effect, &format!("continuation.tool_plan[{index}]"))?;
+                parse_requested_effect(effect, &format!("continuation.effects[{index}]"))?;
             validate_requested_effect(catalog, agent_id, &requested).map_err(|error| {
                 validation(format!(
-                    "continuation.tool_plan[{index}]: {}",
+                    "continuation.effects[{index}]: {}",
                     error.record.message
                 ))
             })?;
@@ -472,13 +414,8 @@ impl RuntimeContinuation {
     fn to_value(&self) -> Value {
         let mut object = Map::new();
         object.insert("effects".to_owned(), Value::Array(self.effects.clone()));
-        object.insert("tool_plan".to_owned(), Value::Array(self.effects.clone()));
         object.insert(
             "effect_results".to_owned(),
-            Value::Array(EffectResultRecord::to_values(&self.effect_results)),
-        );
-        object.insert(
-            "tool_results".to_owned(),
             Value::Array(EffectResultRecord::to_values(&self.effect_results)),
         );
         if let Some(llm_response) = &self.llm_response {
@@ -508,19 +445,14 @@ impl EffectRequestState {
 }
 
 fn parse_initial_effect_request(input: &Value) -> Result<Option<EffectRequestState>, AgentError> {
-    if let Some(plan) = input.get("effects").or_else(|| input.get("tool_plan")) {
-        let label = if input.get("tool_plan").is_some() {
-            "tool_plan"
-        } else {
-            "effects"
-        };
+    if let Some(plan) = input.get("effects") {
         let plan = plan
             .as_array()
-            .ok_or_else(|| validation(format!("{label} must be an array")))?;
+            .ok_or_else(|| validation("effects must be an array"))?;
         if plan.is_empty() {
             return Ok(None);
         }
-        let first = parse_requested_effect(&plan[0], &format!("{label}[0]"))?;
+        let first = parse_requested_effect(&plan[0], "effects[0]")?;
         return Ok(Some(EffectRequestState {
             first,
             remaining: plan[1..].to_vec(),
@@ -529,27 +461,16 @@ fn parse_initial_effect_request(input: &Value) -> Result<Option<EffectRequestSta
             step_index: 0,
         }));
     }
-
-    if let Some(subagent_call) = input.get("subagent_call") {
+    if let Some(effect) = input.get("effect") {
         return Ok(Some(EffectRequestState {
-            first: parse_requested_effect(subagent_call, "subagent_call")?,
+            first: parse_requested_effect(effect, "effect")?,
             remaining: Vec::new(),
             effect_results: Vec::new(),
             llm_response: input.get("llm_response").cloned(),
             step_index: 0,
         }));
     }
-
-    let Some(tool_call) = input.get("tool_call") else {
-        return Ok(None);
-    };
-    Ok(Some(EffectRequestState {
-        first: parse_requested_effect(tool_call, "tool_call")?,
-        remaining: Vec::new(),
-        effect_results: Vec::new(),
-        llm_response: input.get("llm_response").cloned(),
-        step_index: 0,
-    }))
+    Ok(None)
 }
 
 fn next_effect_request_from_continuation(
@@ -562,7 +483,7 @@ fn next_effect_request_from_continuation(
     if continuation.effects.is_empty() {
         return Ok(None);
     }
-    let first = parse_requested_effect(&continuation.effects[0], "continuation.tool_plan[0]")?;
+    let first = parse_requested_effect(&continuation.effects[0], "continuation.effects[0]")?;
     Ok(Some(EffectRequestState {
         first,
         remaining: continuation.effects[1..].to_vec(),
@@ -576,19 +497,22 @@ fn parse_requested_effect(value: &Value, label: &str) -> Result<RequestedEffect,
     let object = value
         .as_object()
         .ok_or_else(|| validation(format!("{label} must be an object")))?;
-    let kind = object
-        .get("kind")
-        .or_else(|| object.get("effect"))
-        .and_then(Value::as_str);
-    if matches!(kind, Some("subagent"))
-        || (object.contains_key("agent_id") && !object.contains_key("name"))
-    {
-        return parse_requested_subagent_call(value, label).map(RequestedEffect::Subagent);
+    match object.get("kind").and_then(Value::as_str) {
+        Some("tool") => parse_requested_tool_effect(value, label).map(RequestedEffect::Tool),
+        Some("subagent") => {
+            parse_requested_subagent_effect(value, label).map(RequestedEffect::Subagent)
+        }
+        Some(kind) => Err(validation(format!(
+            "{label}.kind '{kind}' is not supported"
+        ))),
+        None => Err(validation(format!("{label}.kind is required"))),
     }
-    parse_requested_tool_call(value, label).map(RequestedEffect::Tool)
 }
 
-fn parse_requested_tool_call(value: &Value, label: &str) -> Result<RequestedToolCall, AgentError> {
+fn parse_requested_tool_effect(
+    value: &Value,
+    label: &str,
+) -> Result<RequestedToolEffect, AgentError> {
     let object = value
         .as_object()
         .ok_or_else(|| validation(format!("{label} must be an object")))?;
@@ -603,13 +527,13 @@ fn parse_requested_tool_call(value: &Value, label: &str) -> Result<RequestedTool
         Some(_) => return Err(validation(format!("{label}.input must be an object"))),
         None => json!({}),
     };
-    Ok(RequestedToolCall { name, input })
+    Ok(RequestedToolEffect { name, input })
 }
 
-fn parse_requested_subagent_call(
+fn parse_requested_subagent_effect(
     value: &Value,
     label: &str,
-) -> Result<RequestedSubagentCall, AgentError> {
+) -> Result<RequestedSubagentEffect, AgentError> {
     let object = value
         .as_object()
         .ok_or_else(|| validation(format!("{label} must be an object")))?;
@@ -624,7 +548,7 @@ fn parse_requested_subagent_call(
     if !metadata.is_object() {
         return Err(validation(format!("{label}.metadata must be an object")));
     }
-    Ok(RequestedSubagentCall {
+    Ok(RequestedSubagentEffect {
         agent_id,
         input: object.get("input").cloned().unwrap_or_else(|| json!({})),
         run_id: object.get("run_id").cloned(),
@@ -646,7 +570,6 @@ fn build_effect_requested_step(
         continuation.validate_effect_plan(catalog, agent_id)?;
     }
     validate_requested_effect(catalog, agent_id, &requested)?;
-    let kind = requested.kind();
     let call = build_effect_call(catalog, agent_id, requested)?;
     let mut step = json!({
         "protocol_version": protocol_version(),
@@ -657,12 +580,9 @@ fn build_effect_requested_step(
             .as_ref()
             .map(RuntimeContinuation::requested_step_index)
             .unwrap_or(0),
-        "status": kind.requested_status(),
+        "status": "effect_requested",
         "effect": call,
     });
-    step.as_object_mut()
-        .expect("step is an object")
-        .insert(kind.call_field().to_owned(), call);
     if let Some(continuation) = continuation {
         step.as_object_mut()
             .expect("step is an object")
@@ -678,32 +598,34 @@ fn build_effect_call(
     requested: RequestedEffect,
 ) -> Result<Value, AgentError> {
     match requested {
-        RequestedEffect::Tool(tool_call) => {
-            let tool = catalog_tool(catalog, agent_id, &tool_call.name)?;
+        RequestedEffect::Tool(tool_effect) => {
+            let tool = catalog_tool(catalog, agent_id, &tool_effect.name)?;
             Ok(json!({
-                "tool_call_id": ToolCallId::new_v7(),
+                "effect_id": EffectId::new_v7(),
+                "kind": "tool",
                 "name": tool.name,
-                "input": tool_call.input,
+                "input": tool_effect.input,
                 "risk": tool.risk,
                 "metadata": tool.metadata,
             }))
         }
-        RequestedEffect::Subagent(subagent_call) => {
-            catalog_agent(catalog, &subagent_call.agent_id)?;
+        RequestedEffect::Subagent(subagent_effect) => {
+            catalog_agent(catalog, &subagent_effect.agent_id)?;
             let mut call = json!({
-                "subagent_call_id": ToolCallId::new_v7(),
-                "agent_id": subagent_call.agent_id,
-                "input": subagent_call.input,
-                "metadata": subagent_call.metadata,
+                "effect_id": EffectId::new_v7(),
+                "kind": "subagent",
+                "agent_id": subagent_effect.agent_id,
+                "input": subagent_effect.input,
+                "metadata": subagent_effect.metadata,
             });
-            let object = call.as_object_mut().expect("subagent call is an object");
-            if let Some(run_id) = subagent_call.run_id {
+            let object = call.as_object_mut().expect("subagent effect is an object");
+            if let Some(run_id) = subagent_effect.run_id {
                 object.insert("run_id".to_owned(), run_id);
             }
-            if let Some(scope) = subagent_call.scope {
+            if let Some(scope) = subagent_effect.scope {
                 object.insert("scope".to_owned(), scope);
             }
-            if let Some(workflow) = subagent_call.workflow {
+            if let Some(workflow) = subagent_effect.workflow {
                 object.insert("workflow".to_owned(), workflow);
             }
             Ok(call)
@@ -722,33 +644,19 @@ fn terminal_completed_step(
     effect_result_count: usize,
     effect_results: Vec<Value>,
 ) -> Value {
-    let mode = match (previous_kind, effect_result_count > 1) {
-        (RunEffectKind::Tool, false) => "frb_tool_step",
-        (RunEffectKind::Tool, true) => "frb_tool_loop",
-        (RunEffectKind::Subagent, false) => "frb_subagent_step",
-        (RunEffectKind::Subagent, true) => "frb_effect_loop",
+    let _ = previous_kind;
+    let mode = if effect_result_count > 1 {
+        "frb_effect_loop"
+    } else {
+        "frb_effect_step"
     };
-    let result_key = match previous_kind {
-        RunEffectKind::Tool => "tool_result",
-        RunEffectKind::Subagent => "subagent_result",
-    };
-    let mut output = json!({
+    let output = json!({
         "mode": mode,
         "effect": effect_call,
-        result_key: effect_response.get("result").cloned().unwrap_or(Value::Null),
+        "effect_result": effect_response.get("result").cloned().unwrap_or(Value::Null),
         "effect_response": effect_response,
         "effect_results": effect_results.clone(),
     });
-    let output_object = output.as_object_mut().expect("output is an object");
-    output_object.insert(previous_kind.call_field().to_owned(), effect_call.clone());
-    output_object.insert(
-        previous_kind.response_field().to_owned(),
-        effect_response.clone(),
-    );
-    output_object.insert(
-        previous_kind.results_field().to_owned(),
-        Value::Array(effect_results.clone()),
-    );
 
     let mut step = json!({
         "protocol_version": protocol_version(),
@@ -766,59 +674,40 @@ fn terminal_completed_step(
         "effect_results".to_owned(),
         Value::Array(effect_results.clone()),
     );
-    object.insert(previous_kind.call_field().to_owned(), effect_call);
-    object.insert(previous_kind.response_field().to_owned(), effect_response);
-    object.insert(
-        previous_kind.results_field().to_owned(),
-        Value::Array(effect_results),
-    );
     step
-}
-
-fn attach_kind_specific_fields(
-    value: &mut Value,
-    kind: RunEffectKind,
-    effect_call: Value,
-    effect_response: Value,
-    effect_results: &[EffectResultRecord],
-) {
-    let object = value.as_object_mut().expect("step is an object");
-    object.insert(kind.call_field().to_owned(), effect_call);
-    object.insert(kind.response_field().to_owned(), effect_response);
-    object.insert(
-        kind.results_field().to_owned(),
-        Value::Array(EffectResultRecord::to_values(effect_results)),
-    );
 }
 
 fn previous_effect_kind(previous_step: &Value) -> Result<RunEffectKind, AgentError> {
     match previous_step.get("status").and_then(Value::as_str) {
-        Some("tool_call_requested") => Ok(RunEffectKind::Tool),
-        Some("subagent_requested") => Ok(RunEffectKind::Subagent),
+        Some("effect_requested") => {
+            let effect = previous_step
+                .get("effect")
+                .ok_or_else(|| validation("previous step is missing effect"))?;
+            effect_kind_from_call(effect)
+        }
         _ => Err(validation(
-            "previous step status must be 'tool_call_requested' or 'subagent_requested'",
+            "previous step status must be 'effect_requested'",
         )),
     }
 }
 
 fn previous_effect_call(previous_step: &Value, kind: RunEffectKind) -> Result<&Value, AgentError> {
+    let _ = kind;
     previous_step
-        .get(kind.call_field())
-        .or_else(|| previous_step.get("effect"))
-        .ok_or_else(|| validation(format!("previous step is missing {}", kind.call_field())))
+        .get("effect")
+        .ok_or_else(|| validation("previous step is missing effect"))
 }
 
 fn effect_kind_from_call(call: &Value) -> Result<RunEffectKind, AgentError> {
     let object = call
         .as_object()
         .ok_or_else(|| validation("effect must be an object"))?;
-    if object.get("agent_id").is_some() && object.get("name").is_none() {
-        return Ok(RunEffectKind::Subagent);
+    match object.get("kind").and_then(Value::as_str) {
+        Some("tool") => Ok(RunEffectKind::Tool),
+        Some("subagent") => Ok(RunEffectKind::Subagent),
+        Some(kind) => Err(validation(format!("effect kind '{kind}' is not supported"))),
+        None => Err(validation("effect.kind is required")),
     }
-    if object.get("name").is_some() {
-        return Ok(RunEffectKind::Tool);
-    }
-    Err(validation("effect must contain name or agent_id"))
 }
 
 fn require_previous_step_agent(
@@ -891,16 +780,16 @@ fn require_previous_effect_catalog_entry(
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| validation("previous step tool_call.name is required"))?;
+                .ok_or_else(|| validation("previous step effect.name is required"))?;
             catalog_tool(catalog, agent_id, name)?;
-            require_effect_call_input_object(effect_call, "previous step tool_call")?;
+            require_effect_call_input_object(effect_call, "previous step effect")?;
         }
         RunEffectKind::Subagent => {
             let subagent_id = effect_call
                 .get("agent_id")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| validation("previous step subagent_call.agent_id is required"))?;
+                .ok_or_else(|| validation("previous step effect.agent_id is required"))?;
             catalog_agent(catalog, subagent_id)?;
         }
     }
@@ -917,8 +806,7 @@ fn require_previous_effect_call_id(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             validation(format!(
-                "previous step {}.{} must be a non-empty string",
-                kind.call_field(),
+                "previous step effect.{} must be a non-empty string",
                 kind.id_field()
             ))
         })?;
@@ -977,21 +865,17 @@ fn require_previous_step_run_state(
     let expected_remaining = continuation_counts.remaining_effect_count as u64;
     let remaining = run_state
         .get("remaining_effect_count")
-        .or_else(|| run_state.get("remaining_tool_count"))
         .and_then(Value::as_u64);
     if remaining != Some(expected_remaining) {
         return Err(validation(
-            "previous step run_state.remaining_tool_count must match continuation.tool_plan",
+            "previous step run_state.remaining_effect_count must match continuation.effects",
         ));
     }
     let expected_results = continuation_counts.effect_result_count as u64;
-    let results = run_state
-        .get("effect_result_count")
-        .or_else(|| run_state.get("tool_result_count"))
-        .and_then(Value::as_u64);
+    let results = run_state.get("effect_result_count").and_then(Value::as_u64);
     if results != Some(expected_results) {
         return Err(validation(
-            "previous step run_state.tool_result_count must match continuation.tool_results",
+            "previous step run_state.effect_result_count must match continuation.effect_results",
         ));
     }
     require_terminal_reason(run_state, "terminal_reason")?;
@@ -1061,46 +945,50 @@ fn require_matching_effect_response_id(
     match response_id.as_str() {
         Some(value) if value == expected_id => Ok(()),
         Some(value) => Err(validation(format!(
-            "tool response id '{value}' does not match requested {} '{expected_id}'",
+            "effect response id '{value}' does not match requested {} '{expected_id}'",
             kind.id_field()
         ))),
-        None => Err(validation("tool response id must be a string when present")),
+        None => Err(validation(
+            "effect response id must be a string when present",
+        )),
     }
 }
 
 fn require_effect_response_envelope(effect_response: &Value) -> Result<(), AgentError> {
     let Some(object) = effect_response.as_object() else {
-        return Err(validation("tool response must be an object"));
+        return Err(validation("effect response must be an object"));
     };
     if let Some(jsonrpc) = object.get("jsonrpc") {
         match jsonrpc.as_str() {
             Some("2.0") => {}
-            Some(_) => return Err(validation("tool response jsonrpc must be '2.0'")),
-            None => return Err(validation("tool response jsonrpc must be a string")),
+            Some(_) => return Err(validation("effect response jsonrpc must be '2.0'")),
+            None => return Err(validation("effect response jsonrpc must be a string")),
         }
         if !object.contains_key("id") {
             return Err(validation(
-                "tool response id is required when jsonrpc is present",
+                "effect response id is required when jsonrpc is present",
             ));
         }
         match (object.contains_key("result"), object.contains_key("error")) {
             (true, false) | (false, true) => {}
             (true, true) => {
                 return Err(validation(
-                    "tool response cannot contain both result and error",
+                    "effect response cannot contain both result and error",
                 ));
             }
-            (false, false) => return Err(validation("tool response must contain result or error")),
+            (false, false) => {
+                return Err(validation("effect response must contain result or error"));
+            }
         }
         if let Some(error) = object.get("error") {
             let error = error
                 .as_object()
-                .ok_or_else(|| validation("tool response error must be an object"))?;
+                .ok_or_else(|| validation("effect response error must be an object"))?;
             if error.get("code").and_then(Value::as_i64).is_none() {
-                return Err(validation("tool response error.code must be an integer"));
+                return Err(validation("effect response error.code must be an integer"));
             }
             if error.get("message").and_then(Value::as_str).is_none() {
-                return Err(validation("tool response error.message must be a string"));
+                return Err(validation("effect response error.message must be a string"));
             }
         }
     }
@@ -1109,7 +997,7 @@ fn require_effect_response_envelope(effect_response: &Value) -> Result<(), Agent
         && object.contains_key("error")
     {
         return Err(validation(
-            "tool response cannot contain both result and error",
+            "effect response cannot contain both result and error",
         ));
     }
     Ok(())
@@ -1118,9 +1006,7 @@ fn require_effect_response_envelope(effect_response: &Value) -> Result<(), Agent
 fn effect_response_terminal_status(effect_response: &Value) -> Option<&'static str> {
     let code = effect_response_error_code(effect_response);
     match code.as_deref() {
-        Some("tool_call_budget_exhausted") | Some("effect_budget_exhausted") => {
-            Some("closed_early")
-        }
+        Some("effect_budget_exhausted") => Some("closed_early"),
         Some("policy_denied") => Some("policy_denied"),
         Some("user_cancel" | "user_cancelled" | "cancelled") => Some("cancelled"),
         Some("tool_timeout" | "timeout" | "timed_out") => Some("timed_out"),
@@ -1196,30 +1082,21 @@ fn attach_run_state(step: &mut Value) {
     };
     let continuation = object.get("continuation");
     let remaining_effect_count = continuation
-        .and_then(|value| value.get("effects").or_else(|| value.get("tool_plan")))
+        .and_then(|value| value.get("effects"))
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
     let continuation_result_count = continuation
-        .and_then(|value| {
-            value
-                .get("effect_results")
-                .or_else(|| value.get("tool_results"))
-        })
+        .and_then(|value| value.get("effect_results"))
         .and_then(Value::as_array)
         .map(Vec::len);
     let output_result_count = object
         .get("output")
-        .and_then(|value| {
-            value
-                .get("effect_results")
-                .or_else(|| value.get("tool_results"))
-        })
+        .and_then(|value| value.get("effect_results"))
         .and_then(Value::as_array)
         .map(Vec::len);
     let root_result_count = object
         .get("effect_results")
-        .or_else(|| object.get("tool_results"))
         .and_then(Value::as_array)
         .map(Vec::len);
     let effect_result_count = continuation_result_count
@@ -1232,8 +1109,6 @@ fn attach_run_state(step: &mut Value) {
         "step_index": object.get("step_index").cloned().unwrap_or(Value::Null),
         "remaining_effect_count": remaining_effect_count,
         "effect_result_count": effect_result_count,
-        "remaining_tool_count": remaining_effect_count,
-        "tool_result_count": effect_result_count,
         "terminal_reason": terminal_reason_for_status(object.get("status").and_then(Value::as_str)),
     });
     object.insert("run_state".to_owned(), state);
@@ -1254,20 +1129,9 @@ fn attach_trace_event(step: &mut Value) {
     let Some(object) = step.as_object_mut() else {
         return;
     };
-    let kind = object
-        .get("status")
-        .and_then(Value::as_str)
-        .and_then(|status| match status {
-            "tool_call_requested" => Some(RunEffectKind::Tool),
-            "subagent_requested" => Some(RunEffectKind::Subagent),
-            _ => None,
-        });
-    let call = kind.and_then(|kind| {
-        object
-            .get(kind.call_field())
-            .or_else(|| object.get("effect"))
-            .map(|call| (kind, call))
-    });
+    let call = object
+        .get("effect")
+        .and_then(|call| effect_kind_from_call(call).ok().map(|kind| (kind, call)));
     let event = json!({
         "kind": "agent_runtime_step",
         "run_id": object.get("run_id").cloned().unwrap_or(Value::Null),
@@ -1275,37 +1139,17 @@ fn attach_trace_event(step: &mut Value) {
         "status": object.get("status").cloned().unwrap_or(Value::Null),
         "step_index": object.get("step_index").cloned().unwrap_or(Value::Null),
         "run_state": object.get("run_state").cloned().unwrap_or(Value::Null),
+        "effect_id": call
+            .and_then(|(_, call)| call.get("effect_id").cloned())
+            .unwrap_or(Value::Null),
+        "effect_kind": call
+            .map(|(kind, _)| Value::String(kind.as_str().to_owned()))
+            .unwrap_or(Value::Null),
         "tool_name": call
             .map(|(kind, call)| kind.trace_tool_name(call))
-            .or_else(|| {
-                object
-                    .get("tool_call")
-                    .and_then(|tool_call| tool_call.get("name"))
-                    .cloned()
-            })
-            .or_else(|| {
-                object
-                    .get("output")
-                    .and_then(|output| output.get("tool_call"))
-                    .and_then(|tool_call| tool_call.get("name"))
-                    .cloned()
-            })
             .unwrap_or(Value::Null),
         "subagent_id": call
             .map(|(kind, call)| kind.trace_subagent_id(call))
-            .or_else(|| {
-                object
-                    .get("subagent_call")
-                    .and_then(|subagent_call| subagent_call.get("agent_id"))
-                    .cloned()
-            })
-            .or_else(|| {
-                object
-                    .get("output")
-                    .and_then(|output| output.get("subagent_call"))
-                    .and_then(|subagent_call| subagent_call.get("agent_id"))
-                    .cloned()
-            })
             .unwrap_or(Value::Null),
     });
     object.insert("trace_event".to_owned(), event);
@@ -1370,15 +1214,15 @@ fn validate_requested_effect(
     requested: &RequestedEffect,
 ) -> Result<(), AgentError> {
     match requested {
-        RequestedEffect::Tool(tool_call) => {
-            catalog_tool(catalog, agent_id, &tool_call.name)?;
-            if !tool_call.input.is_object() {
+        RequestedEffect::Tool(tool_effect) => {
+            catalog_tool(catalog, agent_id, &tool_effect.name)?;
+            if !tool_effect.input.is_object() {
                 return Err(validation("requested tool input must be an object"));
             }
             Ok(())
         }
-        RequestedEffect::Subagent(subagent_call) => {
-            catalog_agent(catalog, &subagent_call.agent_id)?;
+        RequestedEffect::Subagent(subagent_effect) => {
+            catalog_agent(catalog, &subagent_effect.agent_id)?;
             Ok(())
         }
     }
@@ -1444,14 +1288,8 @@ fn require_matching_string(
 fn require_step_status(object: &Map<String, Value>, field: &str) -> Result<(), AgentError> {
     match object.get(field).and_then(Value::as_str) {
         Some(
-            "tool_call_requested"
-            | "subagent_requested"
-            | "completed"
-            | "failed"
-            | "cancelled"
-            | "policy_denied"
-            | "closed_early"
-            | "timed_out",
+            "effect_requested" | "completed" | "failed" | "cancelled" | "policy_denied"
+            | "closed_early" | "timed_out",
         ) => Ok(()),
         _ => Err(validation(format!(
             "agent_runtime_step {field} is not a supported status"
@@ -1478,7 +1316,7 @@ fn require_terminal_reason(object: &Map<String, Value>, field: &str) -> Result<(
 
 fn require_terminal_reason_matches_status(object: &Map<String, Value>) -> Result<(), AgentError> {
     let expected = match object.get("status").and_then(Value::as_str) {
-        Some("tool_call_requested" | "subagent_requested") => None,
+        Some("effect_requested") => None,
         Some("completed") => Some("done"),
         Some("failed") => Some("stream_error"),
         Some("cancelled") => Some("user_cancel"),
@@ -1555,7 +1393,9 @@ mod tests {
             protocol_version: protocol_version(),
             run_id: Some(RunId("run_tool".to_owned())),
             input: json!({
-                "tool_call": {"name": "read_first", "input": {"id": "first"}}
+                "effects": [
+                    {"kind": "tool", "name": "read_first", "input": {"id": "first"}}
+                ]
             }),
             user: None,
             scope: None,
@@ -1566,13 +1406,11 @@ mod tests {
         };
 
         let first = RunLoop::start_step(&catalog, request, "parent").expect("first step");
-        assert_eq!(first["status"], "tool_call_requested");
-        assert_eq!(first["tool_call"]["name"], "read_first");
-        assert_eq!(first["run_state"]["remaining_tool_count"], 0);
-        let id = first["tool_call"]["tool_call_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        assert_eq!(first["status"], "effect_requested");
+        assert_eq!(first["effect"]["kind"], "tool");
+        assert_eq!(first["effect"]["name"], "read_first");
+        assert_eq!(first["run_state"]["remaining_effect_count"], 0);
+        let id = first["effect"]["effect_id"].as_str().unwrap().to_owned();
 
         let terminal = RunLoop::continue_step(
             &catalog,
@@ -1582,7 +1420,7 @@ mod tests {
         )
         .expect("terminal step");
         assert_eq!(terminal["status"], "completed");
-        assert_eq!(terminal["output"]["tool_result"], json!({"ok": true}));
+        assert_eq!(terminal["output"]["effect_result"], json!({"ok": true}));
         assert_eq!(
             terminal["trace_event"]["run_state"]["terminal_reason"],
             "done"
@@ -1613,13 +1451,11 @@ mod tests {
         };
 
         let first = RunLoop::start_step(&catalog, request, "parent").expect("first step");
-        assert_eq!(first["status"], "subagent_requested");
-        assert_eq!(first["subagent_call"]["agent_id"], "child");
+        assert_eq!(first["status"], "effect_requested");
+        assert_eq!(first["effect"]["kind"], "subagent");
+        assert_eq!(first["effect"]["agent_id"], "child");
         assert_eq!(first["trace_event"]["subagent_id"], "child");
-        let id = first["subagent_call"]["subagent_call_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let id = first["effect"]["effect_id"].as_str().unwrap().to_owned();
 
         let terminal = RunLoop::continue_step(
             &catalog,
@@ -1630,7 +1466,7 @@ mod tests {
         .expect("terminal step");
         assert_eq!(terminal["status"], "completed");
         assert_eq!(
-            terminal["output"]["subagent_result"]["result"]["status"],
+            terminal["output"]["effect_result"]["result"]["status"],
             "completed"
         );
     }

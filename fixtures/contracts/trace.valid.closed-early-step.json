@@ -10,8 +10,9 @@
   "started_at": "2026-06-28T09:12:31Z",
   "finished_at": "2026-06-28T09:12:32Z",
   "input": {
-    "tool_plan": [
+    "effects": [
       {
+        "kind": "tool",
         "name": "read_task",
         "input": {
           "id": "task_1"
@@ -21,8 +22,8 @@
   },
   "output": {
     "error": {
-      "code": "tool_call_budget_exhausted",
-      "message": "agent runtime tool-call budget exhausted"
+      "code": "effect_budget_exhausted",
+      "message": "agent runtime effect budget exhausted"
     }
   },
   "spans": [
@@ -56,12 +57,15 @@
         "agent_id": "execution_review",
         "status": "closed_early",
         "step_index": 0,
+        "effect_id": "effect_1",
+        "effect_kind": "tool",
         "tool_name": "read_task",
+        "subagent_id": null,
         "run_state": {
           "status": "closed_early",
           "step_index": 0,
-          "remaining_tool_count": 0,
-          "tool_result_count": 0,
+          "remaining_effect_count": 0,
+          "effect_result_count": 0,
           "terminal_reason": "closed_early"
         }
       }

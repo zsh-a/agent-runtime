@@ -15,7 +15,10 @@
         "agent_id": "echo_agent",
         "status": "completed",
         "step_index": 0,
-        "tool_name": "echo"
+        "effect_id": "effect_1",
+        "effect_kind": "tool",
+        "tool_name": "echo",
+        "subagent_id": null
       }
     }
   ]

@@ -18,7 +18,7 @@ pub use context::{
 };
 pub use errors::{AgentError, AgentErrorKind, AgentErrorRecord, StoreError, ToolError};
 pub use hooks::{HookEffect, HookSpec, PolicyDecision, PolicyDecisionKind};
-pub use ids::{ProposalId, RunId, SessionId, StepId, ThreadId, ToolCallId};
+pub use ids::{EffectId, ProposalId, RunId, SessionId, StepId, ThreadId, ToolCallId};
 pub use proposal::{
     ApprovalDecision, ApprovalDecisionKind, ApprovalLevel, ProposalApprovalPolicy, ProposalDiff,
     ProposalDiffOperation, ProposalEnvelope, ProposalKindSpec, ProposalStatus, ProposalWarning,
