@@ -1,87 +1,16 @@
 use std::sync::Arc;
 
 use agent_core::{
-    HookEventName, PROTOCOL_VERSION, RunId, RunRequest, RunScope, RunWorkflow, ToolError, ToolRisk,
-    ToolSpec, TraceEvent, TraceSink, TriggerKind, UserContext,
+    HookEventName, PROTOCOL_VERSION, RunId, RunRequest, RunScope, RunWorkflow, SubagentRequest,
+    ToolError, TraceEvent, TraceSink, TriggerKind, UserContext,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::{HookManager, MemoryTraceSink, RunControl, runner::AgentRunner};
 
-pub const AGENT_RUN_TOOL_NAME: &str = "agent.run";
-
-pub fn ensure_agent_run_tool(tools: &mut Vec<ToolSpec>) {
-    if !tools.iter().any(|tool| tool.name == AGENT_RUN_TOOL_NAME) {
-        tools.push(agent_run_tool_spec());
-    }
-}
-
-pub fn agent_run_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: AGENT_RUN_TOOL_NAME.to_owned(),
-        description: "Run another runtime agent with JSON input and return its result and trace."
-            .to_owned(),
-        input_schema: json!({
-            "type": "object",
-            "required": ["agent_id"],
-            "properties": {
-                "agent_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Runtime agent id to run."
-                },
-                "input": {
-                    "description": "JSON input passed to the subagent."
-                },
-                "run_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Optional deterministic run id."
-                },
-                "metadata": {
-                    "type": "object",
-                    "description": "Optional metadata merged into the child run metadata."
-                },
-                "workflow": {
-                    "type": "object",
-                    "description": "Optional workflow graph fields merged into the child run workflow."
-                },
-                "scope": {
-                    "type": "object",
-                    "required": ["type"],
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "enum": ["global", "user", "tenant"]
-                        },
-                        "id": {
-                            "type": "string",
-                            "minLength": 1
-                        }
-                    },
-                    "additionalProperties": false,
-                    "description": "Optional run scope override. Defaults to the parent run scope."
-                }
-            },
-            "additionalProperties": false
-        }),
-        output_schema: Some(json!({
-            "type": "object",
-            "required": ["result", "trace"],
-            "properties": {
-                "result": {"type": "object"},
-                "trace": {"type": "object"}
-            },
-            "additionalProperties": false
-        })),
-        risk: ToolRisk::High,
-        metadata: json!({"source": "agent_runtime_builtin"}),
-    }
-}
-
 #[derive(Clone)]
-pub struct AgentRunToolContext {
+pub struct SubagentRunContext {
     pub parent_run_id: Option<RunId>,
     pub parent_agent_id: Option<String>,
     pub user: Option<UserContext>,
@@ -93,7 +22,7 @@ pub struct AgentRunToolContext {
     pub cancellation: CancellationToken,
 }
 
-impl Default for AgentRunToolContext {
+impl Default for SubagentRunContext {
     fn default() -> Self {
         Self {
             parent_run_id: None,
@@ -109,31 +38,22 @@ impl Default for AgentRunToolContext {
     }
 }
 
-pub async fn call_agent_run_tool(
+pub async fn run_subagent(
     runner: &AgentRunner,
-    input: Value,
-    context: AgentRunToolContext,
+    request: SubagentRequest,
+    context: SubagentRunContext,
 ) -> Result<Value, ToolError> {
-    let agent_id = input
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            ToolError::policy_denied(
-                "agent.run requires a non-empty agent_id",
-                json!({"tool_name": AGENT_RUN_TOOL_NAME}),
-            )
-        })?;
-    let run_id = input
-        .get("run_id")
-        .and_then(Value::as_str)
-        .map(|value| RunId(value.to_owned()));
-    let child_input = input.get("input").cloned().unwrap_or_else(|| json!({}));
-    let scope = child_scope(&input, &context)?;
-    let metadata = child_metadata(&input, &context);
-    let workflow = child_workflow(&input, &context);
+    let agent_id = request.agent_id.trim().to_owned();
+    if agent_id.is_empty() {
+        return Err(ToolError::policy_denied(
+            "subagent request requires a non-empty agent_id",
+            json!({"effect": "subagent"}),
+        ));
+    }
+    let child_input = request.input.clone();
+    let scope = request.scope.clone().or_else(|| context.scope.clone());
+    let metadata = child_metadata(&request, &context);
+    let workflow = child_workflow(&request, &context);
     let trace = context
         .trace
         .clone()
@@ -197,7 +117,7 @@ pub async fn call_agent_run_tool(
             &agent_id,
             RunRequest {
                 protocol_version: PROTOCOL_VERSION.to_owned(),
-                run_id,
+                run_id: request.run_id,
                 input: child_input,
                 user: context.user,
                 scope,
@@ -246,7 +166,7 @@ pub async fn call_agent_run_tool(
     }))
 }
 
-fn child_metadata(input: &Value, context: &AgentRunToolContext) -> Value {
+fn child_metadata(request: &SubagentRequest, context: &SubagentRunContext) -> Value {
     let mut metadata = if context.metadata.is_object() {
         context.metadata.clone()
     } else {
@@ -266,7 +186,7 @@ fn child_metadata(input: &Value, context: &AgentRunToolContext) -> Value {
                 Value::String(parent_agent_id.clone()),
             );
         }
-        if let Some(extra) = input.get("metadata").and_then(Value::as_object) {
+        if let Some(extra) = request.metadata.as_object() {
             for (key, value) in extra {
                 object.insert(key.clone(), value.clone());
             }
@@ -275,28 +195,10 @@ fn child_metadata(input: &Value, context: &AgentRunToolContext) -> Value {
     metadata
 }
 
-fn child_scope(
-    input: &Value,
-    context: &AgentRunToolContext,
-) -> Result<Option<RunScope>, ToolError> {
-    match input.get("scope") {
-        Some(value) => serde_json::from_value::<RunScope>(value.clone())
-            .map(Some)
-            .map_err(|error| {
-                ToolError::policy_denied(
-                    format!("agent.run scope must be a valid RunScope: {error}"),
-                    json!({"tool_name": AGENT_RUN_TOOL_NAME}),
-                )
-            }),
-        None => Ok(context.scope.clone()),
-    }
-}
-
-fn child_workflow(input: &Value, context: &AgentRunToolContext) -> Option<RunWorkflow> {
-    let mut workflow = input
-        .get("workflow")
-        .cloned()
-        .and_then(|value| serde_json::from_value::<RunWorkflow>(value).ok())
+fn child_workflow(request: &SubagentRequest, context: &SubagentRunContext) -> Option<RunWorkflow> {
+    let mut workflow = request
+        .workflow
+        .clone()
         .or_else(|| context.workflow.clone())
         .unwrap_or_else(|| RunWorkflow {
             workflow_id: None,

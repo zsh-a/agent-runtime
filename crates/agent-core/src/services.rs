@@ -9,7 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     AgentError, AgentEvent, AgentRunResult, AgentSpec, ArtifactKind, ArtifactRef, ProposalEnvelope,
-    RedactionClassification, RunId, RunScope, ToolError, ToolSpec, TraceEvent, UserContext,
+    RedactionClassification, RunId, RunScope, RunWorkflow, ToolError, ToolSpec, TraceEvent,
+    UserContext,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -34,6 +35,21 @@ pub struct ArtifactPublishRequest {
     pub sha256: Option<String>,
     #[serde(default)]
     pub redaction_classification: Option<RedactionClassification>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SubagentRequest {
+    pub agent_id: String,
+    #[serde(default)]
+    pub input: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<RunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<RunScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<RunWorkflow>,
     #[serde(default)]
     pub metadata: Value,
 }
@@ -70,6 +86,28 @@ pub trait AgentServices: Send + Sync {
                 Err(ToolError::cancelled(format!("tool '{name}' cancelled")))
             }
             result = self.call_tool(name, input) => result,
+        }
+    }
+
+    async fn run_subagent(&self, request: SubagentRequest) -> Result<Value, ToolError> {
+        let _ = request;
+        Err(ToolError::policy_denied(
+            "subagent execution is not supported by this AgentServices implementation",
+            serde_json::json!({"effect": "subagent"}),
+        ))
+    }
+
+    async fn run_subagent_with_cancellation(
+        &self,
+        request: SubagentRequest,
+        cancellation: CancellationToken,
+    ) -> Result<Value, ToolError> {
+        let agent_id = request.agent_id.clone();
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                Err(ToolError::cancelled(format!("subagent '{agent_id}' cancelled")))
+            }
+            result = self.run_subagent(request) => result,
         }
     }
 

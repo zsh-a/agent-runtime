@@ -5,7 +5,7 @@ use agent_core::{
     ToolSpec, catalog_version,
 };
 use agent_llm::{LlmMessage, LlmRole};
-use agent_runtime::{AGENT_RUN_TOOL_NAME, InMemoryAgentRegistry, ensure_agent_run_tool};
+use agent_runtime::InMemoryAgentRegistry;
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::Result;
 use serde::{Deserialize, Serialize};
@@ -210,7 +210,6 @@ pub(crate) fn runtime_tool_specs(
         .map(|catalog| catalog.tools.clone())
         .unwrap_or_default();
     tools.extend(tool_overrides.source_specs.clone());
-    ensure_agent_run_tool(&mut tools);
     for tool in builtin_tools() {
         if !tools.iter().any(|existing| existing.name == tool.name) {
             tools.push(tool);
@@ -261,7 +260,6 @@ pub(crate) fn tool_source_label(tool: &ToolSpec) -> String {
         return source.to_owned();
     }
     match tool.name.as_str() {
-        AGENT_RUN_TOOL_NAME => "agent_runtime_builtin".to_owned(),
         "echo" => "agent_cli_builtin".to_owned(),
         _ => "catalog".to_owned(),
     }

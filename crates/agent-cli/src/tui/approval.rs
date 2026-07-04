@@ -379,7 +379,6 @@ async fn approve_slash_tool_with_updates(
 mod tests {
     use super::*;
     use crate::tui::test_support::test_state_with_policy;
-    use agent_runtime::AGENT_RUN_TOOL_NAME;
     use serde_json::json;
 
     #[tokio::test]
@@ -387,12 +386,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut state = test_state_with_policy(&dir, "mock response", false).await;
         state.set_pending_approval(TuiPendingApproval::tool_call(
-            AGENT_RUN_TOOL_NAME,
+            "shell.exec",
             TuiToolRisk::High,
-            json!({
-                "agent_id": "echo_agent",
-                "input": {"message": "retry later"}
-            }),
+            json!({"command": "echo retry later"}),
         ));
 
         let error = approve_pending_tool(&mut state)
@@ -410,7 +406,7 @@ mod tests {
                 .pending_approval
                 .as_ref()
                 .map(TuiPendingApproval::summary),
-            Some("agent.run (high)".to_owned())
+            Some("shell.exec (high)".to_owned())
         );
         assert!(state.activity.iter().any(|activity| {
             activity.kind == TuiActivityKind::Approval && activity.title == "approval still pending"

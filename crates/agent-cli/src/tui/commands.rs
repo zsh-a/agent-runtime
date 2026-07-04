@@ -1497,11 +1497,13 @@ fn compact_description(description: &str) -> String {
 mod tests {
     use super::*;
     use crate::tui::{
-        data::{TranscriptRole, TuiPendingApproval},
+        data::{TranscriptRole, TuiOptions, TuiPendingApproval},
         policy::TuiToolRisk,
-        test_support::{test_options, test_state, test_state_with_policy},
+        test_support::{test_options, test_state},
     };
-    use agent_core::{AgentRunRecord, AgentTrace, PROTOCOL_VERSION, RunScope, TraceEvent};
+    use agent_core::{
+        AgentRunRecord, AgentTrace, PROTOCOL_VERSION, RunScope, ToolRisk, ToolSpec, TraceEvent,
+    };
     use camino::Utf8PathBuf;
     use time::OffsetDateTime;
 
@@ -1536,6 +1538,26 @@ mod tests {
         let mut options = test_options(dir, "mock response", true);
         options.runtime_sources.registry =
             Utf8PathBuf::from_path_buf(registry_path).expect("registry path is utf8");
+        TuiState::load(options).await.expect("state loads")
+    }
+
+    fn add_high_risk_echo_tool(options: &mut TuiOptions) {
+        options.tool_overrides.source_specs.push(ToolSpec {
+            name: "echo".to_owned(),
+            description: "High-risk echo test tool.".to_owned(),
+            input_schema: json!({"type": "object"}),
+            output_schema: Some(json!({"type": "object"})),
+            risk: ToolRisk::High,
+            metadata: json!({"source": "test_high_risk"}),
+        });
+    }
+
+    async fn high_risk_echo_state(
+        dir: &tempfile::TempDir,
+        allow_high_risk_tools: bool,
+    ) -> TuiState {
+        let mut options = test_options(dir, "mock response", allow_high_risk_tools);
+        add_high_risk_echo_tool(&mut options);
         TuiState::load(options).await.expect("state loads")
     }
 
@@ -1617,7 +1639,7 @@ mod tests {
             item.content.contains("TUI status")
                 && item.content.contains("Agent: echo_agent")
                 && item.content.contains("Chat: mock / mock-model")
-                && item.content.contains("Tools: 2 total")
+                && item.content.contains("Tools: 1 total")
                 && item.content.contains("Recent runs: 1")
                 && item.content.contains("run_status_completed [completed]")
                 && item.content.contains("Next: /help <command>")
@@ -1629,7 +1651,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(&dir, "mock response").await;
         state.set_pending_approval(TuiPendingApproval::tool_call(
-            "agent.run",
+            "shell.exec",
             TuiToolRisk::High,
             json!({}),
         ));
@@ -1639,7 +1661,7 @@ mod tests {
             .expect("status command succeeds");
 
         assert!(state.transcript.iter().any(|item| {
-            item.content.contains("Pending approval: agent.run (high)")
+            item.content.contains("Pending approval: shell.exec (high)")
                 && item
                     .content
                     .contains("Next: Tab/Left/Right selects Approve or Deny; Enter confirms")
@@ -1690,24 +1712,21 @@ mod tests {
             .expect("tools command succeeds");
 
         let inventory = state.tool_inventory.as_ref().expect("inventory is loaded");
-        assert_eq!(inventory.total_count(), 2);
-        assert_eq!(inventory.high_risk_count(), 1);
+        assert_eq!(inventory.total_count(), 1);
+        assert_eq!(inventory.high_risk_count(), 0);
         assert_eq!(inventory.blocked_count(), 0);
         assert!(state.transcript.iter().any(|item| {
             item.content
-                .contains("- agent.run [high / approval / agent_runtime_builtin]")
-                && item
-                    .content
-                    .contains("- echo [read_only / allowed / agent_cli_builtin]")
+                .contains("- echo [read_only / allowed / agent_cli_builtin]")
         }));
         let rendered = crate::tui::render::render_tui_once(&state).expect("tui renders");
-        assert!(rendered.contains("tools 2 high 1 blocked 0"));
+        assert!(rendered.contains("tools 1 high 0 blocked 0"));
     }
 
     #[tokio::test]
     async fn tools_command_marks_high_risk_tools_blocked_by_policy() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = test_state_with_policy(&dir, "mock response", false).await;
+        let mut state = high_risk_echo_state(&dir, false).await;
 
         execute_command(&mut state, "/tools")
             .await
@@ -1717,7 +1736,7 @@ mod tests {
         assert_eq!(inventory.blocked_count(), 1);
         assert!(state.transcript.iter().any(|item| {
             item.content
-                .contains("- agent.run [high / blocked / agent_runtime_builtin]")
+                .contains("- echo [high / blocked / test_high_risk]")
         }));
     }
 
@@ -2516,23 +2535,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_command_can_run_agent_run_tool() {
+    async fn tool_command_requests_approval_for_high_risk_tool() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = test_state(&dir, "mock response").await;
+        let mut state = high_risk_echo_state(&dir, true).await;
 
         execute_command(
             &mut state,
-            r#"/tool agent.run {"agent_id":"echo_agent","input":{"message":"from agent.run"}}"#,
+            r#"/tool echo {"message":"from high-risk echo"}"#,
         )
         .await
-        .expect("agent.run tool command requests approval");
+        .expect("high-risk tool command requests approval");
         state.refresh_runs().await.expect("runs refresh");
 
         assert!(
             state
                 .events
                 .iter()
-                .any(|line| line == "tool policy: agent.run risk=high allowed=true")
+                .any(|line| line == "tool policy: echo risk=high allowed=true")
         );
         assert!(state.pending_approval.is_some());
         assert!(state.activity.iter().any(|activity| {
@@ -2541,16 +2560,15 @@ mod tests {
         assert!(state.recent_runs.is_empty());
         let rendered = crate::tui::render::render_tui_once(&state).expect("tui renders");
         assert!(rendered.contains("pending approval"));
-        assert!(rendered.contains("agent.run (high)"));
+        assert!(rendered.contains("echo (high)"));
 
         execute_command(&mut state, "/approve")
             .await
-            .expect("approval executes agent.run");
+            .expect("approval executes high-risk tool");
         state.refresh_runs().await.expect("runs refresh");
 
         assert!(state.pending_approval.is_none());
-        assert_eq!(state.recent_runs.len(), 1);
-        assert_eq!(state.recent_runs[0].agent_id, "echo_agent");
+        assert!(state.recent_runs.is_empty());
         assert!(state.activity.iter().any(|activity| {
             activity.kind == TuiActivityKind::Approval && activity.title == "approval granted"
         }));
@@ -2558,21 +2576,18 @@ mod tests {
             state
                 .transcript
                 .iter()
-                .any(|item| item.content.contains("from agent.run"))
+                .any(|item| item.content.contains("from high-risk echo"))
         );
     }
 
     #[tokio::test]
     async fn tool_command_can_deny_high_risk_tool_call() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = test_state(&dir, "mock response").await;
+        let mut state = high_risk_echo_state(&dir, true).await;
 
-        execute_command(
-            &mut state,
-            r#"/tool agent.run {"agent_id":"echo_agent","input":{"message":"deny me"}}"#,
-        )
-        .await
-        .expect("agent.run tool command requests approval");
+        execute_command(&mut state, r#"/tool echo {"message":"deny me"}"#)
+            .await
+            .expect("high-risk tool command requests approval");
         assert!(state.pending_approval.is_some());
 
         execute_command(&mut state, "/deny")
@@ -2633,14 +2648,11 @@ mod tests {
     #[tokio::test]
     async fn tool_command_blocks_high_risk_when_policy_denies_it() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut state = test_state_with_policy(&dir, "mock response", false).await;
+        let mut state = high_risk_echo_state(&dir, false).await;
 
-        let error = execute_command(
-            &mut state,
-            r#"/tool agent.run {"agent_id":"echo_agent","input":{"message":"blocked"}}"#,
-        )
-        .await
-        .expect_err("high-risk tool should be blocked");
+        let error = execute_command(&mut state, r#"/tool echo {"message":"blocked"}"#)
+            .await
+            .expect_err("high-risk tool should be blocked");
         state.refresh_runs().await.expect("runs refresh");
 
         assert!(
@@ -2652,7 +2664,7 @@ mod tests {
             state
                 .events
                 .iter()
-                .any(|line| line == "tool policy: agent.run risk=high allowed=false")
+                .any(|line| line == "tool policy: echo risk=high allowed=false")
         );
         assert!(state.recent_runs.is_empty());
     }

@@ -475,7 +475,7 @@ enum Command {
         tools: ToolCliArgs,
         #[arg(
             long,
-            help = "Block high-risk tools such as agent.run and shell.exec in the TUI runtime"
+            help = "Block high-risk tools such as shell.exec in the TUI runtime"
         )]
         deny_high_risk_tools: bool,
         #[command(flatten)]

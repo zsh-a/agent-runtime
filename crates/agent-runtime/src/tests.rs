@@ -11,8 +11,9 @@ use agent_core::{
     AgentRunRecord, AgentRunResult, AgentRunStatus, AgentRunStore, AgentServices, AgentSpec,
     ArtifactKind, ArtifactPublishRequest, ArtifactRef, ArtifactStoreRef, HookEffect, HookEventName,
     HookKind, HookSpec, PROTOCOL_VERSION, PolicyDecision, RedactionClassification, RunId, RunLease,
-    RunRequest, RunScope, ScheduleSpec, StoreError, ToolError, WorkflowInputMapping,
-    WorkflowInputTransform, WorkflowRunNode, WorkflowRunNodeCompensation, WorkflowRunRequest,
+    RunRequest, RunScope, ScheduleSpec, StoreError, SubagentRequest, ToolError,
+    WorkflowInputMapping, WorkflowInputTransform, WorkflowRunNode, WorkflowRunNodeCompensation,
+    WorkflowRunRequest,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -71,13 +72,14 @@ impl Agent for ParentAgent {
     async fn run(&self, ctx: AgentContext) -> Result<AgentRunResult, AgentError> {
         let output = ctx
             .services
-            .call_tool(
-                "agent.run",
-                json!({
-                    "agent_id": "echo",
-                    "input": {"from": "parent"}
-                }),
-            )
+            .run_subagent(SubagentRequest {
+                agent_id: "echo".to_owned(),
+                input: json!({"from": "parent"}),
+                run_id: None,
+                scope: None,
+                workflow: None,
+                metadata: json!({}),
+            })
             .await
             .map_err(|error| AgentError {
                 record: error.record,
@@ -1245,7 +1247,7 @@ async fn policy_hook_can_deny_state_save() {
 }
 
 #[tokio::test]
-async fn agent_run_tool_executes_subagent() {
+async fn native_subagent_service_executes_subagent() {
     let registry = InMemoryAgentRegistry::shared(vec![Arc::new(ParentAgent), Arc::new(EchoAgent)]);
     let run_store = agent_store::InMemoryRunStore::shared();
     let state_store = agent_store::InMemoryStateStore::shared();

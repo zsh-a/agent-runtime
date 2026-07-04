@@ -78,6 +78,7 @@
                     "status": {
                       "enum": [
                         "tool_call_requested",
+                        "subagent_requested",
                         "completed",
                         "failed",
                         "cancelled",
@@ -88,6 +89,7 @@
                     },
                     "step_index": { "type": "integer", "minimum": 0 },
                     "tool_name": { "type": ["string", "null"], "minLength": 1 },
+                    "subagent_id": { "type": ["string", "null"], "minLength": 1 },
                     "run_state": {
                       "type": "object",
                       "required": [
@@ -101,6 +103,7 @@
                         "status": {
                           "enum": [
                             "tool_call_requested",
+                            "subagent_requested",
                             "completed",
                             "failed",
                             "cancelled",
@@ -126,7 +129,11 @@
                       "allOf": [
                         {
                           "if": {
-                            "properties": { "status": { "const": "tool_call_requested" } },
+                            "properties": {
+                              "status": {
+                                "enum": ["tool_call_requested", "subagent_requested"]
+                              }
+                            },
                             "required": ["status"]
                           },
                           "then": {
@@ -194,6 +201,19 @@
                         "properties": {
                           "run_state": {
                             "properties": { "status": { "const": "tool_call_requested" } }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "properties": { "status": { "const": "subagent_requested" } },
+                        "required": ["status"]
+                      },
+                      "then": {
+                        "properties": {
+                          "run_state": {
+                            "properties": { "status": { "const": "subagent_requested" } }
                           }
                         }
                       }

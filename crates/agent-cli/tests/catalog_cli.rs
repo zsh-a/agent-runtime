@@ -2128,7 +2128,7 @@ max_tool_rounds = 2
     assert!(output.contains("Ready. Chatting with agent 'ai_chat'."));
     assert!(output.contains("Model: mock / configured-model."));
     assert!(output.contains("catalog 1 agents / 1 tools"));
-    assert!(output.contains("tools 4 high 1 blocked 0"));
+    assert!(output.contains("tools 3 high 0 blocked 0"));
 }
 
 #[test]

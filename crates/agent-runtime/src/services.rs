@@ -2,18 +2,15 @@ use std::sync::Arc;
 
 use agent_core::{
     AgentError, AgentEvent, AgentServices, AgentStateStore, ArtifactPublishRequest, HookEventName,
-    ProposalEnvelope, RunId, RunScope, RunWorkflow, ToolContext, ToolError, ToolRegistry,
-    TraceEvent, TraceSink, UserContext,
+    ProposalEnvelope, RunId, RunScope, RunWorkflow, SubagentRequest, ToolContext, ToolError,
+    ToolRegistry, TraceEvent, TraceSink, UserContext,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::{
-    AGENT_RUN_TOOL_NAME, AgentRunToolContext, call_agent_run_tool, hooks::HookManager,
-    runner::AgentRunner,
-};
+use crate::{SubagentRunContext, hooks::HookManager, run_subagent, runner::AgentRunner};
 
 pub struct BasicAgentServices {
     agent_id: String,
@@ -92,9 +89,6 @@ impl AgentServices for BasicAgentServices {
 #[async_trait]
 impl AgentServices for TracedAgentServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
-        if name == AGENT_RUN_TOOL_NAME {
-            return self.call_subagent(input).await;
-        }
         let started_at = std::time::Instant::now();
         let input_hash = state_value_hash(&input);
         let input_bytes = serialized_value_len(&input);
@@ -256,17 +250,46 @@ impl AgentServices for TracedAgentServices {
         input: Value,
         cancellation: CancellationToken,
     ) -> Result<Value, ToolError> {
-        if name == AGENT_RUN_TOOL_NAME {
-            return self
-                .call_subagent_with_cancellation(input, cancellation)
-                .await;
-        }
         tokio::select! {
             _ = cancellation.cancelled() => {
                 Err(ToolError::cancelled(format!("tool '{name}' cancelled")))
             }
             result = self.call_tool(name, input) => result,
         }
+    }
+
+    async fn run_subagent(&self, request: SubagentRequest) -> Result<Value, ToolError> {
+        self.run_subagent_with_cancellation(request, self.cancellation.clone())
+            .await
+    }
+
+    async fn run_subagent_with_cancellation(
+        &self,
+        request: SubagentRequest,
+        cancellation: CancellationToken,
+    ) -> Result<Value, ToolError> {
+        let Some(runner) = &self.subagent_runner else {
+            return Err(ToolError::policy_denied(
+                "subagent execution is not available outside an AgentRunner",
+                json!({"effect": "subagent"}),
+            ));
+        };
+        run_subagent(
+            runner,
+            request,
+            SubagentRunContext {
+                parent_run_id: Some(self.run_id.clone()),
+                parent_agent_id: Some(self.agent_id.clone()),
+                user: self.user.clone(),
+                scope: Some(self.scope.clone()),
+                metadata: json!({}),
+                trace: Some(self.trace.clone()),
+                hooks: self.hooks.clone(),
+                cancellation,
+                workflow: self.workflow.clone(),
+            },
+        )
+        .await
     }
 
     async fn emit_event(&self, event: AgentEvent) -> Result<(), AgentError> {
@@ -569,42 +592,6 @@ impl AgentServices for TracedAgentServices {
             ))
             .await?;
         Ok(artifact)
-    }
-}
-
-impl TracedAgentServices {
-    async fn call_subagent(&self, input: Value) -> Result<Value, ToolError> {
-        self.call_subagent_with_cancellation(input, self.cancellation.clone())
-            .await
-    }
-
-    async fn call_subagent_with_cancellation(
-        &self,
-        input: Value,
-        cancellation: CancellationToken,
-    ) -> Result<Value, ToolError> {
-        let Some(runner) = &self.subagent_runner else {
-            return Err(ToolError::policy_denied(
-                "agent.run is not available outside an AgentRunner",
-                json!({"tool_name": AGENT_RUN_TOOL_NAME}),
-            ));
-        };
-        call_agent_run_tool(
-            runner,
-            input,
-            AgentRunToolContext {
-                parent_run_id: Some(self.run_id.clone()),
-                parent_agent_id: Some(self.agent_id.clone()),
-                user: self.user.clone(),
-                scope: Some(self.scope.clone()),
-                metadata: json!({}),
-                trace: Some(self.trace.clone()),
-                hooks: self.hooks.clone(),
-                cancellation,
-                workflow: self.workflow.clone(),
-            },
-        )
-        .await
     }
 }
 

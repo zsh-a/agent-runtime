@@ -516,7 +516,6 @@ mod tests {
     use agent_chat::{ChatTurnEvent, ChatTurnEventKind, chat_turn_initial_state};
     use agent_core::ContextPolicy;
     use agent_llm::{LlmFinishReason, user_message};
-    use agent_runtime::AGENT_RUN_TOOL_NAME;
     use serde_json::json;
 
     #[tokio::test]
@@ -593,11 +592,8 @@ mod tests {
     fn requires_tool_results_round_event_decodes_pending_chat_resume() {
         let tool_call = ChatToolCall {
             id: "call_1".to_owned(),
-            name: AGENT_RUN_TOOL_NAME.to_owned(),
-            input: json!({
-                "agent_id": "echo_agent",
-                "input": {"message": "from chat approval"},
-            }),
+            name: "echo".to_owned(),
+            input: json!({"message": "from chat approval"}),
         };
         let request = ChatTurnRequest {
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -654,7 +650,7 @@ mod tests {
 
         assert_eq!(pending.tool_calls.len(), 1);
         assert_eq!(pending.tool_calls[0].id, "call_1");
-        assert_eq!(pending.tool_calls[0].name, AGENT_RUN_TOOL_NAME);
+        assert_eq!(pending.tool_calls[0].name, "echo");
         assert_eq!(pending.state.pending_tool_calls[0].id, "call_1");
         assert_eq!(pending.state.tool_execution, ChatToolExecution::Client);
     }

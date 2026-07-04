@@ -1351,7 +1351,7 @@ mod tests {
     fn input_panel_prioritizes_pending_approval_guidance() {
         let mut state = test_state();
         state.pending_approval = Some(TuiPendingApproval::tool_call(
-            "agent.run",
+            "shell.exec",
             TuiToolRisk::High,
             serde_json::json!({}),
         ));
@@ -1368,7 +1368,7 @@ mod tests {
     fn approval_picker_renders_selected_deny_option() {
         let mut state = test_state();
         state.pending_approval = Some(TuiPendingApproval::tool_call(
-            "agent.run",
+            "shell.exec",
             TuiToolRisk::High,
             serde_json::json!({}),
         ));

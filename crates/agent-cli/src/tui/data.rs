@@ -1451,9 +1451,9 @@ mod tests {
 
     #[test]
     fn pending_approval_summary_names_slash_and_chat_tools() {
-        let slash = TuiPendingApproval::tool_call("agent.run", TuiToolRisk::High, json!({}));
-        assert_eq!(slash.subject(), "agent.run");
-        assert_eq!(slash.summary(), "agent.run (high)");
+        let slash = TuiPendingApproval::tool_call("shell.exec", TuiToolRisk::High, json!({}));
+        assert_eq!(slash.subject(), "shell.exec");
+        assert_eq!(slash.summary(), "shell.exec (high)");
 
         let chat = TuiPendingApproval::chat_tools(
             "echo_agent",
@@ -1462,7 +1462,7 @@ mod tests {
             vec![
                 ChatToolCall {
                     id: "call_1".to_owned(),
-                    name: "agent.run".to_owned(),
+                    name: "shell.exec".to_owned(),
                     input: json!({}),
                 },
                 ChatToolCall {
@@ -1473,14 +1473,14 @@ mod tests {
             ],
             vec![user_message("hello")],
         );
-        assert_eq!(chat.subject(), "agent.run +1 tool(s)");
-        assert_eq!(chat.summary(), "agent.run +1 tool(s) (high)");
+        assert_eq!(chat.subject(), "shell.exec +1 tool(s)");
+        assert_eq!(chat.summary(), "shell.exec +1 tool(s) (high)");
     }
 
     #[test]
     fn pending_approval_update_sets_and_clears_state() {
         let mut state = test_state();
-        let approval = TuiPendingApproval::tool_call("agent.run", TuiToolRisk::High, json!({}));
+        let approval = TuiPendingApproval::tool_call("shell.exec", TuiToolRisk::High, json!({}));
 
         state.apply_update(TuiUpdate::PendingApproval(Some(approval)));
         assert_eq!(
@@ -1488,7 +1488,7 @@ mod tests {
                 .pending_approval
                 .as_ref()
                 .map(TuiPendingApproval::summary),
-            Some("agent.run (high)".to_owned())
+            Some("shell.exec (high)".to_owned())
         );
 
         state.apply_update(TuiUpdate::PendingApproval(None));

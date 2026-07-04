@@ -5,10 +5,7 @@ use agent_core::{
     RunRequest, ToolError, ToolSpec, WorkflowRunRequest, WorkflowRunResult,
 };
 use agent_llm::LlmMessage;
-use agent_runtime::{
-    AGENT_RUN_TOOL_NAME, AgentRunToolContext, AgentRunner, RunControl, RunOutcome,
-    call_agent_run_tool,
-};
+use agent_runtime::{AgentRunner, RunControl, RunOutcome};
 use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
@@ -107,9 +104,9 @@ impl TuiRuntime {
     }
 
     pub(super) fn tool_services(&self, parent_agent_id: Option<String>) -> Arc<dyn AgentServices> {
+        let _ = parent_agent_id;
         Arc::new(TuiToolServices {
             runtime: self.inner.clone(),
-            parent_agent_id,
         })
     }
 
@@ -276,7 +273,6 @@ pub(super) struct TuiCancelRunResult {
 
 struct TuiToolServices {
     runtime: Arc<TuiRuntimeInner>,
-    parent_agent_id: Option<String>,
 }
 
 #[async_trait]
@@ -309,30 +305,12 @@ impl AgentServices for TuiToolServices {
                 }),
             ));
         }
-        if name != AGENT_RUN_TOOL_NAME {
-            return tokio::select! {
-                _ = cancellation.cancelled() => {
-                    Err(ToolError::cancelled(format!("tool '{name}' cancelled")))
-                }
-                result = self.runtime.services.call_tool(name, input) => result,
-            };
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                Err(ToolError::cancelled(format!("tool '{name}' cancelled")))
+            }
+            result = self.runtime.services.call_tool(name, input) => result,
         }
-        let output = call_agent_run_tool(
-            &self.runtime.runner,
-            input,
-            AgentRunToolContext {
-                parent_agent_id: self.parent_agent_id.clone(),
-                metadata: json!({
-                    "source": "agent_tui",
-                    "surface": "agent_tui",
-                }),
-                cancellation,
-                ..AgentRunToolContext::default()
-            },
-        )
-        .await?;
-        persist_agent_run_trace(&self.runtime.options.store_path, &output).await?;
-        Ok(output)
     }
 
     async fn emit_event(
@@ -358,27 +336,6 @@ impl AgentServices for TuiToolServices {
     }
 }
 
-async fn persist_agent_run_trace(
-    store_path: &Utf8PathBuf,
-    output: &Value,
-) -> Result<(), ToolError> {
-    let Some(trace) = output.get("trace").cloned() else {
-        return Ok(());
-    };
-    let trace: AgentTrace = serde_json::from_value(trace).map_err(|error| {
-        tool_internal_error(format!("failed to decode agent.run trace: {error}"))
-    })?;
-    write_store_trace(store_path, &trace)
-        .await
-        .map_err(|error| tool_internal_error(format!("failed to persist agent.run trace: {error}")))
-}
-
-fn tool_internal_error(message: impl Into<String>) -> ToolError {
-    ToolError {
-        record: AgentError::internal(message).record,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,18 +345,15 @@ mod tests {
     use agent_core::{AgentRunStatus, ToolRisk};
 
     #[tokio::test]
-    async fn chat_tools_include_agent_run() {
+    async fn chat_tools_exclude_agent_run() {
         let dir = tempfile::tempdir().expect("temp dir");
         let options = test_options(&dir, "mock response", true);
 
         let runtime = TuiRuntime::load(&options).await.expect("runtime loads");
         let tools = runtime.chat_tools();
-        let decision = runtime.tool_policy_decision(AGENT_RUN_TOOL_NAME);
 
-        assert!(tools.iter().any(|tool| tool.name == AGENT_RUN_TOOL_NAME));
+        assert!(!tools.iter().any(|tool| tool.name == "agent.run"));
         assert!(tools.iter().any(|tool| tool.name == "echo"));
-        assert_eq!(decision.risk.label(), "high");
-        assert!(decision.allowed);
     }
 
     #[tokio::test]
@@ -409,10 +363,7 @@ mod tests {
         let runtime = TuiRuntime::load(&options).await.expect("runtime loads");
 
         let error = runtime
-            .call_tool(
-                AGENT_RUN_TOOL_NAME,
-                json!({"agent_id":"echo_agent","input":{"message":"blocked"}}),
-            )
+            .call_tool("uncontracted.tool", json!({"message":"blocked"}))
             .await
             .expect_err("runtime policy blocks high-risk tools");
 
@@ -492,44 +443,5 @@ mod tests {
                 .iter()
                 .any(|event| event.kind == "run_cancelled")
         );
-    }
-
-    #[tokio::test]
-    async fn runtime_agent_run_tool_uses_cancellation_token() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let cancellation = CancellationToken::new();
-        let options = catalog_options(
-            &dir,
-            "mock response",
-            Utf8PathBuf::from("../../examples/business-integration/catalog.json"),
-        );
-        let runtime = TuiRuntime::load_with_cancellation(&options, cancellation.clone())
-            .await
-            .expect("runtime loads");
-        let run = tokio::spawn(async move {
-            runtime
-                .call_tool(
-                    AGENT_RUN_TOOL_NAME,
-                    json!({
-                        "agent_id": "customer_summary_agent",
-                        "input": {"sleep_ms": 5000}
-                    }),
-                )
-                .await
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        cancellation.cancel();
-        let output = tokio::time::timeout(std::time::Duration::from_secs(2), run)
-            .await
-            .expect("cancelled agent.run returns promptly")
-            .expect("agent.run task joins")
-            .expect("cancelled agent.run returns output");
-
-        assert_eq!(output["result"]["status"], "cancelled");
-        let trace = output["trace"]["events"]
-            .as_array()
-            .expect("trace events are present");
-        assert!(trace.iter().any(|event| event["kind"] == "run_cancelled"));
     }
 }

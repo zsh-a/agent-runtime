@@ -9,10 +9,7 @@ use agent_core::{
     ToolError, TraceEvent, TriggerEnvelope, TriggerKind, UserContext, WorkflowRunRequest,
     WorkflowRunResult,
 };
-use agent_runtime::{
-    AGENT_RUN_TOOL_NAME, AgentRunToolContext, AgentRunner, HookManager, RunControl,
-    call_agent_run_tool, ensure_agent_run_tool,
-};
+use agent_runtime::{AgentRunner, HookManager, RunControl};
 use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileSessionStore};
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
@@ -289,7 +286,6 @@ impl RuntimeServer {
         if request.tools.is_empty() {
             request.tools = self.catalog.tools.clone();
         }
-        ensure_agent_run_tool(&mut request.tools);
         if let Some(agent_id) = request.agent_id.as_deref() {
             request.messages = self
                 .composition
@@ -327,7 +323,6 @@ impl RuntimeServer {
         if request.state.tools.is_empty() {
             request.state.tools = self.catalog.tools.clone();
         }
-        ensure_agent_run_tool(&mut request.state.tools);
         if let Some(agent_id) = request.state.agent_id.as_deref() {
             request.state.messages = self
                 .composition
@@ -359,12 +354,9 @@ impl RuntimeServer {
     }
 
     fn chat_services(&self, parent_agent_id: Option<String>) -> Arc<dyn AgentServices> {
+        let _ = parent_agent_id;
         Arc::new(RuntimeServerChatServices {
             inner: self.services.clone(),
-            runner: self.runner.clone(),
-            store_path: self.store_path.clone(),
-            parent_agent_id,
-            hooks: self.hooks.clone(),
         })
     }
 
@@ -879,10 +871,6 @@ impl RuntimeServer {
 
 struct RuntimeServerChatServices {
     inner: Arc<CliServices>,
-    runner: Arc<AgentRunner>,
-    store_path: Utf8PathBuf,
-    parent_agent_id: Option<String>,
-    hooks: HookManager,
 }
 
 #[async_trait]
@@ -898,29 +886,9 @@ impl AgentServices for RuntimeServerChatServices {
         input: Value,
         cancellation: CancellationToken,
     ) -> std::result::Result<Value, ToolError> {
-        if name != AGENT_RUN_TOOL_NAME {
-            return self
-                .inner
-                .call_tool_with_cancellation(name, input, cancellation)
-                .await;
-        }
-        let output = call_agent_run_tool(
-            &self.runner,
-            input,
-            AgentRunToolContext {
-                parent_agent_id: self.parent_agent_id.clone(),
-                metadata: json!({
-                    "source": "agent_server_chat",
-                    "surface": "agent_server_chat",
-                }),
-                hooks: self.hooks.clone(),
-                cancellation,
-                ..AgentRunToolContext::default()
-            },
-        )
-        .await?;
-        persist_agent_run_trace(&self.store_path, &output).await?;
-        Ok(output)
+        self.inner
+            .call_tool_with_cancellation(name, input, cancellation)
+            .await
     }
 
     async fn emit_event(
@@ -944,24 +912,6 @@ impl AgentServices for RuntimeServerChatServices {
     ) -> std::result::Result<(), AgentError> {
         self.inner.create_proposal(proposal).await
     }
-}
-
-async fn persist_agent_run_trace(
-    store_path: &Utf8PathBuf,
-    output: &Value,
-) -> std::result::Result<(), ToolError> {
-    let Some(trace) = output.get("trace").cloned() else {
-        return Ok(());
-    };
-    let trace: AgentTrace = serde_json::from_value(trace).map_err(|error| ToolError {
-        record: AgentError::internal(format!("failed to decode agent.run trace: {error}")).record,
-    })?;
-    write_store_trace(store_path, &trace)
-        .await
-        .map_err(|error| ToolError {
-            record: AgentError::internal(format!("failed to persist agent.run trace: {error}"))
-                .record,
-        })
 }
 
 fn serialized_value_len(value: &Value) -> usize {
@@ -1019,76 +969,8 @@ mod tests {
         assert!(client_policy.compact_when_over_budget);
     }
 
-    #[test]
-    fn server_chat_runtime_tools_include_agent_run_once() {
-        let mut tools = Vec::new();
-        ensure_agent_run_tool(&mut tools);
-        ensure_agent_run_tool(&mut tools);
-
-        assert_eq!(
-            tools
-                .iter()
-                .filter(|tool| tool.name == AGENT_RUN_TOOL_NAME)
-                .count(),
-            1
-        );
-        assert_eq!(tools[0].risk, agent_core::ToolRisk::High);
-    }
-
     #[tokio::test]
-    async fn server_chat_services_execute_agent_run_tool() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let store = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("utf8 store");
-        let registry = Utf8PathBuf::from("../../examples/agents.yaml");
-        let catalog = Utf8PathBuf::from("../../fixtures/contracts/catalog.valid.json");
-        let server = RuntimeServer::new(
-            ResolvedRuntimeSources::new(registry, Some(catalog)),
-            store.clone(),
-            ToolOverrides::default(),
-            HookManager::default(),
-            ContextPolicy::default(),
-            None,
-            ChatLlmOptions {
-                provider: "mock".to_owned(),
-                model: "mock-model".to_owned(),
-                mock_response: "unused".to_owned(),
-                api_base_url: None,
-                api_key_env: "OPENAI_API_KEY".to_owned(),
-                anthropic_version: "2023-06-01".to_owned(),
-                temperature: None,
-                max_output_tokens: None,
-                max_tool_rounds: 4,
-            },
-        )
-        .await
-        .expect("server initializes");
-        let services = server.chat_services(Some("chat_parent".to_owned()));
-
-        let output = services
-            .call_tool(
-                AGENT_RUN_TOOL_NAME,
-                json!({
-                    "agent_id": "ai_chat",
-                    "input": {"message": "from server chat"}
-                }),
-            )
-            .await
-            .expect("agent.run executes");
-
-        assert_eq!(output["result"]["agent_id"], "ai_chat");
-        let run_id = output["result"]["run_id"]
-            .as_str()
-            .expect("subagent run id");
-        assert!(
-            store
-                .join("traces")
-                .join(format!("{run_id}.trace.json"))
-                .exists()
-        );
-    }
-
-    #[tokio::test]
-    async fn server_catalog_tools_include_agent_run_for_list_surface() {
+    async fn server_catalog_tools_do_not_include_agent_run_for_list_surface() {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("utf8 store");
         let registry = Utf8PathBuf::from("../../examples/agents.yaml");
@@ -1116,11 +998,11 @@ mod tests {
         .expect("server initializes");
 
         assert!(
-            server
+            !server
                 .catalog
                 .tools
                 .iter()
-                .any(|tool| tool.name == AGENT_RUN_TOOL_NAME)
+                .any(|tool| tool.name == "agent.run")
         );
     }
 }

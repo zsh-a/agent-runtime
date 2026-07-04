@@ -32,8 +32,8 @@ pub use run::{
     WorkflowRunRequest, WorkflowRunResult,
 };
 pub use services::{
-    Agent, AgentContext, AgentServices, ArtifactPublishRequest, ToolContext, ToolRegistry,
-    TraceSink,
+    Agent, AgentContext, AgentServices, ArtifactPublishRequest, SubagentRequest, ToolContext,
+    ToolRegistry, TraceSink,
 };
 pub use session::{SessionRecord, StepKind, StepRecord, ThreadRecord};
 pub use stores::{
