@@ -435,7 +435,7 @@ mod tests {
                 "sources": [{
                     "id": "bounded-source",
                     "command": "sh",
-                    "args": ["-c", "printf '%s\\n' '{\"result\":{\"blob\":\"abcdefghijklmnopqrstuvwxyz\"}}'"],
+                    "args": ["-c", "read _; printf '%s\\n' '{\"result\":{\"blob\":\"abcdefghijklmnopqrstuvwxyz\"}}'"],
                     "max_output_bytes": 16,
                     "tools": [strict_tool_spec(Some(json!({"type": "object"})))]
                 }]
