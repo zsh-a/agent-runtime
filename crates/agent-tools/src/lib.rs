@@ -510,7 +510,7 @@ mod tests {
                     "command": "/bin/sh",
                     "args": [
                         "-c",
-                        "if [ -f marker ] && [ \"$VISIBLE\" = allowed ] && [ -z \"${HOME:-}\" ]; then printf '%s\\n' '{\"result\":{\"cwd_ok\":true,\"env_ok\":true,\"home_hidden\":true}}'; else printf '%s\\n' '{\"result\":{\"cwd_ok\":false,\"env_ok\":false,\"home_hidden\":false}}'; fi"
+                        "read _; if [ -f marker ] && [ \"$VISIBLE\" = allowed ] && [ -z \"${HOME:-}\" ]; then printf '%s\\n' '{\"result\":{\"cwd_ok\":true,\"env_ok\":true,\"home_hidden\":true}}'; else printf '%s\\n' '{\"result\":{\"cwd_ok\":false,\"env_ok\":false,\"home_hidden\":false}}'; fi"
                     ],
                     "cwd": workdir.to_str().expect("utf8 workdir"),
                     "inherit_env": false,
