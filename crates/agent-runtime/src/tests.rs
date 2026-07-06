@@ -7,13 +7,14 @@ use std::{
 };
 
 use agent_core::{
-    Agent, AgentContext, AgentError, AgentErrorKind, AgentErrorRecord, AgentEvent, AgentLockStore,
-    AgentRunRecord, AgentRunResult, AgentRunStatus, AgentRunStore, AgentServices, AgentSpec,
-    ArtifactKind, ArtifactPublishRequest, ArtifactRef, ArtifactStoreRef, HookEffect, HookEventName,
-    HookKind, HookSpec, PROTOCOL_VERSION, PolicyDecision, RedactionClassification, RunId, RunLease,
-    RunRequest, RunScope, ScheduleSpec, StoreError, SubagentRequest, ToolError,
-    WorkflowInputMapping, WorkflowInputTransform, WorkflowRunNode, WorkflowRunNodeCompensation,
-    WorkflowRunRequest,
+    Agent, AgentContext, AgentError, AgentErrorKind, AgentErrorRecord, AgentEvent,
+    AgentEventEmitter, AgentLockStore, AgentRunRecord, AgentRunResult, AgentRunStatus,
+    AgentRunStore, AgentSpec, AgentStateAccess, ArtifactKind, ArtifactPublishRequest,
+    ArtifactPublisher, ArtifactRef, ArtifactStoreRef, HookEffect, HookEventName, HookKind,
+    HookSpec, PROTOCOL_VERSION, PolicyDecision, ProposalCreator, RedactionClassification, RunId,
+    RunLease, RunRequest, RunScope, ScheduleSpec, StoreError, SubagentRequest, SubagentRunner,
+    ToolCaller, ToolError, WorkflowInputMapping, WorkflowInputTransform, WorkflowRunNode,
+    WorkflowRunNodeCompensation, WorkflowRunRequest,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -2360,15 +2361,21 @@ struct NoopServices {
 }
 
 #[async_trait]
-impl AgentServices for NoopServices {
+impl ToolCaller for NoopServices {
     async fn call_tool(&self, _name: &str, _input: Value) -> Result<Value, ToolError> {
         Ok(json!({}))
     }
+}
 
+#[async_trait]
+impl AgentEventEmitter for NoopServices {
     async fn emit_event(&self, _event: AgentEvent) -> Result<(), AgentError> {
         Ok(())
     }
+}
 
+#[async_trait]
+impl AgentStateAccess for NoopServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         self.state_store
             .load("echo", key)
@@ -2382,7 +2389,16 @@ impl AgentServices for NoopServices {
             .await
             .map_err(|e| AgentError::internal(e.to_string()))
     }
+}
 
+#[async_trait]
+impl ProposalCreator for NoopServices {}
+
+#[async_trait]
+impl SubagentRunner for NoopServices {}
+
+#[async_trait]
+impl ArtifactPublisher for NoopServices {
     async fn publish_artifact(
         &self,
         request: ArtifactPublishRequest,

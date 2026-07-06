@@ -3,6 +3,8 @@ use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
+use crate::cancellation::agent_cancellation;
+
 use super::{
     chat::{
         ChatApprovalDecision, TuiTaskHandle, resume_chat_approval, resume_chat_approval_with_emit,
@@ -365,7 +367,7 @@ async fn approve_slash_tool_with_updates(
     }
     let services = runtime.tool_services(None);
     let output = services
-        .call_tool_with_cancellation(&tool_name, input, cancellation)
+        .call_tool_with_cancellation(&tool_name, input, agent_cancellation(cancellation))
         .await
         .map_err(|err| miette!(err.record.message))?;
     let _ = sender.send(TuiUpdate::ToolMessage {

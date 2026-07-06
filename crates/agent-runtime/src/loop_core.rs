@@ -4,9 +4,12 @@ use agent_core::{
 };
 use serde_json::{Map, Value, json};
 
-pub struct RunLoop;
+pub struct EffectStepLoop;
 
-impl RunLoop {
+#[deprecated(note = "use EffectStepLoop; this type is a protocol stepper, not the executor loop")]
+pub type RunLoop = EffectStepLoop;
+
+impl EffectStepLoop {
     pub fn start_step(
         catalog: &AgentRuntimeCatalog,
         mut request: RunRequest,
@@ -174,15 +177,6 @@ impl RunEffectKind {
 enum RequestedEffect {
     Tool(RequestedToolEffect),
     Subagent(RequestedSubagentEffect),
-}
-
-impl RequestedEffect {
-    fn kind(&self) -> RunEffectKind {
-        match self {
-            Self::Tool(_) => RunEffectKind::Tool,
-            Self::Subagent(_) => RunEffectKind::Subagent,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1405,14 +1399,14 @@ mod tests {
             metadata: json!({}),
         };
 
-        let first = RunLoop::start_step(&catalog, request, "parent").expect("first step");
+        let first = EffectStepLoop::start_step(&catalog, request, "parent").expect("first step");
         assert_eq!(first["status"], "effect_requested");
         assert_eq!(first["effect"]["kind"], "tool");
         assert_eq!(first["effect"]["name"], "read_first");
         assert_eq!(first["run_state"]["remaining_effect_count"], 0);
         let id = first["effect"]["effect_id"].as_str().unwrap().to_owned();
 
-        let terminal = RunLoop::continue_step(
+        let terminal = EffectStepLoop::continue_step(
             &catalog,
             first,
             json!({"jsonrpc": "2.0", "id": id, "result": {"ok": true}}),
@@ -1450,14 +1444,14 @@ mod tests {
             metadata: json!({}),
         };
 
-        let first = RunLoop::start_step(&catalog, request, "parent").expect("first step");
+        let first = EffectStepLoop::start_step(&catalog, request, "parent").expect("first step");
         assert_eq!(first["status"], "effect_requested");
         assert_eq!(first["effect"]["kind"], "subagent");
         assert_eq!(first["effect"]["agent_id"], "child");
         assert_eq!(first["trace_event"]["subagent_id"], "child");
         let id = first["effect"]["effect_id"].as_str().unwrap().to_owned();
 
-        let terminal = RunLoop::continue_step(
+        let terminal = EffectStepLoop::continue_step(
             &catalog,
             first,
             json!({"jsonrpc": "2.0", "id": id, "result": {"result": {"status": "completed"}}}),

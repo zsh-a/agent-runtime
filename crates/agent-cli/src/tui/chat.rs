@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::chat::provider_from_options;
+use crate::{cancellation::agent_cancellation, chat::provider_from_options};
 
 use super::{
     chat_events::{is_cancelled_chat_event, updates_from_chat_event},
@@ -442,7 +442,11 @@ where
             call.name.clone(),
         )));
         match services
-            .call_tool_with_cancellation(&call.name, call.input.clone(), cancellation.clone())
+            .call_tool_with_cancellation(
+                &call.name,
+                call.input.clone(),
+                agent_cancellation(cancellation.clone()),
+            )
             .await
         {
             Ok(output) => results.push(ChatToolResult {

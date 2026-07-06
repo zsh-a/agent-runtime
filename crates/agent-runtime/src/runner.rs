@@ -23,6 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     InMemoryLockStore, RUNTIME_VERSION,
+    cancellation::agent_cancellation,
     hooks::HookManager,
     lock::{lock_key, workflow_lock_key},
     policy::ExecutionPolicy,
@@ -1188,7 +1189,7 @@ impl AgentRunner {
                 cancellation: cancellation.clone(),
                 workflow: request.workflow.clone(),
             }),
-            cancellation: cancellation.clone(),
+            cancellation: agent_cancellation(cancellation.clone()),
             trace: trace.clone(),
         };
         let run_future = agent.run(ctx);

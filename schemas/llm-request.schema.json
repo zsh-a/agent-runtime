@@ -19,7 +19,7 @@
             "type": "string",
             "enum": ["system", "user", "assistant", "tool"]
           },
-          "content": { "type": "string" },
+          "content": true,
           "name": { "type": "string" },
           "metadata": { "type": "object", "default": {} }
         },

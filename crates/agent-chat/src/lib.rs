@@ -29,7 +29,8 @@ mod tests {
     };
 
     use agent_core::{
-        AgentError, AgentEvent, AgentServices, ContextPolicy, PROTOCOL_VERSION, ToolError,
+        AgentError, AgentEvent, AgentEventEmitter, AgentStateAccess, ArtifactPublisher,
+        ContextPolicy, PROTOCOL_VERSION, ProposalCreator, SubagentRunner, ToolCaller, ToolError,
         TraceEvent,
     };
     use agent_llm::{
@@ -733,15 +734,21 @@ mod tests {
     struct TestServices;
 
     #[async_trait]
-    impl AgentServices for TestServices {
+    impl ToolCaller for TestServices {
         async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
             Ok(json!({"tool": name, "input": input}))
         }
+    }
 
+    #[async_trait]
+    impl AgentEventEmitter for TestServices {
         async fn emit_event(&self, _event: AgentEvent) -> Result<(), AgentError> {
             Ok(())
         }
+    }
 
+    #[async_trait]
+    impl AgentStateAccess for TestServices {
         async fn load_state(&self, _key: &str) -> Result<Option<Value>, AgentError> {
             Ok(None)
         }
@@ -750,6 +757,15 @@ mod tests {
             Ok(())
         }
     }
+
+    #[async_trait]
+    impl ProposalCreator for TestServices {}
+
+    #[async_trait]
+    impl SubagentRunner for TestServices {}
+
+    #[async_trait]
+    impl ArtifactPublisher for TestServices {}
 
     #[async_trait]
     impl agent_core::TraceSink for TestServices {

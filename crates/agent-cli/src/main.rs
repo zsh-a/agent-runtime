@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::Serialize;
 
+mod cancellation;
 mod catalog;
 mod chat;
 mod cli_input;

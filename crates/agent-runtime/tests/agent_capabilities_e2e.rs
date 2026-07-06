@@ -4,8 +4,9 @@ use std::{
 };
 
 use agent_core::{
-    Agent, AgentContext, AgentError, AgentEvent, AgentRunResult, AgentRunStatus, AgentServices,
-    AgentSpec, PROTOCOL_VERSION, RunRequest, ScheduleSpec, SubagentRequest, ToolError, TriggerKind,
+    Agent, AgentContext, AgentError, AgentEvent, AgentEventEmitter, AgentRunResult, AgentRunStatus,
+    AgentSpec, AgentStateAccess, ArtifactPublisher, PROTOCOL_VERSION, ProposalCreator, RunRequest,
+    ScheduleSpec, SubagentRequest, SubagentRunner, ToolCaller, ToolError, TriggerKind,
 };
 use agent_runtime::{AgentRunner, InMemoryAgentRegistry};
 use async_trait::async_trait;
@@ -307,7 +308,7 @@ impl RuntimeE2eServices {
 }
 
 #[async_trait]
-impl AgentServices for RuntimeE2eServices {
+impl ToolCaller for RuntimeE2eServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
         self.tool_calls
             .lock()
@@ -337,12 +338,18 @@ impl AgentServices for RuntimeE2eServices {
             }),
         }
     }
+}
 
+#[async_trait]
+impl AgentEventEmitter for RuntimeE2eServices {
     async fn emit_event(&self, event: AgentEvent) -> Result<(), AgentError> {
         self.events.lock().expect("events lock").push(event);
         Ok(())
     }
+}
 
+#[async_trait]
+impl AgentStateAccess for RuntimeE2eServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         Ok(self.state.lock().expect("state lock").get(key).cloned())
     }
@@ -355,6 +362,15 @@ impl AgentServices for RuntimeE2eServices {
         Ok(())
     }
 }
+
+#[async_trait]
+impl ProposalCreator for RuntimeE2eServices {}
+
+#[async_trait]
+impl SubagentRunner for RuntimeE2eServices {}
+
+#[async_trait]
+impl ArtifactPublisher for RuntimeE2eServices {}
 
 fn run_request(input: Value) -> RunRequest {
     RunRequest {

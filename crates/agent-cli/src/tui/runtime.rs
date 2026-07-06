@@ -1,19 +1,21 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentError, AgentRunStatus, AgentServices, AgentSpec, AgentTrace, PROTOCOL_VERSION, RunId,
-    RunRequest, ToolError, ToolSpec, WorkflowRunRequest, WorkflowRunResult,
+    AgentCancellation, AgentError, AgentEvent, AgentEventEmitter, AgentRunStatus, AgentServices,
+    AgentSpec, AgentStateAccess, AgentTrace, ArtifactPublisher, PROTOCOL_VERSION, ProposalCreator,
+    RunId, RunRequest, SubagentRunner, ToolCaller, ToolError, ToolSpec, WorkflowRunRequest,
+    WorkflowRunResult,
 };
 use agent_llm::LlmMessage;
 use agent_runtime::{AgentRunner, RunControl, RunOutcome};
 use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use async_trait::async_trait;
-use camino::Utf8PathBuf;
 use miette::{IntoDiagnostic, Result, miette};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    cancellation::agent_cancellation,
     config::{execution_policy, hook_manager},
     runtime_config::{RuntimeComposition, RuntimeSourceOptions, compose_runtime_sources},
     tools::CliServices,
@@ -276,17 +278,17 @@ struct TuiToolServices {
 }
 
 #[async_trait]
-impl AgentServices for TuiToolServices {
+impl ToolCaller for TuiToolServices {
     async fn call_tool(&self, name: &str, input: Value) -> std::result::Result<Value, ToolError> {
-        self.call_tool_with_cancellation(name, input, self.runtime.cancellation.clone())
-            .await
+        let cancellation = agent_cancellation(self.runtime.cancellation.clone());
+        ToolCaller::call_tool_with_cancellation(self, name, input, cancellation).await
     }
 
     async fn call_tool_with_cancellation(
         &self,
         name: &str,
         input: Value,
-        cancellation: CancellationToken,
+        cancellation: AgentCancellation,
     ) -> std::result::Result<Value, ToolError> {
         let decision = self.runtime.policy.evaluate(
             self.runtime
@@ -309,32 +311,44 @@ impl AgentServices for TuiToolServices {
             _ = cancellation.cancelled() => {
                 Err(ToolError::cancelled(format!("tool '{name}' cancelled")))
             }
-            result = self.runtime.services.call_tool(name, input) => result,
+            result = ToolCaller::call_tool(self.runtime.services.as_ref(), name, input) => result,
         }
     }
+}
 
-    async fn emit_event(
-        &self,
-        event: agent_core::AgentEvent,
-    ) -> std::result::Result<(), AgentError> {
-        self.runtime.services.emit_event(event).await
+#[async_trait]
+impl AgentEventEmitter for TuiToolServices {
+    async fn emit_event(&self, event: AgentEvent) -> std::result::Result<(), AgentError> {
+        AgentEventEmitter::emit_event(self.runtime.services.as_ref(), event).await
     }
+}
 
+#[async_trait]
+impl AgentStateAccess for TuiToolServices {
     async fn load_state(&self, key: &str) -> std::result::Result<Option<Value>, AgentError> {
-        self.runtime.services.load_state(key).await
+        AgentStateAccess::load_state(self.runtime.services.as_ref(), key).await
     }
 
     async fn save_state(&self, key: &str, value: Value) -> std::result::Result<(), AgentError> {
-        self.runtime.services.save_state(key, value).await
+        AgentStateAccess::save_state(self.runtime.services.as_ref(), key, value).await
     }
+}
 
+#[async_trait]
+impl ProposalCreator for TuiToolServices {
     async fn create_proposal(
         &self,
         proposal: agent_core::ProposalEnvelope,
     ) -> std::result::Result<(), AgentError> {
-        self.runtime.services.create_proposal(proposal).await
+        ProposalCreator::create_proposal(self.runtime.services.as_ref(), proposal).await
     }
 }
+
+#[async_trait]
+impl SubagentRunner for TuiToolServices {}
+
+#[async_trait]
+impl ArtifactPublisher for TuiToolServices {}
 
 #[cfg(test)]
 mod tests {
@@ -343,6 +357,7 @@ mod tests {
     use crate::tui::test_support::{catalog_options, test_options};
     use crate::tui::tool_inventory::load_tui_tool_inventory;
     use agent_core::{AgentRunStatus, ToolRisk};
+    use camino::Utf8PathBuf;
 
     #[tokio::test]
     async fn chat_tools_exclude_agent_run() {

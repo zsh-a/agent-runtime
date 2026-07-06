@@ -1,3 +1,4 @@
+mod cancellation;
 mod hooks;
 mod lock;
 mod loop_core;
@@ -12,7 +13,9 @@ mod trace;
 
 pub use hooks::{FnHook, HookInvocation, HookManager, HookRegistration};
 pub use lock::InMemoryLockStore;
-pub use loop_core::{RunEffectKind, RunLoop};
+#[allow(deprecated)]
+pub use loop_core::RunLoop;
+pub use loop_core::{EffectStepLoop, RunEffectKind};
 pub use policy::ExecutionPolicy;
 pub use recovery::{RecoveredRun, RecoveryReport, recover_stale_runs};
 pub use registry::InMemoryAgentRegistry;

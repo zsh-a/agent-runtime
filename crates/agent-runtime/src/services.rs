@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentError, AgentEvent, AgentServices, AgentStateStore, ArtifactPublishRequest, HookEventName,
-    ProposalEnvelope, RunId, RunScope, RunWorkflow, SubagentRequest, ToolContext, ToolError,
-    ToolRegistry, TraceEvent, TraceSink, UserContext,
+    AgentCancellation, AgentError, AgentEvent, AgentEventEmitter, AgentServices, AgentStateAccess,
+    AgentStateStore, ArtifactPublishRequest, ArtifactPublisher, HookEventName, ProposalCreator,
+    ProposalEnvelope, RunId, RunScope, RunWorkflow, SubagentRequest, SubagentRunner, ToolCaller,
+    ToolContext, ToolError, ToolRegistry, TraceEvent, TraceSink, UserContext,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -52,7 +53,7 @@ impl BasicAgentServices {
 }
 
 #[async_trait]
-impl AgentServices for BasicAgentServices {
+impl ToolCaller for BasicAgentServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
         self.tools
             .call(
@@ -66,11 +67,17 @@ impl AgentServices for BasicAgentServices {
             )
             .await
     }
+}
 
+#[async_trait]
+impl AgentEventEmitter for BasicAgentServices {
     async fn emit_event(&self, _event: AgentEvent) -> Result<(), AgentError> {
         Ok(())
     }
+}
 
+#[async_trait]
+impl AgentStateAccess for BasicAgentServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         self.state_store
             .load(&self.agent_id, key)
@@ -87,7 +94,16 @@ impl AgentServices for BasicAgentServices {
 }
 
 #[async_trait]
-impl AgentServices for TracedAgentServices {
+impl SubagentRunner for BasicAgentServices {}
+
+#[async_trait]
+impl ProposalCreator for BasicAgentServices {}
+
+#[async_trait]
+impl ArtifactPublisher for BasicAgentServices {}
+
+#[async_trait]
+impl ToolCaller for TracedAgentServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
         let started_at = std::time::Instant::now();
         let input_hash = state_value_hash(&input);
@@ -248,7 +264,7 @@ impl AgentServices for TracedAgentServices {
         &self,
         name: &str,
         input: Value,
-        cancellation: CancellationToken,
+        cancellation: AgentCancellation,
     ) -> Result<Value, ToolError> {
         tokio::select! {
             _ = cancellation.cancelled() => {
@@ -257,16 +273,22 @@ impl AgentServices for TracedAgentServices {
             result = self.call_tool(name, input) => result,
         }
     }
+}
 
+#[async_trait]
+impl SubagentRunner for TracedAgentServices {
     async fn run_subagent(&self, request: SubagentRequest) -> Result<Value, ToolError> {
-        self.run_subagent_with_cancellation(request, self.cancellation.clone())
-            .await
+        self.run_subagent_with_cancellation(
+            request,
+            crate::cancellation::agent_cancellation(self.cancellation.clone()),
+        )
+        .await
     }
 
     async fn run_subagent_with_cancellation(
         &self,
         request: SubagentRequest,
-        cancellation: CancellationToken,
+        cancellation: AgentCancellation,
     ) -> Result<Value, ToolError> {
         let Some(runner) = &self.subagent_runner else {
             return Err(ToolError::policy_denied(
@@ -285,13 +307,16 @@ impl AgentServices for TracedAgentServices {
                 metadata: json!({}),
                 trace: Some(self.trace.clone()),
                 hooks: self.hooks.clone(),
-                cancellation,
+                cancellation: bridge_cancellation_to_tokio(self.cancellation.clone(), cancellation),
                 workflow: self.workflow.clone(),
             },
         )
         .await
     }
+}
 
+#[async_trait]
+impl AgentEventEmitter for TracedAgentServices {
     async fn emit_event(&self, event: AgentEvent) -> Result<(), AgentError> {
         debug!(
             run_id = %self.run_id.0,
@@ -312,7 +337,10 @@ impl AgentServices for TracedAgentServices {
             .await?;
         self.inner.emit_event(event).await
     }
+}
 
+#[async_trait]
+impl AgentStateAccess for TracedAgentServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         let started_at = std::time::Instant::now();
         match self.inner.load_state(key).await {
@@ -465,7 +493,10 @@ impl AgentServices for TracedAgentServices {
             }
         }
     }
+}
 
+#[async_trait]
+impl ProposalCreator for TracedAgentServices {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), AgentError> {
         let started_at = std::time::Instant::now();
         let policy_input = json!({
@@ -572,7 +603,10 @@ impl AgentServices for TracedAgentServices {
             }
         }
     }
+}
 
+#[async_trait]
+impl ArtifactPublisher for TracedAgentServices {
     async fn publish_artifact(
         &self,
         request: ArtifactPublishRequest,
@@ -593,6 +627,23 @@ impl AgentServices for TracedAgentServices {
             .await?;
         Ok(artifact)
     }
+}
+
+fn bridge_cancellation_to_tokio(
+    parent: CancellationToken,
+    cancellation: AgentCancellation,
+) -> CancellationToken {
+    if cancellation.is_cancelled() {
+        parent.cancel();
+        return parent;
+    }
+    let child = parent.child_token();
+    let child_for_task = child.clone();
+    tokio::spawn(async move {
+        cancellation.cancelled().await;
+        child_for_task.cancel();
+    });
+    child
 }
 
 fn state_value_hash(value: &Value) -> String {

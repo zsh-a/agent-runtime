@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
+use futures::{future::Either, pin_mut};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     AgentError, AgentEvent, AgentRunResult, AgentSpec, ArtifactKind, ArtifactRef, ProposalEnvelope,
@@ -54,6 +54,54 @@ pub struct SubagentRequest {
     pub metadata: Value,
 }
 
+pub type CancellationFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+pub trait CancellationSignal: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+    fn cancelled(&self) -> CancellationFuture<'_>;
+}
+
+#[derive(Clone)]
+pub struct AgentCancellation {
+    inner: Arc<dyn CancellationSignal>,
+}
+
+impl AgentCancellation {
+    pub fn new(inner: Arc<dyn CancellationSignal>) -> Self {
+        Self { inner }
+    }
+
+    pub fn none() -> Self {
+        Self::new(Arc::new(NoopCancellation))
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
+    }
+
+    pub fn cancelled(&self) -> CancellationFuture<'_> {
+        self.inner.cancelled()
+    }
+}
+
+impl Default for AgentCancellation {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+struct NoopCancellation;
+
+impl CancellationSignal for NoopCancellation {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn cancelled(&self) -> CancellationFuture<'_> {
+        Box::pin(std::future::pending())
+    }
+}
+
 #[derive(Clone)]
 pub struct AgentContext {
     pub run_id: RunId,
@@ -62,7 +110,7 @@ pub struct AgentContext {
     pub scope: RunScope,
     pub input: Value,
     pub services: Arc<dyn AgentServices>,
-    pub cancellation: CancellationToken,
+    pub cancellation: AgentCancellation,
     pub trace: Arc<dyn TraceSink>,
 }
 
@@ -73,22 +121,31 @@ pub trait Agent: Send + Sync {
 }
 
 #[async_trait]
-pub trait AgentServices: Send + Sync {
+pub trait ToolCaller: Send + Sync {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError>;
+
     async fn call_tool_with_cancellation(
         &self,
         name: &str,
         input: Value,
-        cancellation: CancellationToken,
+        cancellation: AgentCancellation,
     ) -> Result<Value, ToolError> {
-        tokio::select! {
-            _ = cancellation.cancelled() => {
-                Err(ToolError::cancelled(format!("tool '{name}' cancelled")))
-            }
-            result = self.call_tool(name, input) => result,
+        let tool_name = name.to_owned();
+        let cancelled = cancellation.cancelled();
+        let tool_call = self.call_tool(name, input);
+        pin_mut!(cancelled);
+        pin_mut!(tool_call);
+        match futures::future::select(cancelled, tool_call).await {
+            Either::Left(((), _)) => Err(ToolError::cancelled(format!(
+                "tool '{tool_name}' cancelled"
+            ))),
+            Either::Right((result, _)) => result,
         }
     }
+}
 
+#[async_trait]
+pub trait SubagentRunner: Send + Sync {
     async fn run_subagent(&self, request: SubagentRequest) -> Result<Value, ToolError> {
         let _ = request;
         Err(ToolError::policy_denied(
@@ -100,26 +157,45 @@ pub trait AgentServices: Send + Sync {
     async fn run_subagent_with_cancellation(
         &self,
         request: SubagentRequest,
-        cancellation: CancellationToken,
+        cancellation: AgentCancellation,
     ) -> Result<Value, ToolError> {
         let agent_id = request.agent_id.clone();
-        tokio::select! {
-            _ = cancellation.cancelled() => {
-                Err(ToolError::cancelled(format!("subagent '{agent_id}' cancelled")))
-            }
-            result = self.run_subagent(request) => result,
+        let cancelled = cancellation.cancelled();
+        let subagent_run = self.run_subagent(request);
+        pin_mut!(cancelled);
+        pin_mut!(subagent_run);
+        match futures::future::select(cancelled, subagent_run).await {
+            Either::Left(((), _)) => Err(ToolError::cancelled(format!(
+                "subagent '{agent_id}' cancelled"
+            ))),
+            Either::Right((result, _)) => result,
         }
     }
+}
 
+#[async_trait]
+pub trait AgentEventEmitter: Send + Sync {
     async fn emit_event(&self, event: AgentEvent) -> Result<(), AgentError>;
+}
+
+#[async_trait]
+pub trait AgentStateAccess: Send + Sync {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError>;
     async fn save_state(&self, key: &str, value: Value) -> Result<(), AgentError>;
+}
+
+#[async_trait]
+pub trait ProposalCreator: Send + Sync {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), AgentError> {
         let _ = proposal;
         Err(AgentError::validation(
             "proposal creation is not supported by this AgentServices implementation",
         ))
     }
+}
+
+#[async_trait]
+pub trait ArtifactPublisher: Send + Sync {
     async fn publish_artifact(
         &self,
         request: ArtifactPublishRequest,
@@ -129,6 +205,26 @@ pub trait AgentServices: Send + Sync {
             "artifact publishing is not supported by this AgentServices implementation",
         ))
     }
+}
+
+pub trait AgentServices:
+    ToolCaller
+    + SubagentRunner
+    + AgentEventEmitter
+    + AgentStateAccess
+    + ProposalCreator
+    + ArtifactPublisher
+{
+}
+
+impl<T> AgentServices for T where
+    T: ToolCaller
+        + SubagentRunner
+        + AgentEventEmitter
+        + AgentStateAccess
+        + ProposalCreator
+        + ArtifactPublisher
+{
 }
 
 #[async_trait]

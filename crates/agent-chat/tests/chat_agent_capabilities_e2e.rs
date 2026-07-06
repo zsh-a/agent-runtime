@@ -6,11 +6,10 @@ use std::{
     },
 };
 
-use agent_chat::{
-    ChatToolExecution, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner,
-};
+use agent_chat::{ChatToolExecution, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner};
 use agent_core::{
-    AgentError, AgentEvent, AgentServices, PROTOCOL_VERSION, ToolError, ToolRisk, ToolSpec,
+    AgentError, AgentEvent, AgentEventEmitter, AgentStateAccess, ArtifactPublisher,
+    PROTOCOL_VERSION, ProposalCreator, SubagentRunner, ToolCaller, ToolError, ToolRisk, ToolSpec,
 };
 use agent_llm::{
     LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmProvider, LlmRequest,
@@ -225,7 +224,7 @@ impl ChatCapabilityServices {
 }
 
 #[async_trait]
-impl AgentServices for ChatCapabilityServices {
+impl ToolCaller for ChatCapabilityServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
         self.tool_calls
             .lock()
@@ -269,11 +268,17 @@ impl AgentServices for ChatCapabilityServices {
             other => Err(tool_error(format!("unknown tool '{other}'"))),
         }
     }
+}
 
+#[async_trait]
+impl AgentEventEmitter for ChatCapabilityServices {
     async fn emit_event(&self, _event: AgentEvent) -> Result<(), AgentError> {
         Ok(())
     }
+}
 
+#[async_trait]
+impl AgentStateAccess for ChatCapabilityServices {
     async fn load_state(&self, _key: &str) -> Result<Option<Value>, AgentError> {
         Ok(None)
     }
@@ -282,6 +287,15 @@ impl AgentServices for ChatCapabilityServices {
         Ok(())
     }
 }
+
+#[async_trait]
+impl ProposalCreator for ChatCapabilityServices {}
+
+#[async_trait]
+impl SubagentRunner for ChatCapabilityServices {}
+
+#[async_trait]
+impl ArtifactPublisher for ChatCapabilityServices {}
 
 fn capability_tools() -> Vec<ToolSpec> {
     vec![

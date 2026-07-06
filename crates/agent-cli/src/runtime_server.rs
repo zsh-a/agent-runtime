@@ -2,12 +2,13 @@ use std::{collections::HashMap, sync::Arc};
 
 use agent_chat::{ChatEventStream, ChatResumeRequest, ChatTurnRequest, ChatTurnRunner};
 use agent_core::{
-    AgentError, AgentProposalStore, AgentRunRecord, AgentRunResult, AgentRunStatus, AgentRunStore,
-    AgentRuntimeCatalog, AgentServices, AgentSessionStore, AgentTrace, ApprovalLevel,
-    ContextPolicy, PROTOCOL_VERSION, ProposalDiff, ProposalEnvelope, ProposalId, ProposalWarning,
-    RunId, RunRequest, RunScope, RunWorkflow, SessionId, SessionRecord, ThreadId, ThreadRecord,
-    ToolError, TraceEvent, TriggerEnvelope, TriggerKind, UserContext, WorkflowRunRequest,
-    WorkflowRunResult,
+    AgentCancellation, AgentError, AgentEvent, AgentEventEmitter, AgentProposalStore,
+    AgentRunRecord, AgentRunResult, AgentRunStatus, AgentRunStore, AgentRuntimeCatalog,
+    AgentServices, AgentSessionStore, AgentStateAccess, ApprovalLevel, ArtifactPublisher,
+    ContextPolicy, PROTOCOL_VERSION, ProposalCreator, ProposalDiff, ProposalEnvelope, ProposalId,
+    ProposalWarning, RunId, RunRequest, RunScope, RunWorkflow, SessionId, SessionRecord,
+    SubagentRunner, ThreadId, ThreadRecord, ToolCaller, ToolError, TraceEvent, TriggerEnvelope,
+    TriggerKind, UserContext, WorkflowRunRequest, WorkflowRunResult,
 };
 use agent_runtime::{AgentRunner, HookManager, RunControl};
 use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileSessionStore};
@@ -874,45 +875,55 @@ struct RuntimeServerChatServices {
 }
 
 #[async_trait]
-impl AgentServices for RuntimeServerChatServices {
+impl ToolCaller for RuntimeServerChatServices {
     async fn call_tool(&self, name: &str, input: Value) -> std::result::Result<Value, ToolError> {
-        self.call_tool_with_cancellation(name, input, CancellationToken::new())
-            .await
+        ToolCaller::call_tool(self.inner.as_ref(), name, input).await
     }
 
     async fn call_tool_with_cancellation(
         &self,
         name: &str,
         input: Value,
-        cancellation: CancellationToken,
+        cancellation: AgentCancellation,
     ) -> std::result::Result<Value, ToolError> {
-        self.inner
-            .call_tool_with_cancellation(name, input, cancellation)
+        ToolCaller::call_tool_with_cancellation(self.inner.as_ref(), name, input, cancellation)
             .await
     }
+}
 
-    async fn emit_event(
-        &self,
-        event: agent_core::AgentEvent,
-    ) -> std::result::Result<(), AgentError> {
-        self.inner.emit_event(event).await
+#[async_trait]
+impl AgentEventEmitter for RuntimeServerChatServices {
+    async fn emit_event(&self, event: AgentEvent) -> std::result::Result<(), AgentError> {
+        AgentEventEmitter::emit_event(self.inner.as_ref(), event).await
     }
+}
 
+#[async_trait]
+impl AgentStateAccess for RuntimeServerChatServices {
     async fn load_state(&self, key: &str) -> std::result::Result<Option<Value>, AgentError> {
-        self.inner.load_state(key).await
+        AgentStateAccess::load_state(self.inner.as_ref(), key).await
     }
 
     async fn save_state(&self, key: &str, value: Value) -> std::result::Result<(), AgentError> {
-        self.inner.save_state(key, value).await
+        AgentStateAccess::save_state(self.inner.as_ref(), key, value).await
     }
+}
 
+#[async_trait]
+impl ProposalCreator for RuntimeServerChatServices {
     async fn create_proposal(
         &self,
         proposal: ProposalEnvelope,
     ) -> std::result::Result<(), AgentError> {
-        self.inner.create_proposal(proposal).await
+        ProposalCreator::create_proposal(self.inner.as_ref(), proposal).await
     }
 }
+
+#[async_trait]
+impl SubagentRunner for RuntimeServerChatServices {}
+
+#[async_trait]
+impl ArtifactPublisher for RuntimeServerChatServices {}
 
 fn serialized_value_len(value: &Value) -> usize {
     serde_json::to_vec(value)

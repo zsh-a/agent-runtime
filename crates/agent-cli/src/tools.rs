@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentError, AgentProposalStore, AgentServices, AgentStateStore, ProposalEnvelope, ToolError,
+    AgentError, AgentEvent, AgentEventEmitter, AgentProposalStore, AgentStateAccess,
+    AgentStateStore, ArtifactPublisher, ProposalCreator, ProposalEnvelope, SubagentRunner,
+    ToolCaller, ToolError,
 };
 use agent_store::{FileProposalStore, InMemoryStateStore};
 use async_trait::async_trait;
@@ -56,18 +58,21 @@ impl CliServices {
 }
 
 #[async_trait]
-impl AgentServices for CliServices {
+impl ToolCaller for CliServices {
     async fn call_tool(&self, name: &str, input: Value) -> std::result::Result<Value, ToolError> {
         self.tools.call_tool(name, input).await
     }
+}
 
-    async fn emit_event(
-        &self,
-        _event: agent_core::AgentEvent,
-    ) -> std::result::Result<(), AgentError> {
+#[async_trait]
+impl AgentEventEmitter for CliServices {
+    async fn emit_event(&self, _event: AgentEvent) -> std::result::Result<(), AgentError> {
         Ok(())
     }
+}
 
+#[async_trait]
+impl AgentStateAccess for CliServices {
     async fn load_state(&self, key: &str) -> std::result::Result<Option<Value>, AgentError> {
         self.state
             .load("cli", key)
@@ -81,7 +86,10 @@ impl AgentServices for CliServices {
             .await
             .map_err(|e| AgentError::internal(e.to_string()))
     }
+}
 
+#[async_trait]
+impl ProposalCreator for CliServices {
     async fn create_proposal(
         &self,
         proposal: ProposalEnvelope,
@@ -97,3 +105,9 @@ impl AgentServices for CliServices {
             .map_err(|e| AgentError::internal(e.to_string()))
     }
 }
+
+#[async_trait]
+impl SubagentRunner for CliServices {}
+
+#[async_trait]
+impl ArtifactPublisher for CliServices {}

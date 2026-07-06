@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agent_core::AgentServices;
+use agent_core::{AgentCancellation, AgentServices, CancellationFuture, CancellationSignal};
 use agent_llm::{LlmEventKind, LlmProvider, LlmResponse};
 use futures::stream;
 use serde_json::json;
@@ -460,7 +460,7 @@ async fn run_chat_state(
                 .call_tool_with_cancellation(
                     &tool_call.name,
                     tool_call.input.clone(),
-                    cancellation.clone(),
+                    agent_cancellation(cancellation.clone()),
                 )
                 .await
             {
@@ -577,6 +577,24 @@ fn non_empty(value: Option<String>) -> Option<String> {
             Some(trimmed.to_owned())
         }
     })
+}
+
+fn agent_cancellation(token: CancellationToken) -> AgentCancellation {
+    AgentCancellation::new(Arc::new(TokioCancellation { token }))
+}
+
+struct TokioCancellation {
+    token: CancellationToken,
+}
+
+impl CancellationSignal for TokioCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    fn cancelled(&self) -> CancellationFuture<'_> {
+        Box::pin(self.token.cancelled())
+    }
 }
 
 async fn send_round_finished(

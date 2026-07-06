@@ -12,7 +12,8 @@
     "risk": {
       "type": "string",
       "enum": ["read_only", "low", "medium", "high"]
-    }
+    },
+    "metadata": { "type": "object", "default": {} }
   },
   "additionalProperties": false
 }
