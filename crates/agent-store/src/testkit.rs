@@ -4,9 +4,10 @@ use std::{
 };
 
 use agent_core::{
-    AgentLockStore, AgentProposalStore, AgentRunRecord, AgentRunStatus, AgentRunStore,
-    AgentSessionStore, AgentStateStore, PROTOCOL_VERSION, ProposalEnvelope, ProposalId,
-    ProposalStatus, RunId, RunScope, SessionRecord, StepRecord, ThreadRecord,
+    AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunStatus,
+    AgentRunStore, AgentSessionStore, AgentStateStore, PROTOCOL_VERSION, ProposalEnvelope,
+    ProposalId, ProposalStatus, RunId, RunScope, SessionRecord, StepRecord, ThreadRecord,
+    TraceEvent,
 };
 use serde_json::json;
 use time::OffsetDateTime;
@@ -99,6 +100,83 @@ pub async fn assert_run_store_conformance(store: &dyn AgentRunStore) {
         .expect("run exists");
     assert_eq!(fetched.status, AgentRunStatus::Failed);
     assert_eq!(fetched.output, json!({"updated": true}));
+}
+
+/// Assert the shared behavior expected from an `AgentRunEventStore`
+/// implementation.
+pub async fn assert_run_event_store_conformance(store: &dyn AgentRunEventStore) {
+    let prefix = unique_prefix("run_events");
+    let run_id = RunId(id(&prefix, "run"));
+
+    assert!(
+        store
+            .list_run_events_after(&run_id, 0)
+            .await
+            .expect("missing event log checks")
+            .is_none()
+    );
+
+    store
+        .append_run_event(&run_id, TraceEvent::new("run_started", json!({"idx": 1})))
+        .await
+        .expect("first event appended");
+    store
+        .append_run_event(
+            &run_id,
+            TraceEvent::new("tool_call_finished", json!({"idx": 2})),
+        )
+        .await
+        .expect("second event appended");
+    let appended = store
+        .list_run_events_after(&run_id, 0)
+        .await
+        .expect("appended events read")
+        .expect("event log exists");
+    assert_eq!(appended.len(), 2);
+    assert_eq!(appended[0].cursor, 1);
+    assert_eq!(appended[0].event.kind, "run_started");
+    assert_eq!(appended[1].cursor, 2);
+    assert_eq!(appended[1].event.kind, "tool_call_finished");
+
+    let after_first = store
+        .list_run_events_after(&run_id, 1)
+        .await
+        .expect("events after cursor read")
+        .expect("event log exists");
+    assert_eq!(after_first.len(), 1);
+    assert_eq!(after_first[0].cursor, 2);
+
+    store
+        .replace_run_events(
+            &run_id,
+            vec![
+                TraceEvent::new("run_started", json!({"replacement": true})),
+                TraceEvent::new("run_finished", json!({"status": "completed"})),
+            ],
+        )
+        .await
+        .expect("events replaced");
+    let replaced = store
+        .list_run_events_after(&run_id, 0)
+        .await
+        .expect("replaced events read")
+        .expect("event log exists");
+    assert_eq!(replaced.len(), 2);
+    assert_eq!(replaced[0].cursor, 1);
+    assert_eq!(replaced[0].event.payload["replacement"], true);
+    assert_eq!(replaced[1].cursor, 2);
+    assert_eq!(replaced[1].event.kind, "run_finished");
+
+    store
+        .replace_run_events(&run_id, Vec::new())
+        .await
+        .expect("events replaced with empty log");
+    let empty = store
+        .list_run_events_after(&run_id, 0)
+        .await
+        .expect("empty event log reads")
+        .expect("event log marker exists");
+    assert!(empty.is_empty());
 }
 
 /// Assert the shared behavior expected from an `AgentProposalStore`

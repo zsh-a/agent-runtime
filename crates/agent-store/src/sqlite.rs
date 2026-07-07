@@ -1,14 +1,15 @@
 use std::time::Duration;
 
 use agent_core::{
-    AgentLockStore, AgentProposalStore, AgentRunRecord, AgentRunStore, AgentSessionStore,
-    AgentStateStore, ProposalEnvelope, ProposalId, RunId, RunLease, RunScope, SessionId,
-    SessionRecord, StepRecord, StoreError, ThreadId, ThreadRecord,
+    AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunStore,
+    AgentSessionStore, AgentStateStore, ProposalEnvelope, ProposalId, RunEventCursor,
+    RunEventRecord, RunId, RunLease, RunScope, SessionId, SessionRecord, StepRecord, StoreError,
+    ThreadId, ThreadRecord, TraceEvent,
 };
 use async_trait::async_trait;
 use camino::Utf8Path;
 use sqlx::{
-    Row, SqlitePool,
+    Row, Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use time::OffsetDateTime;
@@ -112,11 +113,36 @@ const CURRENT_SCHEMA_STATEMENTS: &[&str] = &[
     "#,
 ];
 
-const SQLITE_MIGRATIONS: &[SqliteMigration] = &[SqliteMigration {
-    version: 2,
-    name: "current_schema",
-    statements: CURRENT_SCHEMA_STATEMENTS,
-}];
+const SQLITE_MIGRATIONS: &[SqliteMigration] = &[
+    SqliteMigration {
+        version: 2,
+        name: "current_schema",
+        statements: CURRENT_SCHEMA_STATEMENTS,
+    },
+    SqliteMigration {
+        version: 3,
+        name: "run_event_logs",
+        statements: &[
+            r#"
+        CREATE TABLE IF NOT EXISTS agent_run_event_logs (
+            run_id TEXT PRIMARY KEY NOT NULL
+        )
+        "#,
+            r#"
+        CREATE TABLE IF NOT EXISTS agent_run_events (
+            run_id TEXT NOT NULL,
+            cursor INTEGER NOT NULL,
+            event_json TEXT NOT NULL,
+            PRIMARY KEY(run_id, cursor)
+        )
+        "#,
+            r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_run_events_run_cursor
+        ON agent_run_events(run_id, cursor ASC)
+        "#,
+        ],
+    },
+];
 
 const SCHEMA_VERSION: i64 = SQLITE_MIGRATIONS[SQLITE_MIGRATIONS.len() - 1].version;
 
@@ -268,6 +294,105 @@ impl AgentStateStore for SqliteStore {
         .await
         .map_err(map_sqlx_err)?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl AgentRunEventStore for SqliteStore {
+    async fn append_run_event(&self, run_id: &RunId, event: TraceEvent) -> Result<(), StoreError> {
+        let event_json = encode_record(&event)?;
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx_err)?;
+        touch_run_event_log(&mut transaction, run_id)
+            .await
+            .map_err(map_sqlx_err)?;
+        sqlx::query(
+            r#"
+            INSERT INTO agent_run_events(run_id, cursor, event_json)
+            SELECT ?, COALESCE(MAX(cursor), 0) + 1, ?
+            FROM agent_run_events
+            WHERE run_id = ?
+            "#,
+        )
+        .bind(&run_id.0)
+        .bind(event_json)
+        .bind(&run_id.0)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_sqlx_err)?;
+        transaction.commit().await.map_err(map_sqlx_err)?;
+        Ok(())
+    }
+
+    async fn replace_run_events(
+        &self,
+        run_id: &RunId,
+        events: Vec<TraceEvent>,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await.map_err(map_sqlx_err)?;
+        touch_run_event_log(&mut transaction, run_id)
+            .await
+            .map_err(map_sqlx_err)?;
+        sqlx::query("DELETE FROM agent_run_events WHERE run_id = ?")
+            .bind(&run_id.0)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_err)?;
+        for (index, event) in events.into_iter().enumerate() {
+            let cursor = checked_cursor_index(index.saturating_add(1))?;
+            let event_json = encode_record(&event)?;
+            sqlx::query(
+                r#"
+                INSERT INTO agent_run_events(run_id, cursor, event_json)
+                VALUES (?, ?, ?)
+                "#,
+            )
+            .bind(&run_id.0)
+            .bind(cursor)
+            .bind(event_json)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_sqlx_err)?;
+        }
+        transaction.commit().await.map_err(map_sqlx_err)?;
+        Ok(())
+    }
+
+    async fn list_run_events_after(
+        &self,
+        run_id: &RunId,
+        after: RunEventCursor,
+    ) -> Result<Option<Vec<RunEventRecord>>, StoreError> {
+        let exists = sqlx::query("SELECT 1 FROM agent_run_event_logs WHERE run_id = ?")
+            .bind(&run_id.0)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?
+            .is_some();
+        if !exists {
+            return Ok(None);
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT cursor, event_json
+            FROM agent_run_events
+            WHERE run_id = ? AND cursor > ?
+            ORDER BY cursor ASC
+            "#,
+        )
+        .bind(&run_id.0)
+        .bind(checked_cursor(after)?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(RunEventRecord {
+                    cursor: decode_cursor(row.get::<i64, _>("cursor"))?,
+                    event: decode_record(row.get::<String, _>("event_json"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()
+            .map(Some)
     }
 }
 
@@ -673,6 +798,17 @@ async fn upsert_proposal(pool: &SqlitePool, proposal: ProposalEnvelope) -> Resul
     Ok(())
 }
 
+async fn touch_run_event_log(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run_id: &RunId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT OR IGNORE INTO agent_run_event_logs(run_id) VALUES (?)")
+        .bind(&run_id.0)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
 fn encode_scope(scope: &RunScope) -> (&'static str, &str) {
     match scope {
         RunScope::Global => ("global", ""),
@@ -720,6 +856,24 @@ fn checked_limit(limit: usize) -> Result<i64, StoreError> {
     limit
         .try_into()
         .map_err(|_| StoreError::new("run list limit exceeds SQLite integer range"))
+}
+
+fn checked_cursor(cursor: RunEventCursor) -> Result<i64, StoreError> {
+    cursor
+        .try_into()
+        .map_err(|_| StoreError::new("run event cursor exceeds SQLite integer range"))
+}
+
+fn checked_cursor_index(cursor: usize) -> Result<i64, StoreError> {
+    cursor
+        .try_into()
+        .map_err(|_| StoreError::new("run event cursor exceeds SQLite integer range"))
+}
+
+fn decode_cursor(cursor: i64) -> Result<RunEventCursor, StoreError> {
+    cursor
+        .try_into()
+        .map_err(|_| StoreError::new("stored run event cursor is negative"))
 }
 
 fn lease_duration(ttl: Duration) -> time::Duration {

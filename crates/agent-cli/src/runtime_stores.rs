@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentLockStore, AgentProposalStore, AgentRunStore, AgentSessionStore, AgentStateStore,
+    AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunStore, AgentSessionStore,
+    AgentStateStore,
 };
 use agent_store::{
-    FileLockStore, FileProposalStore, FileRunStore, FileSessionStore, InMemoryStateStore,
-    SqliteStore,
+    FileLockStore, FileProposalStore, FileRunEventStore, FileRunStore, FileSessionStore,
+    InMemoryStateStore, SqliteStore,
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result};
@@ -16,6 +17,7 @@ use crate::config::RuntimeStoreBackend;
 pub(crate) struct RuntimeStores {
     pub(crate) artifact_store_path: Utf8PathBuf,
     pub(crate) run_store: Arc<dyn AgentRunStore>,
+    pub(crate) event_store: Arc<dyn AgentRunEventStore>,
     pub(crate) proposal_store: Arc<dyn AgentProposalStore>,
     pub(crate) session_store: Arc<dyn AgentSessionStore>,
     pub(crate) state_store: Arc<dyn AgentStateStore>,
@@ -41,6 +43,11 @@ impl RuntimeStores {
         Ok(Self {
             run_store: Arc::new(
                 FileRunStore::new(artifact_store_path.clone())
+                    .await
+                    .into_diagnostic()?,
+            ),
+            event_store: Arc::new(
+                FileRunEventStore::new(artifact_store_path.clone())
                     .await
                     .into_diagnostic()?,
             ),
@@ -71,6 +78,7 @@ impl RuntimeStores {
                 .into_diagnostic()?,
         );
         let run_store: Arc<dyn AgentRunStore> = sqlite.clone();
+        let event_store: Arc<dyn AgentRunEventStore> = sqlite.clone();
         let proposal_store: Arc<dyn AgentProposalStore> = sqlite.clone();
         let session_store: Arc<dyn AgentSessionStore> = sqlite.clone();
         let state_store: Arc<dyn AgentStateStore> = sqlite.clone();
@@ -78,6 +86,7 @@ impl RuntimeStores {
         Ok(Self {
             artifact_store_path,
             run_store,
+            event_store,
             proposal_store,
             session_store,
             state_store,

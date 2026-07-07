@@ -1,7 +1,10 @@
 use std::{collections::HashSet, convert::Infallible, net::SocketAddr};
 
 use agent_chat::{ChatError, ChatResumeRequest, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest};
-use agent_core::{ProposalId, RunId, SessionId, ToolSpec, TraceEvent, WorkflowRunRequest};
+use agent_core::{
+    ProposalId, RunEventCursor, RunEventRecord, RunId, SessionId, ToolSpec, TraceEvent,
+    WorkflowRunRequest,
+};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -32,7 +35,6 @@ use crate::{
     },
     session::{HttpSessionCreateParams, HttpThreadForkParams},
     stdio_protocol::{StdioRequest, StdioResponse, stdio_error, stdio_result},
-    trace_store::{RunEventCursor, RunEventRecord},
 };
 
 #[derive(Debug, Serialize)]

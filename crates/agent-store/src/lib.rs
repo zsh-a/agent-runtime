@@ -6,7 +6,9 @@ mod sqlite;
 pub mod testkit;
 mod util;
 
-pub use file::{FileLockStore, FileProposalStore, FileRunStore, FileSessionStore};
+pub use file::{
+    FileLockStore, FileProposalStore, FileRunEventStore, FileRunStore, FileSessionStore,
+};
 pub use memory::{
     InMemoryProposalStore, InMemoryRunStore, InMemorySessionStore, InMemoryStateStore,
 };

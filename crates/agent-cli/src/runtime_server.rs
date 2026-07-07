@@ -3,12 +3,13 @@ use std::{collections::HashMap, sync::Arc};
 use agent_chat::{ChatEventStream, ChatResumeRequest, ChatTurnRequest, ChatTurnRunner};
 use agent_core::{
     AgentCancellation, AgentError, AgentEvent, AgentEventEmitter, AgentProposalStore,
-    AgentRunRecord, AgentRunResult, AgentRunStatus, AgentRunStore, AgentRuntimeCatalog,
-    AgentServices, AgentSessionStore, AgentStateAccess, ApprovalLevel, ArtifactPublisher,
-    ContextPolicy, PROTOCOL_VERSION, ProposalCreator, ProposalDiff, ProposalEnvelope, ProposalId,
-    ProposalWarning, RunId, RunRequest, RunScope, RunWorkflow, SessionId, SessionRecord,
-    SubagentRunner, ThreadId, ThreadRecord, ToolCaller, ToolError, TraceEvent, TriggerEnvelope,
-    TriggerKind, UserContext, WorkflowRunRequest, WorkflowRunResult,
+    AgentRunEventStore, AgentRunRecord, AgentRunResult, AgentRunStatus, AgentRunStore,
+    AgentRuntimeCatalog, AgentServices, AgentSessionStore, AgentStateAccess, ApprovalLevel,
+    ArtifactPublisher, ContextPolicy, PROTOCOL_VERSION, ProposalCreator, ProposalDiff,
+    ProposalEnvelope, ProposalId, ProposalWarning, RunEventCursor, RunEventRecord, RunId,
+    RunRequest, RunScope, RunWorkflow, SessionId, SessionRecord, SubagentRunner, ThreadId,
+    ThreadRecord, ToolCaller, ToolError, TraceEvent, TriggerEnvelope, TriggerKind, UserContext,
+    WorkflowRunRequest, WorkflowRunResult,
 };
 use agent_runtime::{AgentRunner, HookManager, RunControl, TraceEventBuffer};
 use async_trait::async_trait;
@@ -46,10 +47,7 @@ use crate::{
         record_chat_event_step, record_session_step,
     },
     tools::{CliServices, ToolOverrides},
-    trace_store::{
-        RunEventCursor, RunEventRecord, append_store_run_event, read_store_run_event_records_after,
-        read_store_trace, write_store_run_events, write_store_trace, write_workflow_traces,
-    },
+    trace_store::{read_store_trace, write_store_trace, write_workflow_traces},
 };
 
 #[derive(Clone)]
@@ -63,6 +61,7 @@ pub(crate) struct RuntimeServer {
     default_agent: Option<String>,
     hooks: HookManager,
     run_store: Arc<dyn AgentRunStore>,
+    event_store: Arc<dyn AgentRunEventStore>,
     proposal_store: Arc<dyn AgentProposalStore>,
     session_store: Arc<dyn AgentSessionStore>,
     store_path: Utf8PathBuf,
@@ -266,6 +265,7 @@ impl RuntimeServer {
             default_agent,
             hooks,
             run_store: stores.run_store,
+            event_store: stores.event_store,
             proposal_store: stores.proposal_store,
             session_store: stores.session_store,
             store_path,
@@ -385,7 +385,7 @@ impl RuntimeServer {
         let (events, _) = broadcast::channel(256);
         let event_buffer = Arc::new(TraceEventBuffer::default());
         let event_log_task =
-            spawn_run_event_logger(self.store_path.clone(), run_id.clone(), events.subscribe());
+            spawn_run_event_logger(self.event_store.clone(), run_id.clone(), events.subscribe());
         {
             let mut active = self.active_runs.lock().await;
             if active.contains_key(&run_id.0) {
@@ -442,8 +442,10 @@ impl RuntimeServer {
         };
         let trace_events = outcome.trace.events.clone();
         stop_run_event_logger(event_log_task).await;
-        if let Err(err) =
-            write_store_run_events(&self.store_path, &outcome.trace.run_id, &trace_events).await
+        if let Err(err) = self
+            .event_store
+            .replace_run_events(&outcome.trace.run_id, trace_events)
+            .await
         {
             warn!(
                 run_id = %outcome.trace.run_id.0,
@@ -661,7 +663,10 @@ impl RuntimeServer {
         run_id: RunId,
         after: RunEventCursor,
     ) -> Result<Option<Vec<RunEventRecord>>> {
-        read_store_run_event_records_after(&self.store_path, &run_id, Some(after)).await
+        self.event_store
+            .list_run_events_after(&run_id, after)
+            .await
+            .into_diagnostic()
     }
 
     pub(crate) async fn replay_run(&self, run_id: RunId) -> Result<ReplayExecutionReport> {
@@ -906,7 +911,7 @@ impl RuntimeServer {
 }
 
 fn spawn_run_event_logger(
-    store_path: Utf8PathBuf,
+    event_store: Arc<dyn AgentRunEventStore>,
     run_id: RunId,
     mut receiver: broadcast::Receiver<TraceEvent>,
 ) -> JoinHandle<()> {
@@ -914,7 +919,7 @@ fn spawn_run_event_logger(
         loop {
             match receiver.recv().await {
                 Ok(event) => {
-                    if let Err(err) = append_store_run_event(&store_path, &run_id, &event).await {
+                    if let Err(err) = event_store.append_run_event(&run_id, event).await {
                         warn!(
                             run_id = %run_id.0,
                             error = %err,

@@ -3355,7 +3355,23 @@ mocks = ['propose_fake={{"http_sqlite":true}}']
             .join(format!("{run_id}.trace.json"))
             .exists()
     );
+    assert!(
+        !std::fs::read_dir(store.join("traces"))
+            .expect("trace dir reads")
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".events.jsonl"))),
+        "sqlite event store should not write file-backed event logs"
+    );
     assert!(!store.join("runs").join(format!("{run_id}.json")).exists());
+    std::fs::remove_file(store.join("traces").join(format!("{run_id}.trace.json")))
+        .expect("trace removed to prove sqlite event store path");
+    let events = http_text_request(port, "GET", &format!("/runs/{run_id}/events?after=1"), None);
+    assert!(events.contains("id: 2"));
+    assert!(events.contains("event: catalog_dry_run.agent_selected"));
 
     let inspected = http_json_request(port, "GET", &format!("/runs/{run_id}"), None);
     assert_eq!(inspected["run_id"], run_id);

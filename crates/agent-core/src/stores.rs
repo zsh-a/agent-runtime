@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     Agent, AgentError, AgentRunRecord, AgentSpec, ProposalEnvelope, ProposalId, RunId, RunLease,
-    RunScope, SessionId, SessionRecord, StepRecord, StoreError, ThreadId, ThreadRecord,
+    RunScope, SessionId, SessionRecord, StepRecord, StoreError, ThreadId, ThreadRecord, TraceEvent,
 };
 
 #[async_trait]
@@ -29,6 +29,29 @@ pub trait AgentRunStore: Send + Sync {
         agent_id: &str,
         scope: &RunScope,
     ) -> Result<Option<AgentRunRecord>, StoreError>;
+}
+
+pub type RunEventCursor = u64;
+
+#[derive(Debug, Clone)]
+pub struct RunEventRecord {
+    pub cursor: RunEventCursor,
+    pub event: TraceEvent,
+}
+
+#[async_trait]
+pub trait AgentRunEventStore: Send + Sync {
+    async fn append_run_event(&self, run_id: &RunId, event: TraceEvent) -> Result<(), StoreError>;
+    async fn replace_run_events(
+        &self,
+        run_id: &RunId,
+        events: Vec<TraceEvent>,
+    ) -> Result<(), StoreError>;
+    async fn list_run_events_after(
+        &self,
+        run_id: &RunId,
+        after: RunEventCursor,
+    ) -> Result<Option<Vec<RunEventRecord>>, StoreError>;
 }
 
 #[async_trait]

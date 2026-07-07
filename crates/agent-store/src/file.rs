@@ -1,7 +1,8 @@
 use agent_core::{
-    AgentLockStore, AgentProposalStore, AgentRunRecord, AgentRunStore, AgentSessionStore,
-    ProposalEnvelope, ProposalId, RunId, RunLease, RunScope, SessionId, SessionRecord, StepRecord,
-    StoreError, ThreadId, ThreadRecord,
+    AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunStore,
+    AgentSessionStore, ProposalEnvelope, ProposalId, RunEventCursor, RunEventRecord, RunId,
+    RunLease, RunScope, SessionId, SessionRecord, StepRecord, StoreError, ThreadId, ThreadRecord,
+    TraceEvent,
 };
 use async_trait::async_trait;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -30,6 +31,51 @@ pub struct FileSessionStore {
 
 pub struct FileLockStore {
     root: Utf8PathBuf,
+}
+
+pub struct FileRunEventStore {
+    root: Utf8PathBuf,
+}
+
+impl FileRunEventStore {
+    pub async fn new(root: impl Into<Utf8PathBuf>) -> Result<Self, StoreError> {
+        let root = root.into();
+        fs_err::tokio::create_dir_all(trace_dir(&root))
+            .await
+            .map_err(map_store_err)?;
+        Ok(Self { root })
+    }
+
+    fn path_for(&self, run_id: &RunId) -> Utf8PathBuf {
+        run_event_path(&self.root, run_id)
+    }
+}
+
+#[async_trait]
+impl AgentRunEventStore for FileRunEventStore {
+    async fn append_run_event(&self, run_id: &RunId, event: TraceEvent) -> Result<(), StoreError> {
+        append_json_line(&self.path_for(run_id), &event).await
+    }
+
+    async fn replace_run_events(
+        &self,
+        run_id: &RunId,
+        events: Vec<TraceEvent>,
+    ) -> Result<(), StoreError> {
+        write_json_lines(&self.path_for(run_id), &events).await
+    }
+
+    async fn list_run_events_after(
+        &self,
+        run_id: &RunId,
+        after: RunEventCursor,
+    ) -> Result<Option<Vec<RunEventRecord>>, StoreError> {
+        let path = self.path_for(run_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        read_json_line_records_after(&path, after).await.map(Some)
+    }
 }
 
 impl FileLockStore {
@@ -360,6 +406,71 @@ async fn create_json(path: &Utf8Path, value: &impl serde::Serialize) -> Result<(
     file.sync_all().await.map_err(map_store_err)
 }
 
+async fn write_json_lines(
+    path: &Utf8Path,
+    values: &[impl serde::Serialize],
+) -> Result<(), StoreError> {
+    let mut bytes = Vec::new();
+    for value in values {
+        bytes.extend(serde_json::to_vec(value).map_err(map_json_err)?);
+        bytes.push(b'\n');
+    }
+    write_bytes(path, bytes).await
+}
+
+async fn write_bytes(path: &Utf8Path, bytes: Vec<u8>) -> Result<(), StoreError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StoreError::new(format!("path has no parent: {path}")))?;
+    fs_err::tokio::create_dir_all(parent)
+        .await
+        .map_err(map_store_err)?;
+    let temp_path = temp_write_path(path)?;
+
+    let write_result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temp_path.as_std_path())
+            .await?;
+        file.write_all(&bytes).await?;
+        file.sync_all().await?;
+        drop(file);
+        fs_err::tokio::rename(&temp_path, path).await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+
+    if let Err(err) = write_result {
+        let _ = fs_err::tokio::remove_file(&temp_path).await;
+        return Err(map_store_err(err));
+    }
+
+    Ok(())
+}
+
+async fn append_json_line(
+    path: &Utf8Path,
+    value: &impl serde::Serialize,
+) -> Result<(), StoreError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StoreError::new(format!("path has no parent: {path}")))?;
+    fs_err::tokio::create_dir_all(parent)
+        .await
+        .map_err(map_store_err)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path.as_std_path())
+        .await
+        .map_err(map_store_err)?;
+    let bytes = serde_json::to_vec(value).map_err(map_json_err)?;
+    file.write_all(&bytes).await.map_err(map_store_err)?;
+    file.write_all(b"\n").await.map_err(map_store_err)?;
+    file.flush().await.map_err(map_store_err)
+}
+
 fn temp_write_path(path: &Utf8Path) -> Result<Utf8PathBuf, StoreError> {
     let parent = path
         .parent()
@@ -414,6 +525,32 @@ where
     Ok(records)
 }
 
+async fn read_json_line_records_after(
+    path: &Utf8Path,
+    after: RunEventCursor,
+) -> Result<Vec<RunEventRecord>, StoreError> {
+    let text = fs_err::tokio::read_to_string(path)
+        .await
+        .map_err(map_store_err)?;
+    let mut records = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let cursor = RunEventCursor::try_from(index.saturating_add(1))
+            .map_err(|_| StoreError::new(format!("JSONL cursor overflow at {path}")))?;
+        if cursor <= after {
+            continue;
+        }
+        records.push(RunEventRecord {
+            cursor,
+            event: serde_json::from_str(line).map_err(map_json_err)?,
+        });
+    }
+    Ok(records)
+}
+
 fn run_dir(root: &Utf8Path) -> Utf8PathBuf {
     root.join("runs")
 }
@@ -436,6 +573,17 @@ fn step_dir(root: &Utf8Path) -> Utf8PathBuf {
 
 fn lock_dir(root: &Utf8Path) -> Utf8PathBuf {
     root.join("locks")
+}
+
+fn trace_dir(root: &Utf8Path) -> Utf8PathBuf {
+    root.join("traces")
+}
+
+fn run_event_path(root: &Utf8Path, run_id: &RunId) -> Utf8PathBuf {
+    trace_dir(root).join(format!(
+        "{}.events.jsonl",
+        blake3::hash(run_id.0.as_bytes()).to_hex()
+    ))
 }
 
 fn lease_duration(ttl: Duration) -> time::Duration {

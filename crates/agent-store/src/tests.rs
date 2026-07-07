@@ -1,10 +1,11 @@
-use agent_core::AgentLockStore;
+use agent_core::{AgentLockStore, AgentRunEventStore, RunId, TraceEvent};
 use camino::Utf8PathBuf;
 use std::time::Duration;
 
 use super::*;
 use crate::testkit::{
-    assert_lock_store_conformance, assert_proposal_store_conformance, assert_run_store_conformance,
+    assert_lock_store_conformance, assert_proposal_store_conformance,
+    assert_run_event_store_conformance, assert_run_store_conformance,
     assert_session_store_conformance, assert_state_store_conformance,
 };
 
@@ -13,6 +14,13 @@ async fn file_run_store_satisfies_conformance() {
     let root = temp_root();
     let store = FileRunStore::new(root).await.expect("store opens");
     assert_run_store_conformance(&store).await;
+}
+
+#[tokio::test]
+async fn file_run_event_store_satisfies_conformance() {
+    let root = temp_root();
+    let store = FileRunEventStore::new(root).await.expect("store opens");
+    assert_run_event_store_conformance(&store).await;
 }
 
 #[tokio::test]
@@ -58,6 +66,7 @@ async fn in_memory_state_store_satisfies_conformance() {
 async fn sqlite_store_satisfies_conformance() {
     let store = SqliteStore::in_memory().await.expect("sqlite opens");
     assert_run_store_conformance(&store).await;
+    assert_run_event_store_conformance(&store).await;
     assert_proposal_store_conformance(&store).await;
     assert_session_store_conformance(&store).await;
     assert_state_store_conformance(&store).await;
@@ -146,7 +155,7 @@ async fn sqlite_store_reopens_file_backed_records() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        2
+        3
     );
     assert_eq!(
         reopened
@@ -235,15 +244,108 @@ async fn sqlite_store_upgrades_old_schema_version() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        2
+        3
     );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_store_upgrades_v2_schema_with_run_event_tables() {
+    use serde_json::json;
+
+    let path = temp_root().join("v2-events.sqlite");
+    let run_id = RunId("run_v2_event_upgrade".to_owned());
+    {
+        let store = SqliteStore::open(&path).await.expect("sqlite opens");
+        sqlx::query("DROP TABLE agent_run_events")
+            .execute(store.pool())
+            .await
+            .expect("event table dropped");
+        sqlx::query("DROP TABLE agent_run_event_logs")
+            .execute(store.pool())
+            .await
+            .expect("event log table dropped");
+        sqlx::query("PRAGMA user_version = 2")
+            .execute(store.pool())
+            .await
+            .expect("schema version rewinds to v2");
+    }
+
+    let reopened = SqliteStore::open(&path).await.expect("v2 schema upgrades");
+    assert_eq!(
+        reopened
+            .schema_version()
+            .await
+            .expect("schema version reads"),
+        3
+    );
+    reopened
+        .append_run_event(&run_id, TraceEvent::new("run_started", json!({"v": 3})))
+        .await
+        .expect("event append works after migration");
+    let events = reopened
+        .list_run_events_after(&run_id, 0)
+        .await
+        .expect("events read")
+        .expect("event log exists");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].cursor, 1);
+    assert_eq!(events[0].event.kind, "run_started");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_run_event_append_allocates_unique_cursors_concurrently() {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    let path = temp_root().join("concurrent-events.sqlite");
+    let store = Arc::new(SqliteStore::open(&path).await.expect("sqlite opens"));
+    let run_id = RunId("run_concurrent_events".to_owned());
+    let mut tasks = Vec::new();
+
+    for index in 0..32 {
+        let store = Arc::clone(&store);
+        let run_id = run_id.clone();
+        tasks.push(tokio::spawn(async move {
+            store
+                .append_run_event(
+                    &run_id,
+                    TraceEvent::new("concurrent_event", json!({ "idx": index })),
+                )
+                .await
+                .expect("event appends");
+        }));
+    }
+
+    for task in tasks {
+        task.await.expect("append task joins");
+    }
+
+    let events = store
+        .list_run_events_after(&run_id, 0)
+        .await
+        .expect("events read")
+        .expect("event log exists");
+    assert_eq!(events.len(), 32);
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event.cursor, (index + 1) as u64);
+    }
+
+    let mut payload_indices = events
+        .into_iter()
+        .map(|event| event.event.payload["idx"].as_i64().expect("idx is numeric"))
+        .collect::<Vec<_>>();
+    payload_indices.sort_unstable();
+    assert_eq!(payload_indices, (0..32).collect::<Vec<_>>());
 }
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_store_reports_supported_schema_version_from_migrations() {
     let store = SqliteStore::in_memory().await.expect("sqlite opens");
-    assert_eq!(SqliteStore::supported_schema_version(), 2);
+    assert_eq!(SqliteStore::supported_schema_version(), 3);
     assert_eq!(
         store.schema_version().await.expect("schema version reads"),
         SqliteStore::supported_schema_version()
@@ -273,7 +375,7 @@ async fn sqlite_store_rejects_future_schema_version_without_downgrade() {
     };
     assert!(
         err.message
-            .contains("schema version 999 is newer than supported version 2"),
+            .contains("schema version 999 is newer than supported version 3"),
         "unexpected error: {}",
         err.message
     );
