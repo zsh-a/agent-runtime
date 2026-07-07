@@ -15,7 +15,7 @@ agent-chat.workspace = true
 agent-core.workspace = true
 agent-llm.workspace = true
 agent-runtime.workspace = true
-agent-store.workspace = true
+agent-store = { workspace = true, features = ["sqlite"] }
 agent-tools.workspace = true
 async-trait.workspace = true
 axum.workspace = true
@@ -32,6 +32,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
@@ -44,4 +45,3 @@ walkdir.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
-tempfile.workspace = true

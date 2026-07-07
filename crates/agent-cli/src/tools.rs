@@ -5,7 +5,7 @@ use agent_core::{
     AgentStateStore, ArtifactPublisher, ProposalCreator, ProposalEnvelope, SubagentRunner,
     ToolCaller, ToolError,
 };
-use agent_store::{FileProposalStore, InMemoryStateStore};
+use agent_store::InMemoryStateStore;
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use miette::Result;
@@ -29,17 +29,22 @@ impl ToolSelection {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct CliServices {
-    state: InMemoryStateStore,
+    state: Arc<dyn AgentStateStore>,
     pub(crate) tools: ToolOverrides,
-    proposal_store: Option<Arc<FileProposalStore>>,
+    proposal_store: Option<Arc<dyn AgentProposalStore>>,
+}
+
+impl Default for CliServices {
+    fn default() -> Self {
+        Self::new(ToolOverrides::default())
+    }
 }
 
 impl CliServices {
     pub(crate) fn new(tools: ToolOverrides) -> Self {
         Self {
-            state: InMemoryStateStore::default(),
+            state: Arc::new(InMemoryStateStore::default()),
             tools,
             proposal_store: None,
         }
@@ -47,10 +52,22 @@ impl CliServices {
 
     pub(crate) fn with_proposal_store(
         tools: ToolOverrides,
-        proposal_store: Arc<FileProposalStore>,
+        proposal_store: Arc<dyn AgentProposalStore>,
     ) -> Self {
         Self {
-            state: InMemoryStateStore::default(),
+            state: Arc::new(InMemoryStateStore::default()),
+            tools,
+            proposal_store: Some(proposal_store),
+        }
+    }
+
+    pub(crate) fn with_stores(
+        tools: ToolOverrides,
+        state: Arc<dyn AgentStateStore>,
+        proposal_store: Arc<dyn AgentProposalStore>,
+    ) -> Self {
+        Self {
+            state,
             tools,
             proposal_store: Some(proposal_store),
         }

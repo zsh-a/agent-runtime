@@ -19,8 +19,8 @@ use agent_core::{
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::sync::broadcast;
-use tokio::time::sleep;
+use tokio::sync::{Notify, broadcast};
+use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
@@ -435,14 +435,8 @@ async fn runner_executes_workflow_dag_and_populates_dependency_edges() {
 async fn runner_runs_ready_workflow_nodes_in_parallel() {
     let counters = Arc::new(ConcurrencyCounters::default());
     let registry = InMemoryAgentRegistry::shared(vec![
-        Arc::new(SlowAgent {
-            id: "slow_a".to_owned(),
-            counters: counters.clone(),
-        }),
-        Arc::new(SlowAgent {
-            id: "slow_b".to_owned(),
-            counters: counters.clone(),
-        }),
+        Arc::new(SlowAgent::new("slow_a", counters.clone())),
+        Arc::new(SlowAgent::new("slow_b", counters.clone())),
     ]);
     let run_store = agent_store::InMemoryRunStore::shared();
     let state_store = agent_store::InMemoryStateStore::shared();
@@ -1400,10 +1394,8 @@ fn run_idempotency_key_uses_external_trigger_identity() {
 #[tokio::test]
 async fn runner_respects_max_concurrent_runs_policy() {
     let counters = Arc::new(ConcurrencyCounters::default());
-    let registry = InMemoryAgentRegistry::shared(vec![Arc::new(SlowAgent {
-        id: "slow".to_owned(),
-        counters: counters.clone(),
-    })]);
+    let registry =
+        InMemoryAgentRegistry::shared(vec![Arc::new(SlowAgent::new("slow", counters.clone()))]);
     let run_store = agent_store::InMemoryRunStore::shared();
     let state_store = agent_store::InMemoryStateStore::shared();
     let services = Arc::new(NoopServices { state_store });
@@ -1441,10 +1433,8 @@ async fn runner_respects_max_concurrent_runs_policy() {
 #[tokio::test]
 async fn runner_skips_duplicate_agent_scope_when_lease_is_active() {
     let counters = Arc::new(ConcurrencyCounters::default());
-    let registry = InMemoryAgentRegistry::shared(vec![Arc::new(SlowAgent {
-        id: "slow".to_owned(),
-        counters: counters.clone(),
-    })]);
+    let registry =
+        InMemoryAgentRegistry::shared(vec![Arc::new(SlowAgent::new("slow", counters.clone()))]);
     let run_store = agent_store::InMemoryRunStore::shared();
     let state_store = agent_store::InMemoryStateStore::shared();
     let services = Arc::new(NoopServices { state_store });
@@ -1480,12 +1470,113 @@ async fn runner_skips_duplicate_agent_scope_when_lease_is_active() {
 }
 
 #[tokio::test]
+async fn sqlite_shared_store_coordinates_duplicate_agent_scope_across_runner_handles() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_path = temp
+        .path()
+        .join("runtime.sqlite")
+        .to_str()
+        .expect("utf8 temp path")
+        .to_owned();
+    let counters = Arc::new(ConcurrencyCounters::default());
+    let first_started = Arc::new(Notify::new());
+
+    let first_store = Arc::new(
+        agent_store::SqliteStore::open(db_path.as_str())
+            .await
+            .expect("first sqlite handle opens"),
+    );
+    let second_store = Arc::new(
+        agent_store::SqliteStore::open(db_path.as_str())
+            .await
+            .expect("second sqlite handle opens"),
+    );
+
+    let first_runner = Arc::new(
+        AgentRunner::new(
+            InMemoryAgentRegistry::shared(vec![Arc::new(SlowAgent::with_started_notify(
+                "slow",
+                counters.clone(),
+                first_started.clone(),
+            ))]),
+            first_store.clone(),
+            Arc::new(NoopServices {
+                state_store: agent_store::InMemoryStateStore::shared(),
+            }),
+        )
+        .with_lock_store(first_store.clone())
+        .with_policy(ExecutionPolicy {
+            timeout: Duration::from_secs(5),
+            max_retries: 0,
+            retry_backoff: Duration::ZERO,
+            max_concurrent_runs: 2,
+        }),
+    );
+    let second_runner = AgentRunner::new(
+        InMemoryAgentRegistry::shared(vec![Arc::new(SlowAgent::new("slow", counters.clone()))]),
+        second_store.clone(),
+        Arc::new(NoopServices {
+            state_store: agent_store::InMemoryStateStore::shared(),
+        }),
+    )
+    .with_lock_store(second_store.clone())
+    .with_policy(ExecutionPolicy {
+        timeout: Duration::from_secs(5),
+        max_retries: 0,
+        retry_backoff: Duration::ZERO,
+        max_concurrent_runs: 2,
+    });
+
+    let first = {
+        let first_runner = first_runner.clone();
+        tokio::spawn(async move { first_runner.run_once("slow", run_request()).await })
+    };
+    timeout(Duration::from_secs(1), first_started.notified())
+        .await
+        .expect("first sqlite-backed run enters the slow agent before duplicate run starts");
+    let second = second_runner
+        .run_once("slow", run_request())
+        .await
+        .expect("second runner returns outcome");
+    let first = first
+        .await
+        .expect("first task joins")
+        .expect("first runner returns outcome");
+
+    let statuses = [first.result.status, second.result.status];
+    assert!(statuses.contains(&AgentRunStatus::Completed));
+    assert!(statuses.contains(&AgentRunStatus::Skipped));
+    assert_eq!(counters.max_seen.load(Ordering::SeqCst), 1);
+    assert_eq!(counters.completed.load(Ordering::SeqCst), 1);
+
+    let persisted = agent_store::SqliteStore::open(db_path.as_str())
+        .await
+        .expect("verification sqlite handle opens")
+        .list_runs(Some("slow"), None)
+        .await
+        .expect("runs list from sqlite");
+    assert_eq!(persisted.len(), 2);
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|run| run.status == AgentRunStatus::Completed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|run| run.status == AgentRunStatus::Skipped)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn runner_skips_duplicate_workflow_scope_when_lease_is_active() {
     let counters = Arc::new(ConcurrencyCounters::default());
-    let registry = InMemoryAgentRegistry::shared(vec![Arc::new(SlowAgent {
-        id: "slow".to_owned(),
-        counters: counters.clone(),
-    })]);
+    let registry =
+        InMemoryAgentRegistry::shared(vec![Arc::new(SlowAgent::new("slow", counters.clone()))]);
     let run_store = agent_store::InMemoryRunStore::shared();
     let state_store = agent_store::InMemoryStateStore::shared();
     let services = Arc::new(NoopServices { state_store });
@@ -1747,22 +1838,21 @@ async fn runner_can_cancel_active_run_and_broadcast_events() {
         });
     let cancellation = CancellationToken::new();
     let (events, mut receiver) = broadcast::channel(16);
+    let event_buffer = Arc::new(TraceEventBuffer::default());
     let request = RunRequest {
         run_id: Some(RunId("run_cancel_test".to_owned())),
         ..run_request()
     };
     let run = tokio::spawn({
         let cancellation = cancellation.clone();
+        let event_buffer = event_buffer.clone();
         async move {
+            let mut control = RunControl::default();
+            control.cancellation = cancellation;
+            control.trace_events = Some(events);
+            control.trace_event_buffer = Some(event_buffer.clone());
             runner
-                .run_once_with_control(
-                    "blocking",
-                    request,
-                    RunControl {
-                        cancellation,
-                        trace_events: Some(events),
-                    },
-                )
+                .run_once_with_control("blocking", request, control)
                 .await
         }
     });
@@ -1776,6 +1866,14 @@ async fn runner_can_cancel_active_run_and_broadcast_events() {
             break;
         }
     }
+    assert!(
+        event_buffer
+            .events()
+            .await
+            .iter()
+            .any(|event| event.kind == "run_started"),
+        "trace event buffer should observe events before they are broadcast"
+    );
     cancellation.cancel();
 
     let outcome = run
@@ -1829,15 +1927,10 @@ async fn runner_observes_persisted_cancellation_request() {
     let run = tokio::spawn({
         let runner = runner.clone();
         async move {
+            let mut control = RunControl::default();
+            control.trace_events = Some(events);
             runner
-                .run_once_with_control(
-                    "blocking",
-                    request,
-                    RunControl {
-                        cancellation: CancellationToken::new(),
-                        trace_events: Some(events),
-                    },
-                )
+                .run_once_with_control("blocking", request, control)
                 .await
         }
     });
@@ -2082,6 +2175,29 @@ struct ConcurrencyCounters {
 struct SlowAgent {
     id: String,
     counters: Arc<ConcurrencyCounters>,
+    started: Option<Arc<Notify>>,
+}
+
+impl SlowAgent {
+    fn new(id: impl Into<String>, counters: Arc<ConcurrencyCounters>) -> Self {
+        Self {
+            id: id.into(),
+            counters,
+            started: None,
+        }
+    }
+
+    fn with_started_notify(
+        id: impl Into<String>,
+        counters: Arc<ConcurrencyCounters>,
+        started: Arc<Notify>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            counters,
+            started: Some(started),
+        }
+    }
 }
 
 #[async_trait]
@@ -2102,6 +2218,9 @@ impl Agent for SlowAgent {
     async fn run(&self, ctx: AgentContext) -> Result<AgentRunResult, AgentError> {
         let current = self.counters.current.fetch_add(1, Ordering::SeqCst) + 1;
         self.counters.max_seen.fetch_max(current, Ordering::SeqCst);
+        if let Some(started) = &self.started {
+            started.notify_one();
+        }
         sleep(Duration::from_millis(100)).await;
         self.counters.current.fetch_sub(1, Ordering::SeqCst);
         self.counters.completed.fetch_add(1, Ordering::SeqCst);

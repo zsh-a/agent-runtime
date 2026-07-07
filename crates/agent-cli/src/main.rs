@@ -1,8 +1,7 @@
 use std::{fs, io, sync::Mutex, time::Duration};
 
-use agent_core::{AgentRunStore, ContextPolicy, HookSpec, RunId};
+use agent_core::{ContextPolicy, HookSpec, RunId};
 use agent_runtime::{ExecutionPolicy, HookManager, recover_stale_runs};
-use agent_store::{FileProposalStore, FileRunStore};
 use camino::Utf8PathBuf;
 use clap::{Args, Parser, Subcommand};
 use miette::{IntoDiagnostic, Result, miette};
@@ -24,6 +23,7 @@ mod registry;
 mod replay;
 mod runtime_config;
 mod runtime_server;
+mod runtime_stores;
 mod server;
 mod session;
 mod shell_tool_host;
@@ -43,7 +43,7 @@ use commands::workflow::{
     CommandRunOptions, WorkflowRunCliOptions, create_command_from_run, run_command_template,
     run_workflow_request,
 };
-use config::load_agent_config;
+use config::{RuntimeStoreBackend, load_agent_config};
 use debug_bundle::export_debug_bundle;
 use dev_stdio::{run_dev_mcp_server, run_dev_tool_host};
 use eval::{create_eval_from_run, run_dev_score_hook, run_eval_path};
@@ -54,6 +54,7 @@ use runtime_config::{
     ResolvedRuntimeSources, RuntimeSourceOptions, RuntimeSources, compose_runtime_sources,
 };
 use runtime_server::RuntimeServer;
+use runtime_stores::RuntimeStores;
 use server::{serve_http, serve_stdio};
 use shell_tool_host::run_shell_tool_host;
 use tools::{ToolOverrides, ToolSelection};
@@ -136,6 +137,26 @@ impl AppContext {
 
     fn store(&self, value: Utf8PathBuf) -> Utf8PathBuf {
         config::configured_path(value, DEFAULT_STORE, self.config.runtime.store.as_ref())
+    }
+
+    fn configured_store(&self) -> Option<Utf8PathBuf> {
+        self.config.runtime.store.clone()
+    }
+
+    fn store_backend(&self) -> RuntimeStoreBackend {
+        self.config
+            .runtime
+            .store_backend
+            .unwrap_or(RuntimeStoreBackend::File)
+    }
+
+    fn require_file_store_backend(&self, command: &str) -> Result<()> {
+        if self.store_backend() == RuntimeStoreBackend::File {
+            return Ok(());
+        }
+        Err(miette!(
+            "{command} does not support runtime.store_backend = \"sqlite\" yet; use runtime.store_backend = \"file\" for this file-oriented workflow"
+        ))
     }
 
     fn eval_store(&self, value: Utf8PathBuf) -> Utf8PathBuf {
@@ -707,6 +728,7 @@ async fn main() -> Result<()> {
                 thread,
                 scope,
                 store,
+                store_backend: context.store_backend(),
                 timeout_seconds: execution.timeout_seconds,
                 max_retries: execution.max_retries,
                 retry_backoff_ms: execution.retry_backoff_ms,
@@ -725,6 +747,7 @@ async fn main() -> Result<()> {
             tick_agents(TickCliOptions {
                 sources,
                 store,
+                store_backend: context.store_backend(),
                 hooks,
             })
             .await?;
@@ -757,6 +780,9 @@ async fn main() -> Result<()> {
             };
             match mode {
                 ReplayMode::Live | ReplayMode::Deterministic => {
+                    if mode == ReplayMode::Live || execute {
+                        context.require_file_store_backend("replay")?;
+                    }
                     replay_trace(ReplayTraceOptions {
                         trace_file,
                         mode,
@@ -786,8 +812,9 @@ async fn main() -> Result<()> {
         }
         Command::Inspect { run_id, store } => {
             let store = context.store(store);
-            let store = FileRunStore::new(store).await.into_diagnostic()?;
-            let record = store
+            let stores = RuntimeStores::open(context.store_backend(), store).await?;
+            let record = stores
+                .run_store
                 .get_run(&RunId(run_id.clone()))
                 .await
                 .into_diagnostic()?
@@ -812,9 +839,10 @@ async fn main() -> Result<()> {
                 materialize_artifacts,
                 artifact_resolver,
             } => {
+                context.require_file_store_backend("debug-bundle export")?;
                 export_debug_bundle(
                     run_id,
-                    store,
+                    context.store(store),
                     out,
                     catalog,
                     trace,
@@ -827,11 +855,14 @@ async fn main() -> Result<()> {
         },
         Command::Metrics { command } => match command {
             MetricsCommand::Summary { store } => {
-                let run_store = FileRunStore::new(store.clone()).await.into_diagnostic()?;
-                let proposal_store = FileProposalStore::new(store.clone())
-                    .await
-                    .into_diagnostic()?;
-                let summary = build_metrics_summary(&store, &run_store, &proposal_store).await?;
+                let stores =
+                    RuntimeStores::open(context.store_backend(), context.store(store)).await?;
+                let summary = build_metrics_summary(
+                    &stores.artifact_store_path,
+                    stores.run_store.as_ref(),
+                    stores.proposal_store.as_ref(),
+                )
+                .await?;
                 print_json(&summary)?;
             }
         },
@@ -870,6 +901,7 @@ async fn main() -> Result<()> {
                     input,
                     sources,
                     store: context.store(store),
+                    store_backend: context.store_backend(),
                     tools: context.tools(tools),
                     timeout_seconds: execution.timeout_seconds,
                     max_retries: execution.max_retries,
@@ -884,10 +916,17 @@ async fn main() -> Result<()> {
             run_tool_command(command).await?;
         }
         Command::Proposal { command } => {
-            run_proposal_command(command, context.hooks()?).await?;
+            run_proposal_command(
+                command,
+                context.hooks()?,
+                context.store_backend(),
+                context.configured_store(),
+            )
+            .await?;
         }
         Command::Session { command } => {
-            run_session_command(command).await?;
+            run_session_command(command, context.store_backend(), context.configured_store())
+                .await?;
         }
         Command::Llm { command } => match command {
             LlmCommand::Complete {
@@ -919,6 +958,7 @@ async fn main() -> Result<()> {
             run_catalog_command(command).await?;
         }
         Command::Compat { command } => {
+            context.require_file_store_backend("compat")?;
             run_compat_command(command).await?;
         }
         Command::Config { command } => match command {
@@ -932,9 +972,9 @@ async fn main() -> Result<()> {
         } => {
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, 0, 0);
-            let store = FileRunStore::new(store).await.into_diagnostic()?;
+            let stores = RuntimeStores::open(context.store_backend(), store).await?;
             let report = recover_stale_runs(
-                &store,
+                stores.run_store.as_ref(),
                 &ExecutionPolicy {
                     timeout: Duration::from_secs(execution.timeout_seconds),
                     max_retries: 0,
@@ -956,8 +996,15 @@ async fn main() -> Result<()> {
                 registry,
             } => {
                 let sources = context.command_runtime_sources(registry, catalog);
-                let report =
-                    create_command_from_run(from_run, store, out, description, sources).await?;
+                let report = create_command_from_run(
+                    from_run,
+                    context.store(store),
+                    context.store_backend(),
+                    out,
+                    description,
+                    sources,
+                )
+                .await?;
                 print_json(&report)?;
             }
             CmdCommand::Run {
@@ -975,7 +1022,8 @@ async fn main() -> Result<()> {
                     command_file,
                     configured_sources: context.configured_runtime_sources(),
                     source_overrides: RuntimeSources::new(registry, catalog),
-                    store,
+                    store: context.store(store),
+                    store_backend: context.store_backend(),
                     tools: context.tools(tools),
                     trace_out,
                     timeout_seconds,
@@ -1006,6 +1054,7 @@ async fn main() -> Result<()> {
             let server = RuntimeServer::new(
                 sources,
                 store,
+                context.store_backend(),
                 context.tools(tools).load().await?,
                 hooks,
                 context.context_policy(),
@@ -1033,6 +1082,7 @@ async fn main() -> Result<()> {
             mouse_capture,
             once,
         } => {
+            context.require_file_store_backend("tui")?;
             let sources = context.runtime_sources(registry, catalog);
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
@@ -1065,6 +1115,7 @@ async fn main() -> Result<()> {
             id,
             golden_trace,
         } => {
+            context.require_file_store_backend("eval")?;
             let store = context.eval_store(store);
             let catalog = context.catalog(catalog);
             let result = if eval_path.as_str() == "create" || from_run.is_some() {
@@ -1103,7 +1154,9 @@ enum LogMode {
 
 fn log_mode_for_command(command: &Command, context: &AppContext) -> LogMode {
     match command {
-        Command::Tui { store, once, .. } if !once => {
+        Command::Tui { store, once, .. }
+            if !once && context.store_backend() == RuntimeStoreBackend::File =>
+        {
             LogMode::File(context.store(store.clone()).join(TUI_LOG_FILE))
         }
         _ => LogMode::Stderr,

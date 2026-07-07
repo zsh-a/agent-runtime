@@ -207,6 +207,10 @@ fn committed_fixtures_match_json_schemas() {
         "fixtures/contracts/chat-turn-event.round-finished.requires-tool-results.valid.json",
     );
     assert_valid(
+        "schemas/chat-turn-event.schema.json",
+        "fixtures/contracts/chat-turn-event.context-snapshot.valid.json",
+    );
+    assert_valid(
         "schemas/session-record.schema.json",
         "fixtures/contracts/session-record.valid.json",
     );
@@ -249,6 +253,9 @@ fn committed_valid_fixtures_deserialize_to_runtime_types() {
     assert_deserializes::<ChatToolResult>("fixtures/contracts/chat-tool-result.valid.json");
     assert_deserializes::<ChatTurnEvent>(
         "fixtures/contracts/chat-turn-event.round-finished.requires-tool-results.valid.json",
+    );
+    assert_deserializes::<ChatTurnEvent>(
+        "fixtures/contracts/chat-turn-event.context-snapshot.valid.json",
     );
     assert_deserializes::<SessionRecord>("fixtures/contracts/session-record.valid.json");
     assert_deserializes::<ThreadRecord>("fixtures/contracts/thread-record.valid.json");

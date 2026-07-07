@@ -15,7 +15,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test:types": "tsc --noEmit -p tsconfig.test.json"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

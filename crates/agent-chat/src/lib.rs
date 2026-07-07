@@ -508,6 +508,13 @@ mod tests {
         .expect("event fixture");
         assert_eq!(event.kind, ChatTurnEventKind::RoundFinished);
         assert_eq!(event.metadata["status"], "requires_tool_results");
+
+        let event: ChatTurnEvent = serde_json::from_str(include_str!(
+            "../../../fixtures/contracts/chat-turn-event.context-snapshot.valid.json"
+        ))
+        .expect("context snapshot event fixture");
+        assert_eq!(event.kind, ChatTurnEventKind::ContextSnapshot);
+        assert!(event.metadata["context_snapshot"].is_object());
     }
 
     #[test]

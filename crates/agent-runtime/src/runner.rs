@@ -30,7 +30,7 @@ use crate::{
     recovery::{RecoveryReport, recover_stale_runs},
     scheduler::AgentScheduler,
     services::TracedAgentServices,
-    trace::MemoryTraceSink,
+    trace::{MemoryTraceSink, TraceEventBuffer},
 };
 
 pub struct RunOutcome {
@@ -44,6 +44,7 @@ const STORE_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 pub struct RunControl {
     pub cancellation: CancellationToken,
     pub trace_events: Option<broadcast::Sender<TraceEvent>>,
+    pub trace_event_buffer: Option<Arc<TraceEventBuffer>>,
 }
 
 impl Default for RunControl {
@@ -51,6 +52,7 @@ impl Default for RunControl {
         Self {
             cancellation: CancellationToken::new(),
             trace_events: None,
+            trace_event_buffer: None,
         }
     }
 }
@@ -563,9 +565,10 @@ impl AgentRunner {
         let scope = request_scope(&request)?;
         let idempotency_key = run_idempotency_key(&spec.id, &scope, &request);
         let lock_key = lock_key(&spec.id, &scope);
-        let trace = Arc::new(match control.trace_events {
-            Some(sender) => MemoryTraceSink::with_event_sender(sender),
-            None => MemoryTraceSink::default(),
+        let trace = Arc::new(match (control.trace_events, control.trace_event_buffer) {
+            (Some(sender), buffer) => MemoryTraceSink::with_event_sender(sender, buffer),
+            (None, Some(buffer)) => MemoryTraceSink::with_event_buffer(buffer),
+            (None, None) => MemoryTraceSink::default(),
         });
         info!(
             run_id = %run_id.0,

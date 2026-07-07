@@ -1,0 +1,30 @@
+{
+  "kind": "context_snapshot",
+  "round": 0,
+  "metadata": {
+    "context_snapshot": {
+      "protocol_version": "agent.v1",
+      "snapshot_id": "context_snapshot_1",
+      "content_hash": "blake3:0123456789abcdef",
+      "created_at": "2026-06-28T09:12:31Z",
+      "token_estimate": 24,
+      "max_input_tokens": 128000,
+      "omitted_block_count": 0,
+      "compacted": false,
+      "blocks": [
+        {
+          "block_id": "message_1",
+          "kind": "message",
+          "source": "chat.messages",
+          "priority": 0,
+          "token_estimate": 24,
+          "content_hash": "blake3:abcdef0123456789",
+          "content": { "role": "user", "content": "ping" },
+          "metadata": {}
+        }
+      ],
+      "metadata": { "source": "fixture" }
+    },
+    "compaction": null
+  }
+}

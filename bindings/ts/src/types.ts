@@ -1,7 +1,7 @@
 export type ProtocolVersion = 'agent.v1'
 
 export type JsonPrimitive = boolean | null | number | string
-export type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue | undefined}
+export type JsonValue = JsonPrimitive | readonly JsonValue[] | {[key: string]: JsonValue | undefined}
 export type JsonObject = {[key: string]: JsonValue | undefined}
 
 export type TriggerKind = 'manual' | 'queue' | 'replay' | 'scheduled' | 'webhook'
@@ -648,6 +648,7 @@ export interface ChatResumeRequest {
 }
 
 export type ChatTurnEventKind =
+  | 'context_snapshot'
   | 'delta'
   | 'done'
   | 'error'

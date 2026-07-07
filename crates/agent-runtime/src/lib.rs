@@ -23,7 +23,7 @@ pub use runner::{AgentRunner, RunControl, RunOutcome, run_idempotency_key};
 pub use scheduler::AgentScheduler;
 pub use services::BasicAgentServices;
 pub use subagent::{SubagentRunContext, run_subagent};
-pub use trace::MemoryTraceSink;
+pub use trace::{MemoryTraceSink, TraceEventBuffer};
 
 pub const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -20,4 +20,5 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-agent-store.workspace = true
+agent-store = { workspace = true, features = ["sqlite"] }
+tempfile.workspace = true

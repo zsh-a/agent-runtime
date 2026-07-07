@@ -23,6 +23,8 @@ pub(crate) struct RuntimeProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) store: Option<Utf8PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) store_backend: Option<RuntimeStoreBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) eval_store: Option<Utf8PathBuf>,
     #[serde(default, skip_serializing_if = "RuntimeSources::is_empty")]
     pub(crate) sources: RuntimeSources,
@@ -48,6 +50,13 @@ pub(crate) struct RuntimeProfile {
     pub(crate) hooks: Option<Vec<HookSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) context: Option<RuntimeContextPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RuntimeStoreBackend {
+    File,
+    Sqlite,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -205,6 +214,9 @@ impl RuntimeProfile {
         }
         if overlay.store.is_some() {
             self.store = overlay.store;
+        }
+        if overlay.store_backend.is_some() {
+            self.store_backend = overlay.store_backend;
         }
         if overlay.eval_store.is_some() {
             self.eval_store = overlay.eval_store;
@@ -379,6 +391,7 @@ mod tests {
 [runtime]
 timeout_seconds = 10
 default_agent = "echo_agent"
+store_backend = "file"
 hooks = [
   { name = "audit_run", event = "RunStart", kind = "process", effect = "observe", command = ["audit-hook"], timeout_ms = 1000 },
 ]
@@ -403,6 +416,7 @@ preserve_recent_messages = 8
 
 [profiles.strict]
 timeout_seconds = 20
+store_backend = "sqlite"
 hooks = [
   { name = "guard_tool", event = "BeforeToolCall", kind = "process", effect = "policy", command = ["guard-hook"] },
 ]
@@ -430,6 +444,10 @@ compact_when_over_budget = false
         let hooks = config.runtime.hooks.expect("profile hooks");
 
         assert_eq!(config.runtime.timeout_seconds, Some(20));
+        assert_eq!(
+            config.runtime.store_backend,
+            Some(RuntimeStoreBackend::Sqlite)
+        );
         assert_eq!(config.runtime.default_agent.as_deref(), Some("echo_agent"));
         assert_eq!(
             config.runtime.tools.sources.as_deref(),

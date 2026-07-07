@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use agent_core::{AgentProposalStore, AgentRunStore, PROTOCOL_VERSION, ProposalStatus};
 use agent_runtime::RUNTIME_VERSION;
-use agent_store::{FileProposalStore, FileRunStore};
 use camino::Utf8Path;
 use miette::{IntoDiagnostic, Result};
 use serde::Serialize;
@@ -99,8 +98,8 @@ struct LlmProviderMetricsAccumulator {
 
 pub(crate) async fn build_metrics_summary(
     store_path: &Utf8Path,
-    run_store: &FileRunStore,
-    proposal_store: &FileProposalStore,
+    run_store: &dyn AgentRunStore,
+    proposal_store: &dyn AgentProposalStore,
 ) -> Result<RuntimeMetricsSummary> {
     let runs = run_store.list_runs(None, None).await.into_diagnostic()?;
     let proposals = proposal_store

@@ -5,8 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use agent_core::{
+    AgentRunRecord, AgentRunStatus, AgentRunStore, PROTOCOL_VERSION, RunId, RunScope,
+};
+use agent_store::SqliteStore;
 use assert_cmd::Command;
 use serde_json::Value;
+use time::OffsetDateTime;
 
 #[test]
 fn catalog_summary_reads_flutter_export_shape() {
@@ -261,6 +266,343 @@ timeout_seconds = 5
     let run_id = output["run_id"].as_str().expect("run id");
     assert_eq!(output["status"], "completed");
     assert!(store.join("runs").join(format!("{run_id}.json")).exists());
+}
+
+#[test]
+fn config_store_backend_sqlite_drives_runtime_commands() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("sqlite-runtime-store");
+    let config_path = dir.path().join("agent-runtime.toml");
+    let registry = std::path::Path::new("../../examples/agents.yaml")
+        .canonicalize()
+        .expect("registry path");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[runtime]
+store = "{}"
+store_backend = "sqlite"
+
+[runtime.sources]
+registry = "{}"
+"#,
+            store.display(),
+            registry.display()
+        ),
+    )
+    .expect("config written");
+
+    let shown = agent_cmd()
+        .args(["--config", config_path.to_str().unwrap(), "config", "show"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let shown: Value = serde_json::from_slice(&shown).expect("config is JSON");
+    assert_eq!(shown["runtime"]["store_backend"], "sqlite");
+
+    let output = agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "run",
+            "echo_agent",
+            "--input",
+            "../../examples/fixtures/echo-input.json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output: Value = serde_json::from_slice(&output).expect("run is JSON");
+    let run_id = output["run_id"].as_str().expect("run id");
+    assert_eq!(output["status"], "completed");
+    assert!(store.join("runtime.sqlite").exists());
+    assert!(
+        store
+            .join("traces")
+            .join(format!("{run_id}.trace.json"))
+            .exists()
+    );
+    assert!(!store.join("runs").join(format!("{run_id}.json")).exists());
+
+    let inspected = agent_cmd()
+        .args(["--config", config_path.to_str().unwrap(), "inspect", run_id])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected: Value = serde_json::from_slice(&inspected).expect("run record is JSON");
+    assert_eq!(inspected["run_id"], run_id);
+    assert_eq!(inspected["agent_id"], "echo_agent");
+
+    let session = agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "session",
+            "create",
+            "--title",
+            "SQLite session",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let session: Value = serde_json::from_slice(&session).expect("session is JSON");
+    let session_id = session["session"]["session_id"]
+        .as_str()
+        .expect("session id");
+
+    let sessions = agent_cmd()
+        .args(["--config", config_path.to_str().unwrap(), "session", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let sessions: Value = serde_json::from_slice(&sessions).expect("sessions are JSON");
+    assert!(
+        sessions
+            .as_array()
+            .expect("sessions array")
+            .iter()
+            .any(|session| session["session_id"] == session_id
+                && session["title"] == "SQLite session")
+    );
+
+    let proposal = agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "proposal",
+            "create",
+            "--run-id",
+            run_id,
+            "--agent-id",
+            "echo_agent",
+            "--kind",
+            "change",
+            "--summary",
+            "SQLite proposal",
+            "--payload-json",
+            "{}",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let proposal: Value = serde_json::from_slice(&proposal).expect("proposal is JSON");
+    let proposal_id = proposal["proposal_id"].as_str().expect("proposal id");
+
+    let proposals = agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "proposal",
+            "list",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let proposals: Value = serde_json::from_slice(&proposals).expect("proposals are JSON");
+    assert!(
+        proposals
+            .as_array()
+            .expect("proposals array")
+            .iter()
+            .any(|proposal| proposal["proposal_id"] == proposal_id
+                && proposal["summary"] == "SQLite proposal")
+    );
+
+    let summary = agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "metrics",
+            "summary",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let summary: Value = serde_json::from_slice(&summary).expect("metrics summary is JSON");
+    assert_eq!(summary["store_root"], store.to_string_lossy().as_ref());
+    assert_eq!(summary["run_count"], 1);
+    assert_eq!(summary["proposal_count"], 1);
+}
+
+#[test]
+fn sqlite_store_backend_rejects_file_oriented_cli_workflows() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("sqlite-guard-store");
+    let config_path = dir.path().join("agent-runtime.toml");
+    let trace_path = std::path::Path::new("../../fixtures/contracts/trace.valid.json")
+        .canonicalize()
+        .expect("trace fixture exists");
+    let catalog_path = std::path::Path::new("../../fixtures/contracts/catalog.valid.json")
+        .canonicalize()
+        .expect("catalog fixture exists");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[runtime]
+store = "{}"
+store_backend = "sqlite"
+"#,
+            store.display()
+        ),
+    )
+    .expect("config written");
+
+    let config = config_path.to_str().expect("utf8 config path").to_owned();
+    let trace = trace_path.to_str().expect("utf8 trace path").to_owned();
+    let catalog = catalog_path.to_str().expect("utf8 catalog path").to_owned();
+    let bundle = dir
+        .path()
+        .join("bundle")
+        .to_str()
+        .expect("utf8 bundle path")
+        .to_owned();
+    let compat_store = dir
+        .path()
+        .join("compat-store")
+        .to_str()
+        .expect("utf8 compat store path")
+        .to_owned();
+
+    let rejected_commands = [
+        (
+            "tui",
+            vec![config.clone(), "tui".to_owned()],
+            "tui does not support runtime.store_backend = \"sqlite\" yet",
+        ),
+        (
+            "replay",
+            vec![
+                config.clone(),
+                "replay".to_owned(),
+                trace.clone(),
+                "--mode".to_owned(),
+                "live".to_owned(),
+            ],
+            "replay does not support runtime.store_backend = \"sqlite\" yet",
+        ),
+        (
+            "debug-bundle export",
+            vec![
+                config.clone(),
+                "debug-bundle".to_owned(),
+                "export".to_owned(),
+                "run_missing".to_owned(),
+                "--out".to_owned(),
+                bundle,
+            ],
+            "debug-bundle export does not support runtime.store_backend = \"sqlite\" yet",
+        ),
+        (
+            "compat",
+            vec![
+                config.clone(),
+                "compat".to_owned(),
+                "check".to_owned(),
+                "--catalog".to_owned(),
+                catalog.clone(),
+                "--agent-id".to_owned(),
+                "ai_chat".to_owned(),
+                "--store".to_owned(),
+                compat_store,
+            ],
+            "compat does not support runtime.store_backend = \"sqlite\" yet",
+        ),
+        (
+            "eval",
+            vec![
+                config.clone(),
+                "eval".to_owned(),
+                "missing-eval.yaml".to_owned(),
+            ],
+            "eval does not support runtime.store_backend = \"sqlite\" yet",
+        ),
+    ];
+
+    for (label, mut args, expected) in rejected_commands {
+        args.insert(0, "--config".to_owned());
+        let stderr = agent_cmd()
+            .args(args)
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone();
+        let stderr = String::from_utf8(stderr).expect("stderr is utf8");
+        assert!(
+            stderr.contains(expected),
+            "{label} should fail on the SQLite file-store guard, stderr: {stderr}"
+        );
+    }
+
+    assert!(
+        !store.join("tui.log").exists(),
+        "sqlite backend guard should not create a file-store TUI log"
+    );
+    assert!(
+        !store.join("runtime.sqlite").exists(),
+        "guarded file-oriented commands should not open the SQLite runtime store"
+    );
+
+    let view_output = agent_cmd()
+        .args(["--config", &config, "replay", &trace, "--mode", "view"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let viewed: Value = serde_json::from_slice(&view_output).expect("view replay prints JSON");
+    assert_eq!(viewed["run_id"], "run_018f0000-0000-7000-8000-000000000000");
+
+    let deterministic_trace = dir.path().join("deterministic-trace.json");
+    let deterministic_output = agent_cmd()
+        .args([
+            "--config",
+            &config,
+            "replay",
+            &trace,
+            "--mode",
+            "deterministic",
+            "--trace-out",
+            deterministic_trace
+                .to_str()
+                .expect("utf8 deterministic trace"),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let deterministic: Value =
+        serde_json::from_slice(&deterministic_output).expect("deterministic replay is JSON");
+    assert_eq!(deterministic["mode"], "deterministic");
+    assert_eq!(
+        deterministic["source_run_id"],
+        "run_018f0000-0000-7000-8000-000000000000"
+    );
+    assert_eq!(
+        read_json(deterministic_trace)["run_id"],
+        deterministic["source_run_id"]
+    );
+    assert!(
+        !store.join("runtime.sqlite").exists(),
+        "view and deterministic replay should not open the SQLite runtime store"
+    );
 }
 
 #[test]
@@ -1243,6 +1585,100 @@ fn recover_abandons_stale_running_runs_in_file_store() {
     assert_eq!(updated["error"]["code"], "stale_running_run_abandoned");
     assert_eq!(updated["error"]["retryable"], true);
     assert!(updated["finished_at"].is_string());
+}
+
+#[tokio::test]
+async fn recover_abandons_stale_running_runs_in_sqlite_store() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("sqlite-recover-store");
+    let config_path = dir.path().join("agent-runtime.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[runtime]
+store = "{}"
+store_backend = "sqlite"
+"#,
+            store.display()
+        ),
+    )
+    .expect("config written");
+
+    let run_id = RunId("run_stale_sqlite_cli".to_owned());
+    let sqlite = SqliteStore::open(
+        camino::Utf8PathBuf::from_path_buf(store.join("runtime.sqlite"))
+            .expect("sqlite path is utf8"),
+    )
+    .await
+    .expect("sqlite store opens");
+    sqlite
+        .create_run(AgentRunRecord {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            run_id: run_id.clone(),
+            idempotency_key: None,
+            agent_id: "ai_chat".to_owned(),
+            status: AgentRunStatus::Running,
+            scope: RunScope::Global,
+            started_at: OffsetDateTime::parse(
+                "2020-01-01T00:00:00Z",
+                &time::format_description::well_known::Rfc3339,
+            )
+            .expect("fixture time parses"),
+            finished_at: None,
+            input: serde_json::json!({"message": "stale sqlite"}),
+            output: serde_json::json!({}),
+            error: None,
+            workflow: None,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .expect("stale run is seeded");
+    drop(sqlite);
+
+    let output = agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().expect("utf8 config path"),
+            "recover",
+            "--timeout-seconds",
+            "1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&output).expect("recovery report is JSON");
+    assert_eq!(report["scanned_runs"], 1);
+    assert_eq!(report["abandoned_count"], 1);
+    assert_eq!(report["recovered_runs"][0]["run_id"], run_id.0);
+    assert_eq!(report["recovered_runs"][0]["new_status"], "abandoned");
+    assert!(store.join("runtime.sqlite").exists());
+    assert!(
+        !store
+            .join("runs")
+            .join(format!("{}.json", run_id.0))
+            .exists()
+    );
+
+    let inspected = agent_cmd()
+        .args([
+            "--config",
+            config_path.to_str().expect("utf8 config path"),
+            "inspect",
+            &run_id.0,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspected: Value = serde_json::from_slice(&inspected).expect("run record is JSON");
+    assert_eq!(inspected["run_id"], run_id.0);
+    assert_eq!(inspected["status"], "abandoned");
+    assert_eq!(inspected["error"]["code"], "stale_running_run_abandoned");
+    assert_eq!(inspected["error"]["retryable"], true);
+    assert!(inspected["finished_at"].is_string());
 }
 
 #[test]
@@ -2421,6 +2857,9 @@ fn http_server_can_cancel_active_run_and_stream_live_events() {
     let inspected = http_json_request(port, "GET", &format!("/runs/{run_id}"), None);
     assert_eq!(inspected["run_id"], run_id);
     assert_eq!(inspected["status"], "running");
+    wait_for_event_log_contains(&store, r#""kind":"run_started""#);
+    let active_before_events = http_json_request(port, "GET", &format!("/runs/{run_id}"), None);
+    assert_eq!(active_before_events["status"], "running");
 
     let events_handle = std::thread::spawn({
         let path = format!("/runs/{run_id}/events");
@@ -2439,6 +2878,8 @@ fn http_server_can_cancel_active_run_and_stream_live_events() {
 
     let events = events_handle.join().expect("events request joins");
     assert!(events.contains("content-type: text/event-stream"));
+    assert!(events.contains("event: run_started"));
+    assert_eq!(events.matches("event: run_started").count(), 1);
     assert!(events.contains("event: run_cancel_requested"));
     assert!(events.contains("event: run_cancelled"));
     assert!(events.contains("event: run_finished"));
@@ -2461,6 +2902,26 @@ fn http_server_can_cancel_active_run_and_stream_live_events() {
     assert!(event_kinds.contains(&"run_cancel_requested"));
     assert!(event_kinds.contains(&"run_cancelled"));
     assert!(event_kinds.contains(&"run_finished"));
+
+    let event_log = std::fs::read_dir(store.join("traces"))
+        .expect("trace dir reads")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".events.jsonl"))
+        })
+        .expect("run event log exists");
+    let event_log_text = std::fs::read_to_string(&event_log).expect("event log reads");
+    assert!(event_log_text.contains(r#""kind":"run_finished""#));
+
+    std::fs::remove_file(store.join("traces").join(format!("{run_id}.trace.json")))
+        .expect("trace fallback removed");
+    let persisted_events = http_text_request(port, "GET", &format!("/runs/{run_id}/events"), None);
+    assert!(persisted_events.contains("content-type: text/event-stream"));
+    assert!(persisted_events.contains("event: run_finished"));
+    assert!(persisted_events.contains(r#""status":"cancelled""#));
 }
 
 #[test]
@@ -2792,6 +3253,73 @@ catalog = "{}"
     let summary = http_json_request(port, "GET", "/catalog/summary", None);
     assert_eq!(summary["agent_count"], 1);
     assert!(store.exists());
+}
+
+#[test]
+fn config_store_backend_sqlite_drives_http_serve() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("configured-http-sqlite-store");
+    let config_path = dir.path().join("agent-runtime.toml");
+    let catalog = std::path::Path::new("../../fixtures/contracts/catalog.valid.json")
+        .canonicalize()
+        .expect("catalog path");
+    let port = reserve_local_port();
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[runtime]
+store = "{}"
+store_backend = "sqlite"
+host = "127.0.0.1"
+port = {}
+
+[runtime.sources]
+catalog = "{}"
+
+[runtime.tools]
+mocks = ['propose_fake={{"http_sqlite":true}}']
+"#,
+            store.display(),
+            port,
+            catalog.display()
+        ),
+    )
+    .expect("config written");
+
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let child = std::process::Command::new(agent_bin)
+        .args(["--config", config_path.to_str().unwrap(), "serve"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("HTTP server starts from sqlite config");
+    let _server = ChildGuard(child);
+    wait_for_http_server(port);
+
+    let run = http_json_request(
+        port,
+        "POST",
+        "/agents/ai_chat/run",
+        Some(r#"{"input":{"message":"via sqlite http"}}"#),
+    );
+    let run_id = run["result"]["run_id"].as_str().expect("run id");
+    assert_eq!(run["result"]["status"], "completed");
+    assert!(store.join("runtime.sqlite").exists());
+    assert!(
+        store
+            .join("traces")
+            .join(format!("{run_id}.trace.json"))
+            .exists()
+    );
+    assert!(!store.join("runs").join(format!("{run_id}.json")).exists());
+
+    let inspected = http_json_request(port, "GET", &format!("/runs/{run_id}"), None);
+    assert_eq!(inspected["run_id"], run_id);
+    assert_eq!(inspected["agent_id"], "ai_chat");
+
+    let metrics = http_json_request(port, "GET", "/metrics/summary", None);
+    assert_eq!(metrics["store_root"], store.to_string_lossy().as_ref());
+    assert_eq!(metrics["run_count"], 1);
 }
 
 #[test]
@@ -4673,6 +5201,36 @@ fn wait_for_http_server(port: u16) {
         assert!(
             Instant::now() < deadline,
             "HTTP server did not start on port {port}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn wait_for_event_log_contains(store: &std::path::Path, needle: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let found = std::fs::read_dir(store.join("traces"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".events.jsonl"))
+            })
+            .any(|path| {
+                std::fs::read_to_string(path)
+                    .map(|text| text.contains(needle))
+                    .unwrap_or(false)
+            });
+        if found {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "event log did not contain {needle}"
         );
         std::thread::sleep(Duration::from_millis(25));
     }

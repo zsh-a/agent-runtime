@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use agent_core::{PROTOCOL_VERSION, RunRequest, RunScope};
 use agent_runtime::{AgentRunner, HookManager};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use camino::Utf8PathBuf;
 use miette::{IntoDiagnostic, Result};
 use serde_json::json;
@@ -12,6 +11,7 @@ use crate::{
     config::execution_policy,
     print_json,
     runtime_config::{ResolvedRuntimeSources, RuntimeSourceOptions, compose_runtime_sources},
+    runtime_stores::RuntimeStores,
     session::{record_session_step, run_metadata},
     tools::{CliServices, ToolOverrides},
     trace_store::{read_json, write_json, write_store_trace},
@@ -27,6 +27,7 @@ pub(crate) struct RunCliOptions {
     pub(crate) thread: Option<String>,
     pub(crate) scope: Option<String>,
     pub(crate) store: Utf8PathBuf,
+    pub(crate) store_backend: crate::config::RuntimeStoreBackend,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_retries: u32,
     pub(crate) retry_backoff_ms: u64,
@@ -57,30 +58,17 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
     })
     .await?;
     tool_overrides.extend_tool_specs(composition.tool_specs.clone());
-    let store_path = options.store;
+    let stores = RuntimeStores::open(options.store_backend, options.store).await?;
+    let store_path = stores.artifact_store_path.clone();
     let metadata = run_metadata(options.session.as_deref(), options.thread.as_deref());
     let scope = parse_run_scope(options.scope.as_deref())?;
-    let store = Arc::new(
-        FileRunStore::new(store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let lock_store = Arc::new(
-        FileLockStore::new(store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let proposal_store = Arc::new(
-        FileProposalStore::new(store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let services = Arc::new(CliServices::with_proposal_store(
+    let services = Arc::new(CliServices::with_stores(
         tool_overrides,
-        proposal_store,
+        stores.state_store.clone(),
+        stores.proposal_store.clone(),
     ));
-    let runner = AgentRunner::new(composition.registry, store, services)
-        .with_lock_store(lock_store)
+    let runner = AgentRunner::new(composition.registry, stores.run_store.clone(), services)
+        .with_lock_store(stores.lock_store.clone())
         .with_hooks(options.hooks)
         .with_policy(execution_policy(
             options.timeout_seconds,
@@ -104,7 +92,12 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
         )
         .await
         .into_diagnostic()?;
-    record_session_step(&store_path, options.thread.as_deref(), &outcome).await?;
+    record_session_step(
+        stores.session_store.as_ref(),
+        options.thread.as_deref(),
+        &outcome,
+    )
+    .await?;
     write_store_trace(&store_path, &outcome.trace).await?;
     if let Some(path) = options.trace_out {
         write_json(path, &outcome.trace).await?;
@@ -122,6 +115,7 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
 pub(crate) struct TickCliOptions {
     pub(crate) sources: ResolvedRuntimeSources,
     pub(crate) store: Utf8PathBuf,
+    pub(crate) store_backend: crate::config::RuntimeStoreBackend,
     pub(crate) hooks: HookManager,
 }
 
@@ -139,28 +133,15 @@ pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
     })
     .await?;
     tool_overrides.extend_tool_specs(composition.tool_specs.clone());
-    let store_path = options.store;
-    let store = Arc::new(
-        FileRunStore::new(store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let lock_store = Arc::new(
-        FileLockStore::new(store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let proposal_store = Arc::new(
-        FileProposalStore::new(store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let services = Arc::new(CliServices::with_proposal_store(
+    let stores = RuntimeStores::open(options.store_backend, options.store).await?;
+    let store_path = stores.artifact_store_path.clone();
+    let services = Arc::new(CliServices::with_stores(
         tool_overrides,
-        proposal_store,
+        stores.state_store.clone(),
+        stores.proposal_store.clone(),
     ));
-    let runner = AgentRunner::new(composition.registry, store, services)
-        .with_lock_store(lock_store)
+    let runner = AgentRunner::new(composition.registry, stores.run_store.clone(), services)
+        .with_lock_store(stores.lock_store.clone())
         .with_hooks(options.hooks);
     let outcomes = runner
         .tick(RunRequest {

@@ -42,6 +42,7 @@ schemars = { version = "1.2.1", features = ["derive", "preserve_order"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 serde_yaml = "0.9"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite"] }
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 time = { version = "0.3.51", features = ["formatting", "parsing", "serde", "serde-well-known"] }

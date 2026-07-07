@@ -1,21 +1,22 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentRunRecord, AgentRunStore, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind,
-    WorkflowRunRequest, WorkflowRunResult,
+    AgentRunRecord, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind, WorkflowRunRequest,
+    WorkflowRunResult,
 };
 use agent_runtime::{AgentRunner, HookManager};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
 
+use crate::config::RuntimeStoreBackend;
 use crate::config::execution_policy;
 use crate::runtime_config::{
     ResolvedRuntimeSources, RuntimeSourceOptions, RuntimeSources, compose_runtime_sources,
 };
+use crate::runtime_stores::RuntimeStores;
 use crate::tools::{CliServices, ToolSelection};
 use crate::trace_store::{
     read_json, write_json, write_store_trace, write_text, write_workflow_traces,
@@ -56,6 +57,7 @@ pub(crate) struct CommandRunOptions {
     pub(crate) configured_sources: RuntimeSources,
     pub(crate) source_overrides: RuntimeSources,
     pub(crate) store: Utf8PathBuf,
+    pub(crate) store_backend: RuntimeStoreBackend,
     pub(crate) tools: ToolSelection,
     pub(crate) trace_out: Option<Utf8PathBuf>,
     pub(crate) timeout_seconds: u64,
@@ -68,6 +70,7 @@ pub(crate) struct WorkflowRunCliOptions {
     pub(crate) input: Utf8PathBuf,
     pub(crate) sources: ResolvedRuntimeSources,
     pub(crate) store: Utf8PathBuf,
+    pub(crate) store_backend: RuntimeStoreBackend,
     pub(crate) tools: ToolSelection,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_retries: u32,
@@ -97,24 +100,14 @@ pub(crate) async fn run_workflow_request(
     })
     .await?;
     overrides.extend_tool_specs(composition.tool_specs.clone());
-    let store = Arc::new(
-        FileRunStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let lock_store = Arc::new(
-        FileLockStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let proposal_store = Arc::new(
-        FileProposalStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let services = Arc::new(CliServices::with_proposal_store(overrides, proposal_store));
-    let runner = AgentRunner::new(composition.registry, store, services)
-        .with_lock_store(lock_store)
+    let stores = RuntimeStores::open(options.store_backend, options.store).await?;
+    let services = Arc::new(CliServices::with_stores(
+        overrides,
+        stores.state_store.clone(),
+        stores.proposal_store.clone(),
+    ));
+    let runner = AgentRunner::new(composition.registry, stores.run_store.clone(), services)
+        .with_lock_store(stores.lock_store.clone())
         .with_hooks(options.hooks)
         .with_policy(execution_policy(
             options.timeout_seconds,
@@ -122,7 +115,7 @@ pub(crate) async fn run_workflow_request(
             options.retry_backoff_ms,
         ));
     let result = runner.run_workflow(request).await.into_diagnostic()?;
-    write_workflow_traces(&options.store, &result).await?;
+    write_workflow_traces(&stores.artifact_store_path, &result).await?;
     Ok(result)
 }
 
@@ -150,13 +143,15 @@ fn validate_workflow_request(value: &Value) -> Result<()> {
 pub(crate) async fn create_command_from_run(
     run_id: String,
     store_path: Utf8PathBuf,
+    store_backend: RuntimeStoreBackend,
     out: Utf8PathBuf,
     description: Option<String>,
     sources: RuntimeSources,
 ) -> Result<CommandCreateReport> {
-    let store = FileRunStore::new(store_path).await.into_diagnostic()?;
+    let stores = RuntimeStores::open(store_backend, store_path).await?;
     let run_id = RunId(run_id);
-    let record = store
+    let record = stores
+        .run_store
         .get_run(&run_id)
         .await
         .into_diagnostic()?
@@ -208,24 +203,15 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
     })
     .await?;
     overrides.extend_tool_specs(composition.tool_specs.clone());
-    let store = Arc::new(
-        FileRunStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let lock_store = Arc::new(
-        FileLockStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let proposal_store = Arc::new(
-        FileProposalStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let services = Arc::new(CliServices::with_proposal_store(overrides, proposal_store));
-    let runner = AgentRunner::new(composition.registry, store, services)
-        .with_lock_store(lock_store)
+    let stores = RuntimeStores::open(options.store_backend, options.store).await?;
+    let artifact_store_path = stores.artifact_store_path.clone();
+    let services = Arc::new(CliServices::with_stores(
+        overrides,
+        stores.state_store.clone(),
+        stores.proposal_store.clone(),
+    ));
+    let runner = AgentRunner::new(composition.registry, stores.run_store.clone(), services)
+        .with_lock_store(stores.lock_store.clone())
         .with_hooks(options.hooks)
         .with_policy(execution_policy(
             options.timeout_seconds,
@@ -253,7 +239,7 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
         )
         .await
         .into_diagnostic()?;
-    write_store_trace(&options.store, &outcome.trace).await?;
+    write_store_trace(&artifact_store_path, &outcome.trace).await?;
     if let Some(path) = options.trace_out {
         write_json(path, &outcome.trace).await?;
     }

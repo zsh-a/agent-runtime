@@ -1,13 +1,16 @@
-use agent_core::{AgentSessionStore, SessionId, ThreadId};
-use agent_store::FileSessionStore;
+use agent_core::{SessionId, ThreadId};
 use camino::Utf8PathBuf;
 use clap::Subcommand;
 use miette::{IntoDiagnostic, Result};
 
 use crate::{
+    config::{RuntimeStoreBackend, configured_path},
     print_json,
+    runtime_stores::RuntimeStores,
     session::{create_session, fork_thread, show_session},
 };
+
+const DEFAULT_STORE: &str = ".agent-runtime/store";
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SessionCommand {
@@ -36,19 +39,29 @@ pub(crate) enum SessionCommand {
     },
 }
 
-pub(crate) async fn run_session_command(command: SessionCommand) -> Result<()> {
+pub(crate) async fn run_session_command(
+    command: SessionCommand,
+    store_backend: RuntimeStoreBackend,
+    configured_store: Option<Utf8PathBuf>,
+) -> Result<()> {
     match command {
         SessionCommand::Create { title, store } => {
-            let report = create_session(store, title).await?;
+            let stores = session_stores(store, store_backend, configured_store.as_ref()).await?;
+            let report = create_session(stores.session_store.as_ref(), title).await?;
             print_json(&report)
         }
         SessionCommand::List { store } => {
-            let store = FileSessionStore::new(store).await.into_diagnostic()?;
-            let sessions = store.list_sessions().await.into_diagnostic()?;
+            let stores = session_stores(store, store_backend, configured_store.as_ref()).await?;
+            let sessions = stores
+                .session_store
+                .list_sessions()
+                .await
+                .into_diagnostic()?;
             print_json(&sessions)
         }
         SessionCommand::Show { session_id, store } => {
-            let report = show_session(store, SessionId(session_id)).await?;
+            let stores = session_stores(store, store_backend, configured_store.as_ref()).await?;
+            let report = show_session(stores.session_store.as_ref(), SessionId(session_id)).await?;
             print_json(&report)
         }
         SessionCommand::Fork {
@@ -57,8 +70,9 @@ pub(crate) async fn run_session_command(command: SessionCommand) -> Result<()> {
             title,
             store,
         } => {
+            let stores = session_stores(store, store_backend, configured_store.as_ref()).await?;
             let report = fork_thread(
-                store,
+                stores.session_store.as_ref(),
                 SessionId(session_id),
                 ThreadId(parent_thread_id),
                 title,
@@ -67,4 +81,16 @@ pub(crate) async fn run_session_command(command: SessionCommand) -> Result<()> {
             print_json(&report)
         }
     }
+}
+
+async fn session_stores(
+    store: Utf8PathBuf,
+    store_backend: RuntimeStoreBackend,
+    configured_store: Option<&Utf8PathBuf>,
+) -> Result<RuntimeStores> {
+    RuntimeStores::open(
+        store_backend,
+        configured_path(store, DEFAULT_STORE, configured_store),
+    )
+    .await
 }

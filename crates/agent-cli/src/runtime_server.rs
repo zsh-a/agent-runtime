@@ -10,8 +10,7 @@ use agent_core::{
     SubagentRunner, ThreadId, ThreadRecord, ToolCaller, ToolError, TraceEvent, TriggerEnvelope,
     TriggerKind, UserContext, WorkflowRunRequest, WorkflowRunResult,
 };
-use agent_runtime::{AgentRunner, HookManager, RunControl};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileSessionStore};
+use agent_runtime::{AgentRunner, HookManager, RunControl, TraceEventBuffer};
 use async_trait::async_trait;
 use camino::Utf8PathBuf;
 use futures::StreamExt;
@@ -20,11 +19,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, broadcast};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
     chat::{ChatLlmOptions, provider_from_options},
+    config::RuntimeStoreBackend,
     metrics::{RuntimeMetricsSummary, build_metrics_summary},
     proposal::{
         ProposalAction, ProposalActionResponse, ProposalDecisionInput, ProposalDecisionResponse,
@@ -38,13 +39,17 @@ use crate::{
     runtime_config::{
         ResolvedRuntimeSources, RuntimeComposition, RuntimeSourceOptions, compose_runtime_sources,
     },
+    runtime_stores::RuntimeStores,
     session::{
         HttpSessionCreateParams, HttpSessionCreateResponse, HttpThreadForkParams,
         SessionShowReport, ThreadForkReport, ThreadWithSteps, ensure_thread,
         record_chat_event_step, record_session_step,
     },
     tools::{CliServices, ToolOverrides},
-    trace_store::{read_store_trace, write_store_trace, write_workflow_traces},
+    trace_store::{
+        append_store_run_event, read_store_run_events, read_store_trace, write_store_run_events,
+        write_store_trace, write_workflow_traces,
+    },
 };
 
 #[derive(Clone)]
@@ -57,9 +62,9 @@ pub(crate) struct RuntimeServer {
     context_policy: ContextPolicy,
     default_agent: Option<String>,
     hooks: HookManager,
-    run_store: Arc<FileRunStore>,
-    proposal_store: Arc<FileProposalStore>,
-    session_store: Arc<FileSessionStore>,
+    run_store: Arc<dyn AgentRunStore>,
+    proposal_store: Arc<dyn AgentProposalStore>,
+    session_store: Arc<dyn AgentSessionStore>,
     store_path: Utf8PathBuf,
     active_runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
 }
@@ -80,6 +85,12 @@ pub(crate) struct ToolCallResponse {
 pub(crate) struct ActiveRun {
     cancellation: CancellationToken,
     events: broadcast::Sender<TraceEvent>,
+    event_buffer: Arc<TraceEventBuffer>,
+}
+
+pub(crate) struct ActiveRunEvents {
+    pub(crate) receiver: broadcast::Receiver<TraceEvent>,
+    pub(crate) replayed_events: Vec<TraceEvent>,
 }
 
 #[derive(Debug, Serialize)]
@@ -199,6 +210,7 @@ impl RuntimeServer {
     pub(crate) async fn new(
         sources: ResolvedRuntimeSources,
         store_path: Utf8PathBuf,
+        store_backend: RuntimeStoreBackend,
         mut tool_overrides: ToolOverrides,
         hooks: HookManager,
         context_policy: ContextPolicy,
@@ -209,6 +221,7 @@ impl RuntimeServer {
             registry = %sources.registry,
             catalog = sources.catalog.as_ref().map(|path| path.as_str()).unwrap_or("none"),
             store = %store_path,
+            store_backend = ?store_backend,
             "initializing runtime server",
         );
         let composition = Arc::new(
@@ -227,38 +240,21 @@ impl RuntimeServer {
             active_domains = ?catalog.active_domains,
             "runtime server catalog loaded",
         );
-        let store = Arc::new(
-            FileRunStore::new(store_path.clone())
-                .await
-                .into_diagnostic()?,
-        );
-        let proposal_store = Arc::new(
-            FileProposalStore::new(store_path.clone())
-                .await
-                .into_diagnostic()?,
-        );
-        let services = Arc::new(CliServices::with_proposal_store(
+        let stores = RuntimeStores::open(store_backend, store_path).await?;
+        let store_path = stores.artifact_store_path.clone();
+        let services = Arc::new(CliServices::with_stores(
             tool_overrides,
-            proposal_store.clone(),
+            stores.state_store.clone(),
+            stores.proposal_store.clone(),
         ));
-        let lock_store = Arc::new(
-            FileLockStore::new(store_path.clone())
-                .await
-                .into_diagnostic()?,
-        );
         let runner = Arc::new(
             AgentRunner::new(
                 composition.registry.clone(),
-                store.clone(),
+                stores.run_store.clone(),
                 services.clone(),
             )
-            .with_lock_store(lock_store)
+            .with_lock_store(stores.lock_store.clone())
             .with_hooks(hooks.clone()),
-        );
-        let session_store = Arc::new(
-            FileSessionStore::new(store_path.clone())
-                .await
-                .into_diagnostic()?,
         );
         Ok(Self {
             catalog,
@@ -269,9 +265,9 @@ impl RuntimeServer {
             context_policy,
             default_agent,
             hooks,
-            run_store: store,
-            proposal_store,
-            session_store,
+            run_store: stores.run_store,
+            proposal_store: stores.proposal_store,
+            session_store: stores.session_store,
             store_path,
             active_runs: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -387,9 +383,13 @@ impl RuntimeServer {
         let metadata = merge_run_metadata(metadata, session_id.as_deref(), thread_id.as_deref());
         let cancellation = CancellationToken::new();
         let (events, _) = broadcast::channel(256);
+        let event_buffer = Arc::new(TraceEventBuffer::default());
+        let event_log_task =
+            spawn_run_event_logger(self.store_path.clone(), run_id.clone(), events.subscribe());
         {
             let mut active = self.active_runs.lock().await;
             if active.contains_key(&run_id.0) {
+                event_log_task.abort();
                 return Err(miette!("run '{}' is already active", run_id.0));
             }
             active.insert(
@@ -397,6 +397,7 @@ impl RuntimeServer {
                 ActiveRun {
                     cancellation: cancellation.clone(),
                     events: events.clone(),
+                    event_buffer: event_buffer.clone(),
                 },
             );
         }
@@ -409,6 +410,10 @@ impl RuntimeServer {
             input_bytes = serialized_value_len(&input),
             "server run_agent requested",
         );
+        let mut control = RunControl::default();
+        control.cancellation = cancellation;
+        control.trace_events = Some(events);
+        control.trace_event_buffer = Some(event_buffer);
         let outcome = self
             .runner
             .run_once_with_control(
@@ -424,16 +429,37 @@ impl RuntimeServer {
                     workflow,
                     metadata,
                 },
-                RunControl {
-                    cancellation,
-                    trace_events: Some(events),
-                },
+                control,
             )
             .await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.active_runs.lock().await.remove(&run_id.0);
+                stop_run_event_logger(event_log_task).await;
+                return Err(error).into_diagnostic();
+            }
+        };
+        let trace_events = outcome.trace.events.clone();
+        stop_run_event_logger(event_log_task).await;
+        if let Err(err) =
+            write_store_run_events(&self.store_path, &outcome.trace.run_id, &trace_events).await
+        {
+            warn!(
+                run_id = %outcome.trace.run_id.0,
+                error = %err,
+                "failed to persist final run event log",
+            );
+        }
+        let persist_result: Result<()> = async {
+            record_session_step(self.session_store.as_ref(), thread_id.as_deref(), &outcome)
+                .await?;
+            write_store_trace(&self.store_path, &outcome.trace).await?;
+            Ok(())
+        }
+        .await;
         self.active_runs.lock().await.remove(&run_id.0);
-        let outcome = outcome.into_diagnostic()?;
-        record_session_step(&self.store_path, thread_id.as_deref(), &outcome).await?;
-        write_store_trace(&self.store_path, &outcome.trace).await?;
+        persist_result?;
         info!(
             run_id = %outcome.result.run_id.0,
             agent_id = %outcome.result.agent_id,
@@ -561,15 +587,16 @@ impl RuntimeServer {
         }))
     }
 
-    pub(crate) async fn subscribe_run_events(
-        &self,
-        run_id: &RunId,
-    ) -> Option<broadcast::Receiver<TraceEvent>> {
-        self.active_runs
-            .lock()
-            .await
-            .get(&run_id.0)
-            .map(|active| active.events.subscribe())
+    pub(crate) async fn subscribe_run_events(&self, run_id: &RunId) -> Option<ActiveRunEvents> {
+        let (receiver, event_buffer) = {
+            let active = self.active_runs.lock().await;
+            let active = active.get(&run_id.0)?;
+            (active.events.subscribe(), active.event_buffer.clone())
+        };
+        Some(ActiveRunEvents {
+            receiver,
+            replayed_events: event_buffer.events().await,
+        })
     }
 
     pub(crate) async fn call_tool(&self, name: String, input: Value) -> Result<ToolCallResponse> {
@@ -627,6 +654,10 @@ impl RuntimeServer {
         read_store_trace(&self.store_path, &run_id)
             .await?
             .ok_or_else(|| miette!("trace for run '{}' was not found", run_id.0))
+    }
+
+    pub(crate) async fn get_run_events(&self, run_id: RunId) -> Result<Option<Vec<TraceEvent>>> {
+        read_store_run_events(&self.store_path, &run_id).await
     }
 
     pub(crate) async fn replay_run(&self, run_id: RunId) -> Result<ReplayExecutionReport> {
@@ -870,6 +901,41 @@ impl RuntimeServer {
     }
 }
 
+fn spawn_run_event_logger(
+    store_path: Utf8PathBuf,
+    run_id: RunId,
+    mut receiver: broadcast::Receiver<TraceEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    if let Err(err) = append_store_run_event(&store_path, &run_id, &event).await {
+                        warn!(
+                            run_id = %run_id.0,
+                            error = %err,
+                            "failed to append run event log",
+                        );
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        run_id = %run_id.0,
+                        skipped,
+                        "run event logger lagged; final trace will rewrite event log on completion",
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+async fn stop_run_event_logger(task: JoinHandle<()>) {
+    task.abort();
+    let _ = task.await;
+}
+
 struct RuntimeServerChatServices {
     inner: Arc<CliServices>,
 }
@@ -989,6 +1055,7 @@ mod tests {
         let server = RuntimeServer::new(
             ResolvedRuntimeSources::new(registry, Some(catalog)),
             store,
+            RuntimeStoreBackend::File,
             ToolOverrides::default(),
             HookManager::default(),
             ContextPolicy::default(),

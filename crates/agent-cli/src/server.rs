@@ -1,4 +1,4 @@
-use std::{convert::Infallible, net::SocketAddr};
+use std::{collections::HashSet, convert::Infallible, net::SocketAddr};
 
 use agent_chat::{ChatError, ChatResumeRequest, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest};
 use agent_core::{ProposalId, RunId, SessionId, ToolSpec, TraceEvent, WorkflowRunRequest};
@@ -249,19 +249,56 @@ async fn http_run_events(
     Path(run_id): Path<String>,
 ) -> Response {
     let run_id = RunId(run_id);
-    if let Some(receiver) = server.subscribe_run_events(&run_id).await {
-        let stream = stream::unfold(receiver, |mut receiver| async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        return Some((Ok::<_, Infallible>(trace_event_sse(event)), receiver));
+    if let Some(active_events) = server.subscribe_run_events(&run_id).await {
+        let seen = active_events
+            .replayed_events
+            .iter()
+            .filter_map(trace_event_dedupe_key)
+            .collect::<HashSet<_>>();
+        let replay_stream = stream::iter(
+            active_events
+                .replayed_events
+                .into_iter()
+                .map(|event| Ok::<_, Infallible>(trace_event_sse(event))),
+        );
+        let live_stream = stream::unfold(
+            (active_events.receiver, seen),
+            |(mut receiver, mut seen)| async move {
+                loop {
+                    match receiver.recv().await {
+                        Ok(event) => {
+                            if let Some(key) = trace_event_dedupe_key(&event)
+                                && !seen.insert(key)
+                            {
+                                continue;
+                            }
+                            return Some((
+                                Ok::<_, Infallible>(trace_event_sse(event)),
+                                (receiver, seen),
+                            ));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 }
-            }
-        });
-        return Sse::new(stream).into_response();
+            },
+        );
+        return Sse::new(replay_stream.chain(live_stream)).into_response();
+    }
+
+    match server.get_run_events(run_id.clone()).await {
+        Ok(Some(events)) => {
+            let stream = stream::iter(
+                events
+                    .into_iter()
+                    .map(|event| Ok::<_, Infallible>(trace_event_sse(event))),
+            );
+            return Sse::new(stream).into_response();
+        }
+        Ok(None) => {}
+        Err(err) => {
+            return http_error(StatusCode::INTERNAL_SERVER_ERROR, "run_events_failed", err);
+        }
     }
 
     match server.get_run_trace(run_id).await {
@@ -472,6 +509,10 @@ fn trace_event_sse(event: TraceEvent) -> Event {
     let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_owned());
 
     Event::default().event(kind).data(data)
+}
+
+fn trace_event_dedupe_key(event: &TraceEvent) -> Option<String> {
+    serde_json::to_string(event).ok()
 }
 
 fn decode_schema_json<T: DeserializeOwned>(

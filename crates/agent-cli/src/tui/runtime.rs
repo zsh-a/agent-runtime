@@ -118,6 +118,8 @@ impl TuiRuntime {
         input: Value,
         input_mode: &str,
     ) -> Result<RunOutcome> {
+        let mut control = RunControl::default();
+        control.cancellation = self.inner.cancellation.clone();
         let outcome = self
             .inner
             .runner
@@ -138,10 +140,7 @@ impl TuiRuntime {
                         "surface": "agent_tui"
                     }),
                 },
-                RunControl {
-                    cancellation: self.inner.cancellation.clone(),
-                    trace_events: None,
-                },
+                control,
             )
             .await
             .into_diagnostic()?;

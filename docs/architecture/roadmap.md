@@ -157,7 +157,10 @@ stores or external-only scheduling.
   - DB-backed `AgentProposalStore`
   - DB-backed `AgentSessionStore`
   - distributed `AgentLockStore`
-- Add migration/versioning strategy for persisted runtime records.
+- Add migration/versioning strategy for persisted runtime records. The SQLite
+  reference backend owns its current schema through a versioned migration list
+  and rejects unsupported future schema versions; explicit multi-version data
+  migrations and ownership policy remain future work.
 - Extend scheduling beyond manual/interval:
   - cron schedule spec (implemented for five-field expressions)
   - timezone handling (implemented for UTC, IANA timezone names, and fixed
@@ -170,7 +173,12 @@ stores or external-only scheduling.
 - Add shared store conformance tests before implementing concrete DB backends
   (implemented for current file-backed and in-memory run/proposal/session
   stores; future DB stores should run the same behavior suite).
-- Add stale-run recovery tests for DB-backed semantics.
+- Add stale-run recovery tests for DB-backed semantics. The SQLite reference
+  backend is covered through CLI recovery; multi-instance recovery semantics
+  remain future work.
+- Add durable lock-store coordination tests for DB-backed semantics. The SQLite
+  reference backend is covered for distinct runner handles sharing the same DB
+  file; multi-process deployment validation remains future work.
 - Add tenant/user scope guidance for locks, stores, metrics, and traces
   (implemented as first-class `RunRequest.scope` /
   `WorkflowRunRequest.scope`, persisted `AgentRunRecord.scope`, scope-aware
@@ -367,10 +375,23 @@ Goal: handle complex agent products that need more than single-run execution.
 
 ## Suggested Near-Term Order
 
-1. Add smoke tests for `examples/business-integration/`.
-2. Add cancellation protocol for runs and chat turns.
-3. Add ChatTurn resume support over HTTP/SSE.
-4. Add DB-backed store conformance tests before implementing a concrete backend.
-5. Promote proposal risk metadata into stable schema fields.
-6. Extend generated TypeScript or Dart bindings after the above protocol
-   surfaces settle.
+Implemented baseline: business integration smoke coverage, active-run
+cancellation plus persisted cancellation intent, HTTP/SSE ChatTurn resume, and
+proposal risk/approval metadata are now part of the current runtime surface. A
+reusable `agent-store` conformance testkit now covers `AgentRunStore`,
+`AgentProposalStore`, and `AgentSessionStore` implementations, and an optional
+SQLite reference backend is available behind the `agent-store/sqlite` feature.
+CLI/server paths can opt into that backend with `runtime.store_backend =
+"sqlite"` while keeping trace/debug artifacts under `runtime.store`. The
+SQLite backend owns its schema through an internal migration list and rejects
+unsupported future schema versions, but does not yet include a full
+cross-version data migration policy. Developer workflows
+that still depend on file-backed runtime stores fail closed under the SQLite
+backend instead of silently mixing persistence modes.
+
+1. Define migration/versioning ownership for persisted runtime records,
+   including multi-instance lock/state-store and recovery semantics.
+2. Extend durable run event replay and subscription contracts across process
+   restarts and multi-instance deployments.
+3. Extend generated TypeScript or Dart SDK coverage from committed schemas and
+   OpenAPI contracts once the next persistence/event-log surfaces settle.

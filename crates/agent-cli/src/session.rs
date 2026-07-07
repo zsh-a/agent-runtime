@@ -3,8 +3,6 @@ use agent_core::{
     AgentSessionStore, SessionId, SessionRecord, StepKind, StepRecord, ThreadId, ThreadRecord,
 };
 use agent_runtime::RunOutcome;
-use agent_store::FileSessionStore;
-use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -57,10 +55,9 @@ pub(crate) struct HttpThreadForkParams {
 }
 
 pub(crate) async fn create_session(
-    store_path: Utf8PathBuf,
+    store: &dyn AgentSessionStore,
     title: String,
 ) -> Result<SessionCreateReport> {
-    let store = FileSessionStore::new(store_path).await.into_diagnostic()?;
     let session = SessionRecord::new(title.clone(), json!({}));
     let thread = ThreadRecord::root(session.session_id.clone(), Some(title), json!({}));
     store
@@ -82,16 +79,13 @@ pub(crate) fn run_metadata(session: Option<&str>, thread: Option<&str>) -> Value
 }
 
 pub(crate) async fn record_session_step(
-    store_path: &Utf8Path,
+    store: &dyn AgentSessionStore,
     thread_id: Option<&str>,
     outcome: &RunOutcome,
 ) -> Result<()> {
     let Some(thread_id) = thread_id else {
         return Ok(());
     };
-    let store = FileSessionStore::new(store_path.to_path_buf())
-        .await
-        .into_diagnostic()?;
     let thread_id = ThreadId(thread_id.to_owned());
     let thread = store
         .get_thread(&thread_id)
@@ -111,7 +105,7 @@ pub(crate) async fn record_session_step(
 }
 
 pub(crate) async fn ensure_thread(
-    store: &FileSessionStore,
+    store: &dyn AgentSessionStore,
     thread_id: Option<&str>,
 ) -> Result<Option<ThreadId>> {
     let Some(thread_id) = thread_id else {
@@ -127,7 +121,7 @@ pub(crate) async fn ensure_thread(
 }
 
 pub(crate) async fn record_chat_event_step(
-    store: &FileSessionStore,
+    store: &dyn AgentSessionStore,
     thread_id: &ThreadId,
     event: &ChatTurnEvent,
 ) -> Result<()> {
@@ -183,10 +177,9 @@ fn chat_event_step(thread_id: ThreadId, event: &ChatTurnEvent) -> Option<StepRec
 }
 
 pub(crate) async fn show_session(
-    store_path: Utf8PathBuf,
+    store: &dyn AgentSessionStore,
     session_id: SessionId,
 ) -> Result<SessionShowReport> {
-    let store = FileSessionStore::new(store_path).await.into_diagnostic()?;
     let session = store
         .get_session(&session_id)
         .await
@@ -208,12 +201,11 @@ pub(crate) async fn show_session(
 }
 
 pub(crate) async fn fork_thread(
-    store_path: Utf8PathBuf,
+    store: &dyn AgentSessionStore,
     session_id: SessionId,
     parent_thread_id: ThreadId,
     title: Option<String>,
 ) -> Result<ThreadForkReport> {
-    let store = FileSessionStore::new(store_path).await.into_diagnostic()?;
     store
         .get_session(&session_id)
         .await
