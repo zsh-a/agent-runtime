@@ -51,6 +51,12 @@ export type RunWorkflowParams = Omit<WorkflowRunRequest, 'protocol_version'> & {
   protocol_version?: WorkflowRunRequest['protocol_version']
 }
 
+export interface RunEventStreamOptions {
+  after?: number | string
+  follow?: boolean
+  lastEventId?: number | string
+}
+
 export class AgentRuntimeHttpError extends Error {
   constructor(
     message: string,
@@ -178,10 +184,28 @@ export class AgentRuntimeHttpClient {
     return this.request('GET', `/runs/${encodeURIComponent(runId)}/trace`)
   }
 
-  async *streamRunEvents(runId: string): AsyncGenerator<AgentTrace['events'][number]> {
-    const response = await this.fetchImpl(`${this.baseUrl}/runs/${encodeURIComponent(runId)}/events`, {
+  async *streamRunEvents(
+    runId: string,
+    options: RunEventStreamOptions = {},
+  ): AsyncGenerator<AgentTrace['events'][number]> {
+    const query = new URLSearchParams()
+    if (options.after !== undefined) {
+      query.set('after', String(options.after))
+    }
+    if (options.follow !== undefined) {
+      query.set('follow', String(options.follow))
+    }
+    const suffix = query.size === 0 ? '' : `?${query.toString()}`
+    const headers: Record<string, string> = {
+      accept: 'text/event-stream',
+    }
+    if (options.lastEventId !== undefined) {
+      headers['Last-Event-ID'] = String(options.lastEventId)
+    }
+
+    const response = await this.fetchImpl(`${this.baseUrl}/runs/${encodeURIComponent(runId)}/events${suffix}`, {
       headers: {
-        accept: 'text/event-stream',
+        ...headers,
       },
       method: 'GET',
     })

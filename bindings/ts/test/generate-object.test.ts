@@ -127,9 +127,47 @@ describe('AgentRuntimeHttpClient', () => {
         model: 'mock-model',
         provider: 'mock',
         turn_id: 'turn_1',
+        protocol_version: 'agent.v1',
       }),
       method: 'POST',
       url: 'http://runtime.local/chat/turn',
+    }])
+  })
+
+  test('streams run events with resumable cursor options', async () => {
+    const calls: Array<{headers?: HeadersInit; method?: string; url: string}> = []
+    const client = new AgentRuntimeHttpClient({
+      baseUrl: 'http://runtime.local/',
+      fetch: async (url, init) => {
+        calls.push({headers: init?.headers, method: init?.method, url: url.toString()})
+        return new Response([
+          'id: 3\n',
+          'event: run_finished\n',
+          'data: {"kind":"run_finished","payload":{"status":"completed"}}\n\n',
+        ].join(''), {
+          headers: {'content-type': 'text/event-stream'},
+          status: 200,
+        })
+      },
+    })
+
+    const events = []
+    for await (const event of client.streamRunEvents('run 1', {
+      after: 2,
+      follow: false,
+      lastEventId: 2,
+    })) {
+      events.push(event)
+    }
+
+    expect(events).toEqual([{kind: 'run_finished', payload: {status: 'completed'}}])
+    expect(calls).toEqual([{
+      headers: {
+        accept: 'text/event-stream',
+        'Last-Event-ID': '2',
+      },
+      method: 'GET',
+      url: 'http://runtime.local/runs/run%201/events?after=2&follow=false',
     }])
   })
 })
