@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
@@ -15,8 +15,8 @@ use axum::{
 };
 use futures::{StreamExt, stream};
 use miette::{IntoDiagnostic, Result, miette};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -32,6 +32,7 @@ use crate::{
     },
     session::{HttpSessionCreateParams, HttpThreadForkParams},
     stdio_protocol::{StdioRequest, StdioResponse, stdio_error, stdio_result},
+    trace_store::{RunEventCursor, RunEventRecord},
 };
 
 #[derive(Debug, Serialize)]
@@ -40,6 +41,18 @@ struct HttpErrorBody {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RunEventsQuery {
+    after: Option<String>,
+    follow: Option<bool>,
+}
+
+struct EnumeratedTraceEvents {
+    all_events: Vec<TraceEvent>,
+    records: Vec<RunEventRecord>,
+    next_cursor: RunEventCursor,
 }
 
 pub(crate) async fn serve_http(server: RuntimeServer, host: String, port: u16) -> Result<()> {
@@ -247,23 +260,35 @@ async fn http_run_trace(
 async fn http_run_events(
     State(server): State<RuntimeServer>,
     Path(run_id): Path<String>,
+    Query(params): Query<RunEventsQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let run_id = RunId(run_id);
+    let after = match run_event_cursor_from_request(&params, &headers) {
+        Ok(after) => after,
+        Err(response) => return response,
+    };
+    let follow = params.follow.unwrap_or(true);
     if let Some(active_events) = server.subscribe_run_events(&run_id).await {
-        let seen = active_events
-            .replayed_events
+        let replayed_events = enumerate_trace_events_after(active_events.replayed_events, after);
+        let seen = replayed_events
+            .all_events
             .iter()
             .filter_map(trace_event_dedupe_key)
             .collect::<HashSet<_>>();
+        let next_cursor = replayed_events.next_cursor;
         let replay_stream = stream::iter(
-            active_events
-                .replayed_events
+            replayed_events
+                .records
                 .into_iter()
-                .map(|event| Ok::<_, Infallible>(trace_event_sse(event))),
+                .map(|record| Ok::<_, Infallible>(trace_event_sse(record.cursor, record.event))),
         );
+        if !follow {
+            return Sse::new(replay_stream).into_response();
+        }
         let live_stream = stream::unfold(
-            (active_events.receiver, seen),
-            |(mut receiver, mut seen)| async move {
+            (active_events.receiver, seen, next_cursor, after),
+            |(mut receiver, mut seen, mut next_cursor, after)| async move {
                 loop {
                     match receiver.recv().await {
                         Ok(event) => {
@@ -272,12 +297,17 @@ async fn http_run_events(
                             {
                                 continue;
                             }
+                            let cursor = next_cursor;
+                            next_cursor = next_cursor.saturating_add(1);
+                            if cursor <= after {
+                                continue;
+                            }
                             return Some((
-                                Ok::<_, Infallible>(trace_event_sse(event)),
-                                (receiver, seen),
+                                Ok::<_, Infallible>(trace_event_sse(cursor, event)),
+                                (receiver, seen, next_cursor, after),
                             ));
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return None,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                     }
                 }
@@ -286,13 +316,15 @@ async fn http_run_events(
         return Sse::new(replay_stream.chain(live_stream)).into_response();
     }
 
-    match server.get_run_events(run_id.clone()).await {
-        Ok(Some(events)) => {
-            let stream = stream::iter(
-                events
-                    .into_iter()
-                    .map(|event| Ok::<_, Infallible>(trace_event_sse(event))),
-            );
+    match server
+        .get_run_event_records_after(run_id.clone(), after)
+        .await
+    {
+        Ok(Some(records)) => {
+            let stream =
+                stream::iter(records.into_iter().map(|record| {
+                    Ok::<_, Infallible>(trace_event_sse(record.cursor, record.event))
+                }));
             return Sse::new(stream).into_response();
         }
         Ok(None) => {}
@@ -304,15 +336,11 @@ async fn http_run_events(
     match server.get_run_trace(run_id).await {
         Ok(trace) => {
             let events = event_records_from_trace(&trace);
-            let stream = stream::iter(events.into_iter().map(|event| {
-                let kind = event
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("trace_event")
-                    .to_owned();
-                let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_owned());
-                Ok::<_, Infallible>(Event::default().event(kind).data(data))
-            }));
+            let stream = stream::iter(
+                enumerate_trace_values_after(events, after)
+                    .into_iter()
+                    .map(|(cursor, event)| Ok::<_, Infallible>(trace_value_sse(cursor, event))),
+            );
             Sse::new(stream).into_response()
         }
         Err(err) => http_error(StatusCode::NOT_FOUND, "trace_not_found", err),
@@ -504,11 +532,106 @@ fn chat_error_event(error: ChatError) -> ChatTurnEvent {
     }
 }
 
-fn trace_event_sse(event: TraceEvent) -> Event {
+fn run_event_cursor_from_request(
+    params: &RunEventsQuery,
+    headers: &HeaderMap,
+) -> std::result::Result<RunEventCursor, Response> {
+    if let Some(after) = params.after.as_deref() {
+        return parse_run_event_cursor(after, "after");
+    }
+    let Some(last_event_id) = headers.get("last-event-id") else {
+        return Ok(0);
+    };
+    let last_event_id = last_event_id.to_str().map_err(|err| {
+        http_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_event_cursor",
+            format!("Last-Event-ID must be valid UTF-8: {err}"),
+        )
+    })?;
+    parse_run_event_cursor(last_event_id, "Last-Event-ID")
+}
+
+fn parse_run_event_cursor(
+    value: &str,
+    label: &str,
+) -> std::result::Result<RunEventCursor, Response> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(http_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_event_cursor",
+            format!("{label} cursor cannot be empty"),
+        ));
+    }
+    value.parse::<RunEventCursor>().map_err(|err| {
+        http_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_event_cursor",
+            format!("{label} cursor must be a non-negative integer: {err}"),
+        )
+    })
+}
+
+fn enumerate_trace_events_after(
+    events: Vec<TraceEvent>,
+    after: RunEventCursor,
+) -> EnumeratedTraceEvents {
+    let next_cursor = RunEventCursor::try_from(events.len())
+        .unwrap_or(RunEventCursor::MAX)
+        .saturating_add(1);
+    let records = events
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            let cursor = RunEventCursor::try_from(index.saturating_add(1)).ok()?;
+            (cursor > after).then_some(RunEventRecord { cursor, event })
+        })
+        .collect();
+    EnumeratedTraceEvents {
+        all_events: events,
+        records,
+        next_cursor,
+    }
+}
+
+fn enumerate_trace_values_after(
+    events: Vec<Value>,
+    after: RunEventCursor,
+) -> Vec<(RunEventCursor, Value)> {
+    events
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            let cursor = RunEventCursor::try_from(index.saturating_add(1)).ok()?;
+            (cursor > after).then_some((cursor, event))
+        })
+        .collect()
+}
+
+fn trace_event_sse(cursor: RunEventCursor, event: TraceEvent) -> Event {
     let kind = event.kind.clone();
     let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_owned());
 
-    Event::default().event(kind).data(data)
+    Event::default()
+        .id(cursor.to_string())
+        .event(kind)
+        .data(data)
+}
+
+fn trace_value_sse(cursor: RunEventCursor, event: Value) -> Event {
+    let kind = event
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("trace_event")
+        .to_owned();
+    let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_owned());
+
+    Event::default()
+        .id(cursor.to_string())
+        .event(kind)
+        .data(data)
 }
 
 fn trace_event_dedupe_key(event: &TraceEvent) -> Option<String> {

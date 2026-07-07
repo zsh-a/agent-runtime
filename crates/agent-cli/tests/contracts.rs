@@ -429,7 +429,28 @@ fn openapi_contract_documents_http_server_routes() {
     assert_eq!(
         openapi["paths"]["/runs/{run_id}/events"]["get"]["responses"]["200"]["content"]["text/event-stream"]
             ["schema"]["description"],
-        "Each SSE data frame is a TraceEvent JSON object from trace.schema.json."
+        "Each SSE data frame is a TraceEvent JSON object from trace.schema.json. SSE id fields are monotonically increasing run event cursors."
+    );
+    assert!(
+        openapi["paths"]["/runs/{run_id}/events"]["get"]["parameters"]
+            .as_array()
+            .expect("run events parameters")
+            .iter()
+            .any(|param| param["name"] == "after" && param["in"] == "query")
+    );
+    assert!(
+        openapi["paths"]["/runs/{run_id}/events"]["get"]["parameters"]
+            .as_array()
+            .expect("run events parameters")
+            .iter()
+            .any(|param| param["name"] == "follow" && param["in"] == "query")
+    );
+    assert!(
+        openapi["paths"]["/runs/{run_id}/events"]["get"]["parameters"]
+            .as_array()
+            .expect("run events parameters")
+            .iter()
+            .any(|param| param["name"] == "Last-Event-ID" && param["in"] == "header")
     );
     assert_eq!(
         openapi["paths"]["/chat/turn"]["post"]["responses"]["200"]["content"]["text/event-stream"]

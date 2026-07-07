@@ -1,9 +1,17 @@
 use agent_core::{RunId, TraceEvent};
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
+
+pub(crate) type RunEventCursor = u64;
+
+#[derive(Debug, Clone)]
+pub(crate) struct RunEventRecord {
+    pub(crate) cursor: RunEventCursor,
+    pub(crate) event: TraceEvent,
+}
 
 pub(crate) async fn write_store_trace(
     store: &Utf8Path,
@@ -96,15 +104,30 @@ fn atomic_write_blocking(path: Utf8PathBuf, bytes: Vec<u8>) -> Result<()> {
         .into_diagnostic()
 }
 
+#[cfg(test)]
 pub(crate) async fn read_store_run_events(
     store: &Utf8Path,
     run_id: &RunId,
 ) -> Result<Option<Vec<TraceEvent>>> {
+    read_store_run_event_records_after(store, run_id, None)
+        .await
+        .map(|records| {
+            records.map(|records| records.into_iter().map(|record| record.event).collect())
+        })
+}
+
+pub(crate) async fn read_store_run_event_records_after(
+    store: &Utf8Path,
+    run_id: &RunId,
+    after: Option<RunEventCursor>,
+) -> Result<Option<Vec<RunEventRecord>>> {
     let path = store_run_events_path(store, run_id);
     if !path.exists() {
         return Ok(None);
     }
-    read_json_lines(path).await.map(Some)
+    read_json_line_records_after(path, after.unwrap_or(0))
+        .await
+        .map(Some)
 }
 
 fn store_trace_path(store: &Utf8Path, run_id: &RunId) -> Utf8PathBuf {
@@ -169,10 +192,10 @@ async fn append_json_line(path: Utf8PathBuf, value: &impl Serialize) -> Result<(
     file.flush().await.into_diagnostic()
 }
 
-async fn read_json_lines<T>(path: Utf8PathBuf) -> Result<Vec<T>>
-where
-    T: DeserializeOwned,
-{
+async fn read_json_line_records_after(
+    path: Utf8PathBuf,
+    after: RunEventCursor,
+) -> Result<Vec<RunEventRecord>> {
     let text = fs_err::tokio::read_to_string(&path)
         .await
         .map_err(|e| miette!("failed to read JSONL at {path}: {e}"))?;
@@ -182,12 +205,20 @@ where
         if line.is_empty() {
             continue;
         }
-        values.push(serde_json::from_str(line).map_err(|e| {
-            miette!(
-                "failed to parse JSONL at {path} line {}: {e}",
-                index.saturating_add(1)
-            )
-        })?);
+        let cursor = RunEventCursor::try_from(index.saturating_add(1))
+            .map_err(|_| miette!("JSONL cursor overflow at {path} line {}", index + 1))?;
+        if cursor <= after {
+            continue;
+        }
+        values.push(RunEventRecord {
+            cursor,
+            event: serde_json::from_str(line).map_err(|e| {
+                miette!(
+                    "failed to parse JSONL at {path} line {}: {e}",
+                    index.saturating_add(1)
+                )
+            })?,
+        });
     }
     Ok(values)
 }
@@ -252,5 +283,31 @@ mod tests {
             read.iter().all(|event| event.kind != "old_partial_event"),
             "atomic final rewrite should replace the old JSONL contents"
         );
+    }
+
+    #[tokio::test]
+    async fn run_event_log_reads_records_after_cursor() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = Utf8PathBuf::from_path_buf(temp.path().join("store")).expect("utf8 path");
+        let run_id = RunId("run_event_after".to_owned());
+        let events = vec![
+            TraceEvent::new("run_started", json!({"index": 1})),
+            TraceEvent::new("tool_call_started", json!({"index": 2})),
+            TraceEvent::new("run_finished", json!({"index": 3})),
+        ];
+
+        write_store_run_events(&store, &run_id, &events)
+            .await
+            .expect("events write");
+        let read = read_store_run_event_records_after(&store, &run_id, Some(1))
+            .await
+            .expect("events read")
+            .expect("event log exists");
+
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].cursor, 2);
+        assert_eq!(read[0].event.kind, "tool_call_started");
+        assert_eq!(read[1].cursor, 3);
+        assert_eq!(read[1].event.kind, "run_finished");
     }
 }

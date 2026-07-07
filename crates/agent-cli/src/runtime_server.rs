@@ -47,8 +47,8 @@ use crate::{
     },
     tools::{CliServices, ToolOverrides},
     trace_store::{
-        append_store_run_event, read_store_run_events, read_store_trace, write_store_run_events,
-        write_store_trace, write_workflow_traces,
+        RunEventCursor, RunEventRecord, append_store_run_event, read_store_run_event_records_after,
+        read_store_trace, write_store_run_events, write_store_trace, write_workflow_traces,
     },
 };
 
@@ -656,8 +656,12 @@ impl RuntimeServer {
             .ok_or_else(|| miette!("trace for run '{}' was not found", run_id.0))
     }
 
-    pub(crate) async fn get_run_events(&self, run_id: RunId) -> Result<Option<Vec<TraceEvent>>> {
-        read_store_run_events(&self.store_path, &run_id).await
+    pub(crate) async fn get_run_event_records_after(
+        &self,
+        run_id: RunId,
+        after: RunEventCursor,
+    ) -> Result<Option<Vec<RunEventRecord>>> {
+        read_store_run_event_records_after(&self.store_path, &run_id, Some(after)).await
     }
 
     pub(crate) async fn replay_run(&self, run_id: RunId) -> Result<ReplayExecutionReport> {

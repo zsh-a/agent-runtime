@@ -231,6 +231,26 @@ paths:
           schema:
             type: string
             pattern: "^run_"
+        - name: after
+          in: query
+          required: false
+          description: Resume after this run event cursor. Query parameter takes precedence over Last-Event-ID.
+          schema:
+            type: integer
+            minimum: 0
+        - name: follow
+          in: query
+          required: false
+          description: When false, return the currently available event snapshot and close the stream.
+          schema:
+            type: boolean
+            default: true
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Standard SSE resume cursor used when the after query parameter is absent.
+          schema:
+            type: string
       responses:
         "200":
           description: Server-sent event stream of active run events when the run is live, otherwise persisted trace events.
@@ -238,7 +258,7 @@ paths:
             text/event-stream:
               schema:
                 type: string
-                description: Each SSE data frame is a TraceEvent JSON object from trace.schema.json.
+                description: Each SSE data frame is a TraceEvent JSON object from trace.schema.json. SSE id fields are monotonically increasing run event cursors.
         "404":
           description: Trace was not found.
           content:

@@ -2731,9 +2731,51 @@ fn http_server_handles_catalog_summary_and_agent_run() {
     let events = http_text_request(port, "GET", &format!("/runs/{run_id}/events"), None);
     assert!(events.starts_with("HTTP/1.1 200"));
     assert!(events.contains("content-type: text/event-stream"));
+    assert!(events.contains("id: 1"));
+    assert!(events.contains("id: 2"));
     assert!(events.contains("event: run_started"));
     assert!(events.contains("event: catalog_dry_run.agent_selected"));
     assert!(events.contains(r#""kind":"catalog_dry_run.agent_selected""#));
+    let resumed_events =
+        http_text_request(port, "GET", &format!("/runs/{run_id}/events?after=1"), None);
+    assert!(!resumed_events.contains("event: run_started"));
+    assert!(resumed_events.contains("id: 2"));
+    assert!(resumed_events.contains("event: catalog_dry_run.agent_selected"));
+    let header_resumed_events = http_text_request_with_headers(
+        port,
+        "GET",
+        &format!("/runs/{run_id}/events"),
+        None,
+        &[("Last-Event-ID", "1")],
+    );
+    assert!(!header_resumed_events.contains("event: run_started"));
+    assert!(header_resumed_events.contains("id: 2"));
+    let query_cursor_wins = http_text_request_with_headers(
+        port,
+        "GET",
+        &format!("/runs/{run_id}/events?after=1"),
+        None,
+        &[("Last-Event-ID", "2")],
+    );
+    assert!(query_cursor_wins.contains("id: 2"));
+    assert!(query_cursor_wins.contains("event: catalog_dry_run.agent_selected"));
+    let invalid_cursor = try_http_text_request(
+        port,
+        "GET",
+        &format!("/runs/{run_id}/events?after=not-a-cursor"),
+        None,
+    )
+    .expect_err("invalid run event cursor should return an HTTP error");
+    assert!(invalid_cursor.contains("HTTP/1.1 400"));
+    assert!(invalid_cursor.contains("invalid_event_cursor"));
+
+    let event_log = find_single_run_event_log(&store);
+    std::fs::remove_file(event_log).expect("event log removed for trace fallback");
+    let fallback_events =
+        http_text_request(port, "GET", &format!("/runs/{run_id}/events?after=1"), None);
+    assert!(!fallback_events.contains("event: run_started"));
+    assert!(fallback_events.contains("id: 2"));
+    assert!(fallback_events.contains("event: catalog_dry_run.agent_selected"));
 
     let replay = http_json_request(port, "POST", &format!("/runs/{run_id}/replay"), Some("{}"));
     let replay_run_id = replay["replay_run_id"]
@@ -2860,6 +2902,16 @@ fn http_server_can_cancel_active_run_and_stream_live_events() {
     wait_for_event_log_contains(&store, r#""kind":"run_started""#);
     let active_before_events = http_json_request(port, "GET", &format!("/runs/{run_id}"), None);
     assert_eq!(active_before_events["status"], "running");
+    let active_snapshot = http_text_request(
+        port,
+        "GET",
+        &format!("/runs/{run_id}/events?follow=false"),
+        None,
+    );
+    assert!(active_snapshot.contains("content-type: text/event-stream"));
+    assert!(active_snapshot.contains("id: 1"));
+    assert!(active_snapshot.contains("event: run_started"));
+    assert!(!active_snapshot.contains("event: run_finished"));
 
     let events_handle = std::thread::spawn({
         let path = format!("/runs/{run_id}/events");
@@ -2878,6 +2930,7 @@ fn http_server_can_cancel_active_run_and_stream_live_events() {
 
     let events = events_handle.join().expect("events request joins");
     assert!(events.contains("content-type: text/event-stream"));
+    assert!(events.contains("id: 1"));
     assert!(events.contains("event: run_started"));
     assert_eq!(events.matches("event: run_started").count(), 1);
     assert!(events.contains("event: run_cancel_requested"));
@@ -2903,16 +2956,7 @@ fn http_server_can_cancel_active_run_and_stream_live_events() {
     assert!(event_kinds.contains(&"run_cancelled"));
     assert!(event_kinds.contains(&"run_finished"));
 
-    let event_log = std::fs::read_dir(store.join("traces"))
-        .expect("trace dir reads")
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".events.jsonl"))
-        })
-        .expect("run event log exists");
+    let event_log = find_single_run_event_log(&store);
     let event_log_text = std::fs::read_to_string(&event_log).expect("event log reads");
     assert!(event_log_text.contains(r#""kind":"run_finished""#));
 
@@ -5236,6 +5280,19 @@ fn wait_for_event_log_contains(store: &std::path::Path, needle: &str) {
     }
 }
 
+fn find_single_run_event_log(store: &std::path::Path) -> std::path::PathBuf {
+    std::fs::read_dir(store.join("traces"))
+        .expect("trace dir reads")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".events.jsonl"))
+        })
+        .expect("run event log exists")
+}
+
 fn http_json_request(port: u16, method: &str, path: &str, body: Option<&str>) -> Value {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -5274,9 +5331,19 @@ fn http_json_status_request(
 }
 
 fn http_text_request(port: u16, method: &str, path: &str, body: Option<&str>) -> String {
+    http_text_request_with_headers(port, method, path, body, &[])
+}
+
+fn http_text_request_with_headers(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    headers: &[(&str, &str)],
+) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match try_http_text_request(port, method, path, body) {
+        match try_http_text_request_with_headers(port, method, path, body, headers) {
             Ok(value) => return value,
             Err(err) => {
                 assert!(
@@ -5359,12 +5426,26 @@ fn try_http_text_request(
     path: &str,
     body: Option<&str>,
 ) -> Result<String, String> {
+    try_http_text_request_with_headers(port, method, path, body, &[])
+}
+
+fn try_http_text_request_with_headers(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    headers: &[(&str, &str)],
+) -> Result<String, String> {
     let body = body.unwrap_or("");
     let mut stream =
         TcpStream::connect(("127.0.0.1", port)).map_err(|err| format!("connect: {err}"))?;
+    let extra_headers = headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\n\r\n{body}",
         body.len()
     )
     .map_err(|err| format!("write: {err}"))?;
