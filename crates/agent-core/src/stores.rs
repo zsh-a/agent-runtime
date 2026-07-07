@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::{
-    Agent, AgentError, AgentRunRecord, AgentSpec, ProposalEnvelope, ProposalId, RunId, RunLease,
-    RunScope, SessionId, SessionRecord, StepRecord, StoreError, ThreadId, ThreadRecord, TraceEvent,
+    Agent, AgentError, AgentRunRecord, AgentRunStatus, AgentSpec, ProposalEnvelope, ProposalId,
+    RunId, RunLease, RunScope, SessionId, SessionRecord, StepRecord, StoreError, ThreadId,
+    ThreadRecord, TraceEvent,
 };
 
 #[async_trait]
@@ -24,6 +25,21 @@ pub trait AgentRunStore: Send + Sync {
         agent_id: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<AgentRunRecord>, StoreError>;
+    async fn list_runs_by_status(
+        &self,
+        status: AgentRunStatus,
+        limit: Option<usize>,
+    ) -> Result<Vec<AgentRunRecord>, StoreError> {
+        let runs = self.list_runs(None, None).await?;
+        let mut filtered = runs
+            .into_iter()
+            .filter(|run| run.status == status)
+            .collect::<Vec<_>>();
+        if let Some(limit) = limit {
+            filtered.truncate(limit);
+        }
+        Ok(filtered)
+    }
     async fn last_run(
         &self,
         agent_id: &str,

@@ -100,6 +100,25 @@ pub async fn assert_run_store_conformance(store: &dyn AgentRunStore) {
         .expect("run exists");
     assert_eq!(fetched.status, AgentRunStatus::Failed);
     assert_eq!(fetched.output, json!({"updated": true}));
+
+    let failed_runs = store
+        .list_runs_by_status(AgentRunStatus::Failed, None)
+        .await
+        .expect("failed runs listed");
+    assert!(
+        failed_runs.iter().any(|run| run.run_id == updated.run_id),
+        "status-filtered run list includes updated failed run"
+    );
+    let completed_runs = store
+        .list_runs_by_status(AgentRunStatus::Completed, None)
+        .await
+        .expect("completed runs listed");
+    assert!(
+        completed_runs
+            .iter()
+            .all(|run| run.run_id != updated.run_id),
+        "status-filtered run list excludes records after status updates"
+    );
 }
 
 /// Assert the shared behavior expected from an `AgentRunEventStore`

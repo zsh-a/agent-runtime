@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use agent_core::{
-    AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunStore,
-    AgentSessionStore, AgentStateStore, ProposalEnvelope, ProposalId, RunEventCursor,
-    RunEventRecord, RunId, RunLease, RunScope, SessionId, SessionRecord, StepRecord, StoreError,
-    ThreadId, ThreadRecord, TraceEvent,
+    AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunStatus,
+    AgentRunStore, AgentSessionStore, AgentStateStore, ProposalEnvelope, ProposalId,
+    RunEventCursor, RunEventRecord, RunId, RunLease, RunScope, SessionId, SessionRecord,
+    StepRecord, StoreError, ThreadId, ThreadRecord, TraceEvent,
 };
 use async_trait::async_trait;
 use camino::Utf8Path;
@@ -139,6 +139,25 @@ const SQLITE_MIGRATIONS: &[SqliteMigration] = &[
             r#"
         CREATE INDEX IF NOT EXISTS idx_agent_run_events_run_cursor
         ON agent_run_events(run_id, cursor ASC)
+            "#,
+        ],
+    },
+    SqliteMigration {
+        version: 4,
+        name: "run_status_index",
+        statements: &[
+            r#"
+        ALTER TABLE agent_runs
+        ADD COLUMN status TEXT NOT NULL DEFAULT ''
+        "#,
+            r#"
+        UPDATE agent_runs
+        SET status = COALESCE(json_extract(record_json, '$.status'), '')
+        WHERE status = ''
+        "#,
+            r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_status_started
+        ON agent_runs(status, started_at_sort DESC)
         "#,
         ],
     },
@@ -535,6 +554,27 @@ impl AgentRunStore for SqliteStore {
         decode_records(rows)
     }
 
+    async fn list_runs_by_status(
+        &self,
+        status: AgentRunStatus,
+        limit: Option<usize>,
+    ) -> Result<Vec<AgentRunRecord>, StoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT record_json FROM agent_runs
+            WHERE status = ?
+            ORDER BY started_at_sort DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(encode_run_status(&status))
+        .bind(checked_limit(limit.unwrap_or(i64::MAX as usize))?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+        decode_records(rows)
+    }
+
     async fn last_run(
         &self,
         agent_id: &str,
@@ -751,16 +791,26 @@ impl AgentSessionStore for SqliteStore {
 
 async fn upsert_run(pool: &SqlitePool, run: AgentRunRecord) -> Result<(), StoreError> {
     let (scope_type, scope_id) = encode_scope(&run.scope);
+    let status = encode_run_status(&run.status);
     let record_json = encode_record(&run)?;
     sqlx::query(
         r#"
-        INSERT INTO agent_runs(run_id, agent_id, scope_type, scope_id, started_at_sort, record_json)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO agent_runs(
+            run_id,
+            agent_id,
+            scope_type,
+            scope_id,
+            started_at_sort,
+            status,
+            record_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
             agent_id = excluded.agent_id,
             scope_type = excluded.scope_type,
             scope_id = excluded.scope_id,
             started_at_sort = excluded.started_at_sort,
+            status = excluded.status,
             record_json = excluded.record_json
         "#,
     )
@@ -769,6 +819,7 @@ async fn upsert_run(pool: &SqlitePool, run: AgentRunRecord) -> Result<(), StoreE
     .bind(scope_type)
     .bind(scope_id)
     .bind(sort_key(run.started_at)?)
+    .bind(status)
     .bind(record_json)
     .execute(pool)
     .await
@@ -814,6 +865,18 @@ fn encode_scope(scope: &RunScope) -> (&'static str, &str) {
         RunScope::Global => ("global", ""),
         RunScope::User(id) => ("user", id),
         RunScope::Tenant(id) => ("tenant", id),
+    }
+}
+
+fn encode_run_status(status: &AgentRunStatus) -> &'static str {
+    match status {
+        AgentRunStatus::Running => "running",
+        AgentRunStatus::Completed => "completed",
+        AgentRunStatus::Skipped => "skipped",
+        AgentRunStatus::Failed => "failed",
+        AgentRunStatus::Cancelled => "cancelled",
+        AgentRunStatus::TimedOut => "timed_out",
+        AgentRunStatus::Abandoned => "abandoned",
     }
 }
 

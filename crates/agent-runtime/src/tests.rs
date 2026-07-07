@@ -2024,6 +2024,24 @@ async fn recovery_abandons_only_stale_running_runs() {
         })
         .await
         .expect("fresh run saved");
+    store
+        .create_run(AgentRunRecord {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            run_id: RunId("run_completed_old".to_owned()),
+            idempotency_key: Some("idem_completed_old".to_owned()),
+            agent_id: "echo".to_owned(),
+            status: AgentRunStatus::Completed,
+            scope: RunScope::Global,
+            started_at: now - time::Duration::seconds(120),
+            finished_at: Some(now - time::Duration::seconds(119)),
+            input: json!({"message": "already done"}),
+            output: json!({}),
+            error: None,
+            workflow: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("completed run saved");
 
     let report = recover_stale_runs(
         store.as_ref(),
@@ -2037,6 +2055,8 @@ async fn recovery_abandons_only_stale_running_runs() {
     .await
     .expect("recovery succeeds");
 
+    // Recovery asks the store for running candidates instead of scanning every
+    // historical run record.
     assert_eq!(report.scanned_runs, 2);
     assert_eq!(report.abandoned_count, 1);
     assert_eq!(report.recovered_runs[0].run_id.0, "run_stale");

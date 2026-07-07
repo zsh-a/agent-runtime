@@ -34,7 +34,7 @@ pub async fn recover_stale_runs(
 ) -> Result<RecoveryReport, AgentError> {
     let now = OffsetDateTime::now_utc();
     let runs = run_store
-        .list_runs(None, None)
+        .list_runs_by_status(AgentRunStatus::Running, None)
         .await
         .map_err(|e| AgentError::internal(e.to_string()))?;
     let scanned_runs = runs.len();
