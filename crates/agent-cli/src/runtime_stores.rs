@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use agent_core::{
     AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunStore, AgentSessionStore,
-    AgentStateStore,
+    AgentStateStore, AgentTraceStore,
 };
 use agent_store::{
     FileLockStore, FileProposalStore, FileRunEventStore, FileRunStore, FileSessionStore,
-    InMemoryStateStore, SqliteStore,
+    FileTraceStore, InMemoryStateStore, SqliteStore,
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result};
@@ -18,6 +18,7 @@ pub(crate) struct RuntimeStores {
     pub(crate) artifact_store_path: Utf8PathBuf,
     pub(crate) run_store: Arc<dyn AgentRunStore>,
     pub(crate) event_store: Arc<dyn AgentRunEventStore>,
+    pub(crate) trace_store: Arc<dyn AgentTraceStore>,
     pub(crate) proposal_store: Arc<dyn AgentProposalStore>,
     pub(crate) session_store: Arc<dyn AgentSessionStore>,
     pub(crate) state_store: Arc<dyn AgentStateStore>,
@@ -51,6 +52,11 @@ impl RuntimeStores {
                     .await
                     .into_diagnostic()?,
             ),
+            trace_store: Arc::new(
+                FileTraceStore::new(artifact_store_path.clone())
+                    .await
+                    .into_diagnostic()?,
+            ),
             proposal_store: Arc::new(
                 FileProposalStore::new(artifact_store_path.clone())
                     .await
@@ -79,6 +85,11 @@ impl RuntimeStores {
         );
         let run_store: Arc<dyn AgentRunStore> = sqlite.clone();
         let event_store: Arc<dyn AgentRunEventStore> = sqlite.clone();
+        let trace_store: Arc<dyn AgentTraceStore> = Arc::new(
+            FileTraceStore::new(artifact_store_path.clone())
+                .await
+                .into_diagnostic()?,
+        );
         let proposal_store: Arc<dyn AgentProposalStore> = sqlite.clone();
         let session_store: Arc<dyn AgentSessionStore> = sqlite.clone();
         let state_store: Arc<dyn AgentStateStore> = sqlite.clone();
@@ -87,6 +98,7 @@ impl RuntimeStores {
             artifact_store_path,
             run_store,
             event_store,
+            trace_store,
             proposal_store,
             session_store,
             state_store,

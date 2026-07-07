@@ -8,6 +8,7 @@ mod util;
 
 pub use file::{
     FileLockStore, FileProposalStore, FileRunEventStore, FileRunStore, FileSessionStore,
+    FileTraceStore,
 };
 pub use memory::{
     InMemoryProposalStore, InMemoryRunStore, InMemorySessionStore, InMemoryStateStore,

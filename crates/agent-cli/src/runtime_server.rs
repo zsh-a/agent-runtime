@@ -4,10 +4,10 @@ use agent_chat::{ChatEventStream, ChatResumeRequest, ChatTurnRequest, ChatTurnRu
 use agent_core::{
     AgentCancellation, AgentError, AgentEvent, AgentEventEmitter, AgentProposalStore,
     AgentRunEventStore, AgentRunRecord, AgentRunResult, AgentRunStatus, AgentRunStore,
-    AgentRuntimeCatalog, AgentServices, AgentSessionStore, AgentStateAccess, ApprovalLevel,
-    ArtifactPublisher, ContextPolicy, PROTOCOL_VERSION, ProposalCreator, ProposalDiff,
-    ProposalEnvelope, ProposalId, ProposalWarning, RunEventCursor, RunEventRecord, RunId,
-    RunRequest, RunScope, RunWorkflow, SessionId, SessionRecord, SubagentRunner, ThreadId,
+    AgentRuntimeCatalog, AgentServices, AgentSessionStore, AgentStateAccess, AgentTraceStore,
+    ApprovalLevel, ArtifactPublisher, ContextPolicy, PROTOCOL_VERSION, ProposalCreator,
+    ProposalDiff, ProposalEnvelope, ProposalId, ProposalWarning, RunEventCursor, RunEventRecord,
+    RunId, RunRequest, RunScope, RunWorkflow, SessionId, SessionRecord, SubagentRunner, ThreadId,
     ThreadRecord, ToolCaller, ToolError, TraceEvent, TriggerEnvelope, TriggerKind, UserContext,
     WorkflowRunRequest, WorkflowRunResult,
 };
@@ -47,7 +47,6 @@ use crate::{
         record_chat_event_step, record_session_step,
     },
     tools::{CliServices, ToolOverrides},
-    trace_store::{read_store_trace, write_store_trace, write_workflow_traces},
 };
 
 #[derive(Clone)]
@@ -62,6 +61,7 @@ pub(crate) struct RuntimeServer {
     hooks: HookManager,
     run_store: Arc<dyn AgentRunStore>,
     event_store: Arc<dyn AgentRunEventStore>,
+    trace_store: Arc<dyn AgentTraceStore>,
     proposal_store: Arc<dyn AgentProposalStore>,
     session_store: Arc<dyn AgentSessionStore>,
     store_path: Utf8PathBuf,
@@ -266,6 +266,7 @@ impl RuntimeServer {
             hooks,
             run_store: stores.run_store,
             event_store: stores.event_store,
+            trace_store: stores.trace_store,
             proposal_store: stores.proposal_store,
             session_store: stores.session_store,
             store_path,
@@ -456,7 +457,10 @@ impl RuntimeServer {
         let persist_result: Result<()> = async {
             record_session_step(self.session_store.as_ref(), thread_id.as_deref(), &outcome)
                 .await?;
-            write_store_trace(&self.store_path, &outcome.trace).await?;
+            self.trace_store
+                .write_trace(outcome.trace.clone())
+                .await
+                .into_diagnostic()?;
             Ok(())
         }
         .await;
@@ -486,7 +490,11 @@ impl RuntimeServer {
             "server workflow run requested",
         );
         let result = self.runner.run_workflow(request).await.into_diagnostic()?;
-        let trace_count = write_workflow_traces(&self.store_path, &result).await?;
+        let trace_count = self
+            .trace_store
+            .write_workflow_traces(&result)
+            .await
+            .into_diagnostic()?;
         info!(
             workflow_id = %result.workflow_id,
             status = ?result.status,
@@ -653,9 +661,13 @@ impl RuntimeServer {
 
     pub(crate) async fn get_run_trace(&self, run_id: RunId) -> Result<Value> {
         debug!(run_id = %run_id.0, "server get_run_trace requested");
-        read_store_trace(&self.store_path, &run_id)
-            .await?
-            .ok_or_else(|| miette!("trace for run '{}' was not found", run_id.0))
+        let trace = self
+            .trace_store
+            .read_trace(&run_id)
+            .await
+            .into_diagnostic()?
+            .ok_or_else(|| miette!("trace for run '{}' was not found", run_id.0))?;
+        serde_json::to_value(trace).into_diagnostic()
     }
 
     pub(crate) async fn get_run_event_records_after(

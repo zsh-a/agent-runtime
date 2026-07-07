@@ -5,9 +5,9 @@ use std::{
 
 use agent_core::{
     AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunStatus,
-    AgentRunStore, AgentSessionStore, AgentStateStore, PROTOCOL_VERSION, ProposalEnvelope,
-    ProposalId, ProposalStatus, RunId, RunScope, SessionRecord, StepRecord, ThreadRecord,
-    TraceEvent,
+    AgentRunStore, AgentSessionStore, AgentStateStore, AgentTrace, AgentTraceStore,
+    PROTOCOL_VERSION, ProposalEnvelope, ProposalId, ProposalStatus, RunId, RunScope, SessionRecord,
+    StepRecord, ThreadRecord, TraceEvent,
 };
 use serde_json::json;
 use time::OffsetDateTime;
@@ -196,6 +196,50 @@ pub async fn assert_run_event_store_conformance(store: &dyn AgentRunEventStore) 
         .expect("empty event log reads")
         .expect("event log marker exists");
     assert!(empty.is_empty());
+}
+
+/// Assert the shared behavior expected from an `AgentTraceStore`
+/// implementation.
+pub async fn assert_trace_store_conformance(store: &dyn AgentTraceStore) {
+    let prefix = unique_prefix("trace");
+    let run_id = RunId(id(&prefix, "run"));
+
+    assert!(
+        store
+            .read_trace(&run_id)
+            .await
+            .expect("missing trace checks")
+            .is_none()
+    );
+
+    let mut trace = trace_record(run_id.clone(), &id(&prefix, "agent"));
+    trace.events = vec![TraceEvent::new("run_started", json!({"attempt": 1}))];
+    store
+        .write_trace(trace.clone())
+        .await
+        .expect("trace written");
+    let stored = store
+        .read_trace(&run_id)
+        .await
+        .expect("trace reads")
+        .expect("trace exists");
+    assert_eq!(stored.run_id, run_id);
+    assert_eq!(stored.events.len(), 1);
+    assert_eq!(stored.events[0].payload["attempt"], 1);
+
+    trace.events = vec![TraceEvent::new("run_finished", json!({"attempt": 2}))];
+    store
+        .write_trace(trace)
+        .await
+        .expect("trace replacement written");
+    let replaced = store
+        .read_trace(&run_id)
+        .await
+        .expect("replaced trace reads")
+        .expect("trace exists");
+    assert_eq!(replaced.events.len(), 1);
+    assert_eq!(replaced.events[0].kind, "run_finished");
+    assert_eq!(replaced.events[0].payload["attempt"], 2);
 }
 
 /// Assert the shared behavior expected from an `AgentProposalStore`
@@ -509,6 +553,27 @@ fn run_record(
         error: None,
         workflow: None,
         metadata: json!({}),
+    }
+}
+
+fn trace_record(run_id: RunId, agent_id: &str) -> AgentTrace {
+    let now = OffsetDateTime::now_utc();
+    AgentTrace {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        runtime_version: "test-runtime".to_owned(),
+        run_id,
+        agent_id: agent_id.to_owned(),
+        agent_version: "test-agent".to_owned(),
+        scope: RunScope::Global,
+        started_at: now,
+        finished_at: now,
+        input: json!({}),
+        output: json!({}),
+        workflow: None,
+        usage_summary: None,
+        spans: Vec::new(),
+        events: Vec::new(),
+        artifact_refs: Vec::new(),
     }
 }
 

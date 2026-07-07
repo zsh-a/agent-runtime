@@ -7,6 +7,7 @@ use crate::testkit::{
     assert_lock_store_conformance, assert_proposal_store_conformance,
     assert_run_event_store_conformance, assert_run_store_conformance,
     assert_session_store_conformance, assert_state_store_conformance,
+    assert_trace_store_conformance,
 };
 
 #[tokio::test]
@@ -21,6 +22,13 @@ async fn file_run_event_store_satisfies_conformance() {
     let root = temp_root();
     let store = FileRunEventStore::new(root).await.expect("store opens");
     assert_run_event_store_conformance(&store).await;
+}
+
+#[tokio::test]
+async fn file_trace_store_satisfies_conformance() {
+    let root = temp_root();
+    let store = FileTraceStore::new(root).await.expect("store opens");
+    assert_trace_store_conformance(&store).await;
 }
 
 #[tokio::test]

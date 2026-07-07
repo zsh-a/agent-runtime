@@ -40,7 +40,7 @@ pub use services::{
 pub use session::{SessionRecord, StepKind, StepRecord, ThreadRecord};
 pub use stores::{
     AgentLockStore, AgentProposalStore, AgentRegistry, AgentRunEventStore, AgentRunStore,
-    AgentSessionStore, AgentStateStore, RunEventCursor, RunEventRecord,
+    AgentSessionStore, AgentStateStore, AgentTraceStore, RunEventCursor, RunEventRecord,
 };
 pub use trace::{
     AgentEvent, AgentTrace, ArtifactKind, ArtifactRef, ArtifactStoreRef, HookEvent, HookEventName,

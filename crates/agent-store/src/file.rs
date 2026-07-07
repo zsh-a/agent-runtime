@@ -1,8 +1,8 @@
 use agent_core::{
     AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunStore,
-    AgentSessionStore, ProposalEnvelope, ProposalId, RunEventCursor, RunEventRecord, RunId,
-    RunLease, RunScope, SessionId, SessionRecord, StepRecord, StoreError, ThreadId, ThreadRecord,
-    TraceEvent,
+    AgentSessionStore, AgentTrace, AgentTraceStore, ProposalEnvelope, ProposalId, RunEventCursor,
+    RunEventRecord, RunId, RunLease, RunScope, SessionId, SessionRecord, StepRecord, StoreError,
+    ThreadId, ThreadRecord, TraceEvent,
 };
 use async_trait::async_trait;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -35,6 +35,35 @@ pub struct FileLockStore {
 
 pub struct FileRunEventStore {
     root: Utf8PathBuf,
+}
+
+pub struct FileTraceStore {
+    root: Utf8PathBuf,
+}
+
+impl FileTraceStore {
+    pub async fn new(root: impl Into<Utf8PathBuf>) -> Result<Self, StoreError> {
+        let root = root.into();
+        fs_err::tokio::create_dir_all(trace_dir(&root))
+            .await
+            .map_err(map_store_err)?;
+        Ok(Self { root })
+    }
+
+    fn path_for(&self, run_id: &RunId) -> Utf8PathBuf {
+        trace_path(&self.root, run_id)
+    }
+}
+
+#[async_trait]
+impl AgentTraceStore for FileTraceStore {
+    async fn write_trace(&self, trace: AgentTrace) -> Result<(), StoreError> {
+        write_json(&self.path_for(&trace.run_id), &trace).await
+    }
+
+    async fn read_trace(&self, run_id: &RunId) -> Result<Option<AgentTrace>, StoreError> {
+        read_optional_json(&self.path_for(run_id)).await
+    }
 }
 
 impl FileRunEventStore {
@@ -577,6 +606,10 @@ fn lock_dir(root: &Utf8Path) -> Utf8PathBuf {
 
 fn trace_dir(root: &Utf8Path) -> Utf8PathBuf {
     root.join("traces")
+}
+
+fn trace_path(root: &Utf8Path, run_id: &RunId) -> Utf8PathBuf {
+    trace_dir(root).join(format!("{}.trace.json", run_id.0))
 }
 
 fn run_event_path(root: &Utf8Path, run_id: &RunId) -> Utf8PathBuf {

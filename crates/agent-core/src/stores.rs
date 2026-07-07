@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::{
-    Agent, AgentError, AgentRunRecord, AgentRunStatus, AgentSpec, ProposalEnvelope, ProposalId,
-    RunId, RunLease, RunScope, SessionId, SessionRecord, StepRecord, StoreError, ThreadId,
-    ThreadRecord, TraceEvent,
+    Agent, AgentError, AgentRunRecord, AgentRunStatus, AgentSpec, AgentTrace, ProposalEnvelope,
+    ProposalId, RunId, RunLease, RunScope, SessionId, SessionRecord, StepRecord, StoreError,
+    ThreadId, ThreadRecord, TraceEvent, WorkflowRunResult,
 };
 
 #[async_trait]
@@ -68,6 +68,30 @@ pub trait AgentRunEventStore: Send + Sync {
         run_id: &RunId,
         after: RunEventCursor,
     ) -> Result<Option<Vec<RunEventRecord>>, StoreError>;
+}
+
+#[async_trait]
+pub trait AgentTraceStore: Send + Sync {
+    async fn write_trace(&self, trace: AgentTrace) -> Result<(), StoreError>;
+    async fn read_trace(&self, run_id: &RunId) -> Result<Option<AgentTrace>, StoreError>;
+    async fn write_workflow_traces(&self, result: &WorkflowRunResult) -> Result<usize, StoreError> {
+        let mut written = 0;
+        for node in &result.nodes {
+            if let Some(trace) = node.trace.as_ref() {
+                self.write_trace(trace.clone()).await?;
+                written += 1;
+            }
+            if let Some(trace) = node
+                .compensation
+                .as_ref()
+                .and_then(|compensation| compensation.trace.as_ref())
+            {
+                self.write_trace(trace.clone()).await?;
+                written += 1;
+            }
+        }
+        Ok(written)
+    }
 }
 
 #[async_trait]
