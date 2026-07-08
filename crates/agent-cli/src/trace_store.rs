@@ -1,22 +1,7 @@
-use agent_core::RunId;
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8PathBuf;
 use miette::{IntoDiagnostic, Result, miette};
 use serde::Serialize;
 use serde_json::Value;
-
-pub(crate) async fn read_store_trace(store: &Utf8Path, run_id: &RunId) -> Result<Option<Value>> {
-    let path = store_trace_path(store, run_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    read_json(path).await.map(Some)
-}
-
-fn store_trace_path(store: &Utf8Path, run_id: &RunId) -> Utf8PathBuf {
-    store
-        .join("traces")
-        .join(format!("{}.trace.json", run_id.0))
-}
 
 pub(crate) async fn read_json(path: Utf8PathBuf) -> Result<Value> {
     let bytes = fs_err::tokio::read(&path)

@@ -1,5 +1,5 @@
 use agent_core::{
-    AgentProposalStore, AgentRunRecord, AgentRunStatus, AgentRunStore, AgentTrace,
+    AgentProposalStore, AgentRunRecord, AgentRunStatus, AgentRunStore, AgentTrace, AgentTraceStore,
     ApprovalDecisionKind, ApprovalLevel, ProposalEnvelope, ProposalId, ProposalStatus, RunId,
     TraceEvent, WorkflowRunNodeCompensationResult, WorkflowRunNodeResult, WorkflowRunRequest,
     WorkflowRunResult,
@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::proposal::{
     ProposalDecisionInput, append_proposal_decision_trace_event, decide_proposal_with_store,
 };
-use crate::trace_store::{read_json as read_json_file, read_store_trace};
+use crate::trace_store::read_json as read_json_file;
 
 use super::{
     approval::{
@@ -622,11 +622,13 @@ async fn load_trace_command(state: &mut TuiState, rest: &str) -> Result<()> {
 }
 
 async fn load_store_trace(store_path: &Utf8PathBuf, run_id: &RunId) -> Result<AgentTrace> {
-    let value = read_store_trace(store_path, run_id)
-        .await?
-        .ok_or_else(|| miette!("trace for run '{}' was not found", run_id.0))?;
-    serde_json::from_value(value)
-        .map_err(|e| miette!("failed to parse trace for run '{}': {e}", run_id.0))
+    FileTraceStore::new(store_path.clone())
+        .await
+        .into_diagnostic()?
+        .read_trace(run_id)
+        .await
+        .into_diagnostic()?
+        .ok_or_else(|| miette!("trace for run '{}' was not found", run_id.0))
 }
 
 async fn inspect_run_command(state: &mut TuiState, rest: &str) -> Result<()> {
