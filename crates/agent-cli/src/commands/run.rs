@@ -14,7 +14,7 @@ use crate::{
     runtime_stores::RuntimeStores,
     session::{record_session_step, run_metadata},
     tools::{CliServices, ToolOverrides},
-    trace_store::{read_json, write_json, write_store_trace},
+    trace_store::{read_json, write_json},
 };
 
 pub(crate) struct RunCliOptions {
@@ -98,7 +98,11 @@ pub(crate) async fn run_agent_once(options: RunCliOptions) -> Result<()> {
         &outcome,
     )
     .await?;
-    write_store_trace(&store_path, &outcome.trace).await?;
+    stores
+        .trace_store
+        .write_trace(outcome.trace.clone())
+        .await
+        .into_diagnostic()?;
     if let Some(path) = options.trace_out {
         write_json(path, &outcome.trace).await?;
     }
@@ -134,7 +138,6 @@ pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
     .await?;
     tool_overrides.extend_tool_specs(composition.tool_specs.clone());
     let stores = RuntimeStores::open(options.store_backend, options.store).await?;
-    let store_path = stores.artifact_store_path.clone();
     let services = Arc::new(CliServices::with_stores(
         tool_overrides,
         stores.state_store.clone(),
@@ -158,7 +161,11 @@ pub(crate) async fn tick_agents(options: TickCliOptions) -> Result<()> {
         .await
         .into_diagnostic()?;
     for outcome in &outcomes {
-        write_store_trace(&store_path, &outcome.trace).await?;
+        stores
+            .trace_store
+            .write_trace(outcome.trace.clone())
+            .await
+            .into_diagnostic()?;
     }
     let results = outcomes
         .into_iter()

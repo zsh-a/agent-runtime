@@ -18,9 +18,7 @@ use crate::runtime_config::{
 };
 use crate::runtime_stores::RuntimeStores;
 use crate::tools::{CliServices, ToolSelection};
-use crate::trace_store::{
-    read_json, write_json, write_store_trace, write_text, write_workflow_traces,
-};
+use crate::trace_store::{read_json, write_json, write_text};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct CommandCreateReport {
@@ -115,7 +113,11 @@ pub(crate) async fn run_workflow_request(
             options.retry_backoff_ms,
         ));
     let result = runner.run_workflow(request).await.into_diagnostic()?;
-    write_workflow_traces(&stores.artifact_store_path, &result).await?;
+    stores
+        .trace_store
+        .write_workflow_traces(&result)
+        .await
+        .into_diagnostic()?;
     Ok(result)
 }
 
@@ -204,7 +206,6 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
     .await?;
     overrides.extend_tool_specs(composition.tool_specs.clone());
     let stores = RuntimeStores::open(options.store_backend, options.store).await?;
-    let artifact_store_path = stores.artifact_store_path.clone();
     let services = Arc::new(CliServices::with_stores(
         overrides,
         stores.state_store.clone(),
@@ -239,7 +240,11 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
         )
         .await
         .into_diagnostic()?;
-    write_store_trace(&artifact_store_path, &outcome.trace).await?;
+    stores
+        .trace_store
+        .write_trace(outcome.trace.clone())
+        .await
+        .into_diagnostic()?;
     if let Some(path) = options.trace_out {
         write_json(path, &outcome.trace).await?;
     }
