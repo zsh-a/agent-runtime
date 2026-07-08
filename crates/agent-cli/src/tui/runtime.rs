@@ -8,7 +8,6 @@ use agent_core::{
 };
 use agent_llm::LlmMessage;
 use agent_runtime::{AgentRunner, RunControl, RunOutcome};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileTraceStore};
 use async_trait::async_trait;
 use miette::{IntoDiagnostic, Result, miette};
 use serde_json::{Value, json};
@@ -18,6 +17,7 @@ use crate::{
     cancellation::agent_cancellation,
     config::{execution_policy, hook_manager},
     runtime_config::{RuntimeComposition, RuntimeSourceOptions, compose_runtime_sources},
+    runtime_stores::RuntimeStores,
     tools::CliServices,
 };
 
@@ -35,7 +35,7 @@ struct TuiRuntimeInner {
     composition: RuntimeComposition,
     services: Arc<CliServices>,
     run_store: Arc<dyn agent_core::AgentRunStore>,
-    trace_store: FileTraceStore,
+    trace_store: Arc<dyn AgentTraceStore>,
     runner: AgentRunner,
     policy: TuiToolPolicy,
     cancellation: CancellationToken,
@@ -55,38 +55,22 @@ impl TuiRuntime {
             tool_overrides: options.tool_overrides.clone(),
         })
         .await?;
-        let proposal_store = Arc::new(
-            FileProposalStore::new(options.store_path.clone())
-                .await
-                .into_diagnostic()?,
-        );
+        let stores = RuntimeStores::open(options.store_backend, options.store_path.clone()).await?;
         let mut tool_overrides = options.tool_overrides.clone();
         tool_overrides.extend_tool_specs(composition.tool_specs.clone());
-        let services = Arc::new(CliServices::with_proposal_store(
+        let services = Arc::new(CliServices::with_stores(
             tool_overrides,
-            proposal_store,
+            stores.state_store.clone(),
+            stores.proposal_store.clone(),
         ));
         let runner_services: Arc<dyn AgentServices> = services.clone();
-        let store = Arc::new(
-            FileRunStore::new(options.store_path.clone())
-                .await
-                .into_diagnostic()?,
-        );
-        let run_store: Arc<dyn agent_core::AgentRunStore> = store.clone();
-        let lock_store = Arc::new(
-            FileLockStore::new(options.store_path.clone())
-                .await
-                .into_diagnostic()?,
-        );
-        let trace_store = FileTraceStore::new(options.store_path.clone())
-            .await
-            .into_diagnostic()?;
+        let run_store = stores.run_store.clone();
         let runner = AgentRunner::new(
             composition.registry.clone(),
             run_store.clone(),
             runner_services,
         )
-        .with_lock_store(lock_store)
+        .with_lock_store(stores.lock_store.clone())
         .with_hooks(hook_manager(options.hooks.clone())?)
         .with_policy(execution_policy(
             options.timeout_seconds,
@@ -99,7 +83,7 @@ impl TuiRuntime {
                 composition,
                 services,
                 run_store,
-                trace_store,
+                trace_store: stores.trace_store.clone(),
                 runner,
                 policy: TuiToolPolicy::new(options.allow_high_risk_tools),
                 cancellation,

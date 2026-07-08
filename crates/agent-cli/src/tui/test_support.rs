@@ -1,6 +1,9 @@
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::{chat::ChatLlmOptions, runtime_config::ResolvedRuntimeSources, tools::ToolOverrides};
+use crate::{
+    chat::ChatLlmOptions, config::RuntimeStoreBackend, runtime_config::ResolvedRuntimeSources,
+    tools::ToolOverrides,
+};
 
 use super::data::{TuiOptions, TuiState};
 
@@ -34,6 +37,7 @@ pub(super) fn test_options(
         ),
         trace_path: None,
         store_path: temp_store_path(dir),
+        store_backend: RuntimeStoreBackend::File,
         tool_overrides: ToolOverrides::default(),
         allow_high_risk_tools,
         chat: test_chat_options(response),

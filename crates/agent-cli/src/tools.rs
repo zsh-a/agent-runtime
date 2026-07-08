@@ -50,17 +50,6 @@ impl CliServices {
         }
     }
 
-    pub(crate) fn with_proposal_store(
-        tools: ToolOverrides,
-        proposal_store: Arc<dyn AgentProposalStore>,
-    ) -> Self {
-        Self {
-            state: Arc::new(InMemoryStateStore::default()),
-            tools,
-            proposal_store: Some(proposal_store),
-        }
-    }
-
     pub(crate) fn with_stores(
         tools: ToolOverrides,
         state: Arc<dyn AgentStateStore>,

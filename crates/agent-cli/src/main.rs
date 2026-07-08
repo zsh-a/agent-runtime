@@ -150,15 +150,6 @@ impl AppContext {
             .unwrap_or(RuntimeStoreBackend::File)
     }
 
-    fn require_file_store_backend(&self, command: &str) -> Result<()> {
-        if self.store_backend() == RuntimeStoreBackend::File {
-            return Ok(());
-        }
-        Err(miette!(
-            "{command} does not support runtime.store_backend = \"sqlite\" yet; use runtime.store_backend = \"file\" for this file-oriented workflow"
-        ))
-    }
-
     fn eval_store(&self, value: Utf8PathBuf) -> Utf8PathBuf {
         if value == Utf8PathBuf::from(DEFAULT_EVAL_STORE) {
             self.config
@@ -1080,7 +1071,6 @@ async fn main() -> Result<()> {
             mouse_capture,
             once,
         } => {
-            context.require_file_store_backend("tui")?;
             let sources = context.runtime_sources(registry, catalog);
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
@@ -1088,6 +1078,7 @@ async fn main() -> Result<()> {
                 runtime_sources: sources,
                 trace_path: trace,
                 store_path: store,
+                store_backend: context.store_backend(),
                 tool_overrides: context.tools(tools).load().await?,
                 allow_high_risk_tools: !deny_high_risk_tools,
                 chat: context.chat(chat),

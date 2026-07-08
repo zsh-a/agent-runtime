@@ -1,10 +1,9 @@
 use agent_core::{
-    AgentProposalStore, AgentRunRecord, AgentRunStatus, AgentRunStore, AgentTrace, AgentTraceStore,
-    ApprovalDecisionKind, ApprovalLevel, ProposalEnvelope, ProposalId, ProposalStatus, RunId,
-    TraceEvent, WorkflowRunNodeCompensationResult, WorkflowRunNodeResult, WorkflowRunRequest,
+    AgentRunRecord, AgentRunStatus, AgentTrace, ApprovalDecisionKind, ApprovalLevel,
+    ProposalEnvelope, ProposalId, ProposalStatus, RunId, TraceEvent,
+    WorkflowRunNodeCompensationResult, WorkflowRunNodeResult, WorkflowRunRequest,
     WorkflowRunResult,
 };
-use agent_store::{FileProposalStore, FileRunStore, FileTraceStore};
 use camino::Utf8PathBuf;
 use miette::{IntoDiagnostic, Result, miette};
 use serde_json::{Value, json};
@@ -12,6 +11,7 @@ use serde_json::{Value, json};
 use crate::proposal::{
     ProposalDecisionInput, append_proposal_decision_trace_event, decide_proposal_with_store,
 };
+use crate::runtime_stores::RuntimeStores;
 use crate::trace_store::read_json as read_json_file;
 
 use super::{
@@ -388,7 +388,12 @@ async fn run_agent_command(state: &mut TuiState, rest: &str) -> Result<()> {
 
 async fn list_runs_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let limit = run_list_limit(rest)?;
-    let runs = load_runs(&state.options.store_path, limit).await?;
+    let runs = load_runs(
+        state.options.store_backend,
+        &state.options.store_path,
+        limit,
+    )
+    .await?;
     state.set_recent_runs(runs.clone());
     state.push_user_message(if rest.trim().is_empty() {
         "/runs".to_owned()
@@ -463,7 +468,12 @@ async fn run_workflow_command(state: &mut TuiState, rest: &str) -> Result<()> {
 
 async fn load_run_events_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let (run_id, limit) = run_events_args(state, rest)?;
-    let trace = load_store_trace(&state.options.store_path, &run_id).await?;
+    let trace = load_store_trace(
+        state.options.store_backend,
+        &state.options.store_path,
+        &run_id,
+    )
+    .await?;
     let summary = trace_event_summary(&trace, limit);
     state.set_trace(format!("store trace {}", run_id.0), trace);
     state.set_latest_events(summary.clone());
@@ -489,7 +499,12 @@ async fn load_run_events_command(state: &mut TuiState, rest: &str) -> Result<()>
 
 async fn list_proposals_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let run_id = optional_run_id(rest)?;
-    let proposals = load_proposals(&state.options.store_path, run_id.as_ref()).await?;
+    let proposals = load_proposals(
+        state.options.store_backend,
+        &state.options.store_path,
+        run_id.as_ref(),
+    )
+    .await?;
     let summary = proposal_list_summary(&proposals);
     state.set_latest_proposals(summary);
     state.push_user_message(match &run_id {
@@ -507,7 +522,12 @@ async fn list_proposals_command(state: &mut TuiState, rest: &str) -> Result<()> 
 
 async fn inspect_proposal_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let proposal_id = proposal_id_arg_or_default(state, rest)?;
-    let proposal = load_proposal(&state.options.store_path, &proposal_id).await?;
+    let proposal = load_proposal(
+        state.options.store_backend,
+        &state.options.store_path,
+        &proposal_id,
+    )
+    .await?;
     state.set_latest_proposals(proposal_list_summary(std::slice::from_ref(&proposal)));
     state.push_user_message(format!("/proposal {}", proposal.proposal_id.0));
     state.push_activity(TuiActivityItem::with_detail(
@@ -525,18 +545,19 @@ async fn decide_proposal_command(
     decision: ApprovalDecisionKind,
 ) -> Result<()> {
     let (proposal_id, comment) = proposal_decision_args(rest)?;
-    let store_path = state.options.store_path.clone();
-    let store = FileProposalStore::new(store_path.clone())
-        .await
-        .into_diagnostic()?;
-    let trace_store = FileTraceStore::new(store_path).await.into_diagnostic()?;
-    let mut proposal = store
+    let stores = RuntimeStores::open(
+        state.options.store_backend,
+        state.options.store_path.clone(),
+    )
+    .await?;
+    let mut proposal = stores
+        .proposal_store
         .get_proposal(&proposal_id)
         .await
         .into_diagnostic()?
         .ok_or_else(|| miette!("proposal '{}' was not found", proposal_id.0))?;
     let response = decide_proposal_with_store(
-        &store,
+        stores.proposal_store.as_ref(),
         &mut proposal,
         ProposalDecisionInput {
             decision,
@@ -546,7 +567,7 @@ async fn decide_proposal_command(
         },
     )
     .await?;
-    append_proposal_decision_trace_event(&trace_store, &response).await?;
+    append_proposal_decision_trace_event(stores.trace_store.as_ref(), &response).await?;
     state.set_latest_proposals(proposal_list_summary(std::slice::from_ref(
         &response.proposal,
     )));
@@ -621,10 +642,14 @@ async fn load_trace_command(state: &mut TuiState, rest: &str) -> Result<()> {
     Ok(())
 }
 
-async fn load_store_trace(store_path: &Utf8PathBuf, run_id: &RunId) -> Result<AgentTrace> {
-    FileTraceStore::new(store_path.clone())
-        .await
-        .into_diagnostic()?
+async fn load_store_trace(
+    store_backend: crate::config::RuntimeStoreBackend,
+    store_path: &Utf8PathBuf,
+    run_id: &RunId,
+) -> Result<AgentTrace> {
+    RuntimeStores::open(store_backend, store_path.clone())
+        .await?
+        .trace_store
         .read_trace(run_id)
         .await
         .into_diagnostic()?
@@ -633,10 +658,13 @@ async fn load_store_trace(store_path: &Utf8PathBuf, run_id: &RunId) -> Result<Ag
 
 async fn inspect_run_command(state: &mut TuiState, rest: &str) -> Result<()> {
     let run_id = run_id_arg_or_default(state, rest)?;
-    let store = FileRunStore::new(state.options.store_path.clone())
-        .await
-        .into_diagnostic()?;
-    let record = store
+    let stores = RuntimeStores::open(
+        state.options.store_backend,
+        state.options.store_path.clone(),
+    )
+    .await?;
+    let record = stores
+        .run_store
         .get_run(&run_id)
         .await
         .into_diagnostic()?
@@ -702,23 +730,26 @@ fn push_agent_output(state: &mut TuiState, output: &Value) {
 }
 
 async fn load_proposals(
+    store_backend: crate::config::RuntimeStoreBackend,
     store_path: &Utf8PathBuf,
     run_id: Option<&RunId>,
 ) -> Result<Vec<ProposalEnvelope>> {
-    let store = FileProposalStore::new(store_path.clone())
+    let stores = RuntimeStores::open(store_backend, store_path.clone()).await?;
+    stores
+        .proposal_store
+        .list_proposals(run_id)
         .await
-        .into_diagnostic()?;
-    store.list_proposals(run_id).await.into_diagnostic()
+        .into_diagnostic()
 }
 
 async fn load_proposal(
+    store_backend: crate::config::RuntimeStoreBackend,
     store_path: &Utf8PathBuf,
     proposal_id: &ProposalId,
 ) -> Result<ProposalEnvelope> {
-    let store = FileProposalStore::new(store_path.clone())
-        .await
-        .into_diagnostic()?;
-    store
+    let stores = RuntimeStores::open(store_backend, store_path.clone()).await?;
+    stores
+        .proposal_store
         .get_proposal(proposal_id)
         .await
         .into_diagnostic()?
@@ -726,13 +757,16 @@ async fn load_proposal(
 }
 
 async fn load_runs(
+    store_backend: crate::config::RuntimeStoreBackend,
     store_path: &Utf8PathBuf,
     limit: usize,
 ) -> Result<Vec<agent_core::AgentRunRecord>> {
-    let store = FileRunStore::new(store_path.clone())
+    let stores = RuntimeStores::open(store_backend, store_path.clone()).await?;
+    stores
+        .run_store
+        .list_runs(None, Some(limit))
         .await
-        .into_diagnostic()?;
-    store.list_runs(None, Some(limit)).await.into_diagnostic()
+        .into_diagnostic()
 }
 
 fn optional_run_id(input: &str) -> Result<Option<RunId>> {
@@ -1504,11 +1538,12 @@ mod tests {
         policy::TuiToolRisk,
         test_support::{test_options, test_state},
     };
+    use crate::{config::RuntimeStoreBackend, runtime_stores::RuntimeStores};
     use agent_core::{
-        AgentRunRecord, AgentTrace, AgentTraceStore, PROTOCOL_VERSION, RunScope, ToolRisk,
-        ToolSpec, TraceEvent,
+        AgentProposalStore, AgentRunRecord, AgentRunStore, AgentTrace, AgentTraceStore,
+        PROTOCOL_VERSION, RunScope, ToolRisk, ToolSpec, TraceEvent,
     };
-    use agent_store::FileTraceStore;
+    use agent_store::{FileProposalStore, FileRunStore, FileTraceStore};
     use camino::Utf8PathBuf;
     use time::OffsetDateTime;
 
@@ -1826,6 +1861,61 @@ mod tests {
                 .transcript
                 .iter()
                 .any(|item| item.content.contains("hello tui"))
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_uses_sqlite_store_backend() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut options = test_options(&dir, "mock response", true);
+        options.store_backend = RuntimeStoreBackend::Sqlite;
+        let mut state = TuiState::load(options).await.expect("state loads");
+
+        execute_command(&mut state, "/run echo_agent sqlite tui")
+            .await
+            .expect("sqlite run command succeeds");
+
+        let trace = state.trace.as_ref().expect("trace captured");
+        let run_id = trace.run_id.clone();
+        let stores = RuntimeStores::open(
+            RuntimeStoreBackend::Sqlite,
+            state.options.store_path.clone(),
+        )
+        .await
+        .expect("sqlite stores open");
+        assert!(
+            stores
+                .run_store
+                .get_run(&run_id)
+                .await
+                .expect("run reads")
+                .is_some()
+        );
+        assert!(
+            stores
+                .trace_store
+                .read_trace(&run_id)
+                .await
+                .expect("trace reads")
+                .is_some()
+        );
+        assert!(
+            !state
+                .options
+                .store_path
+                .join("runs")
+                .join(format!("{}.json", run_id.0))
+                .exists(),
+            "sqlite TUI run should not write through the file run store"
+        );
+        assert!(
+            !state
+                .options
+                .store_path
+                .join("traces")
+                .join(format!("{}.trace.json", run_id.0))
+                .exists(),
+            "sqlite TUI trace should not write through the file trace store"
         );
     }
 
@@ -2409,9 +2499,13 @@ mod tests {
         .await
         .expect("approve proposal succeeds");
 
-        let stored = load_proposal(&state.options.store_path, &proposal.proposal_id)
-            .await
-            .expect("proposal loads");
+        let stored = load_proposal(
+            state.options.store_backend,
+            &state.options.store_path,
+            &proposal.proposal_id,
+        )
+        .await
+        .expect("proposal loads");
         assert_eq!(stored.status, ProposalStatus::Approved);
         assert_eq!(
             stored.approval_decisions[0].comment.as_deref(),
@@ -2453,9 +2547,13 @@ mod tests {
         .await
         .expect("deny proposal succeeds");
 
-        let stored = load_proposal(&state.options.store_path, &proposal.proposal_id)
-            .await
-            .expect("proposal loads");
+        let stored = load_proposal(
+            state.options.store_backend,
+            &state.options.store_path,
+            &proposal.proposal_id,
+        )
+        .await
+        .expect("proposal loads");
         assert_eq!(stored.status, ProposalStatus::Denied);
         assert_eq!(
             state

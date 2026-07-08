@@ -446,7 +446,7 @@ registry = "{}"
 }
 
 #[test]
-fn sqlite_store_backend_rejects_file_oriented_cli_workflows() {
+fn sqlite_store_backend_drives_cli_workflows() {
     let dir = tempfile::tempdir().expect("temp dir");
     let store = dir.path().join("sqlite-guard-store");
     let config_path = dir.path().join("agent-runtime.toml");
@@ -487,35 +487,13 @@ store_backend = "sqlite"
         .expect("utf8 compat bundle path")
         .to_owned();
 
-    let rejected_commands = [(
-        "tui",
-        vec![config.clone(), "tui".to_owned()],
-        "tui does not support runtime.store_backend = \"sqlite\" yet",
-    )];
-
-    for (label, mut args, expected) in rejected_commands {
-        args.insert(0, "--config".to_owned());
-        let stderr = agent_cmd()
-            .args(args)
-            .assert()
-            .failure()
-            .get_output()
-            .stderr
-            .clone();
-        let stderr = String::from_utf8(stderr).expect("stderr is utf8");
-        assert!(
-            stderr.contains(expected),
-            "{label} should fail on the SQLite file-store guard, stderr: {stderr}"
-        );
-    }
-
     assert!(
         !store.join("tui.log").exists(),
-        "sqlite backend guard should not create a file-store TUI log"
+        "sqlite backend should not create a file-store TUI log before TUI starts"
     );
     assert!(
         !store.join("runtime.sqlite").exists(),
-        "guarded file-oriented commands should not open the SQLite runtime store"
+        "setup should not open the SQLite runtime store"
     );
 
     let view_output = agent_cmd()
@@ -561,6 +539,29 @@ store_backend = "sqlite"
     assert!(
         !store.join("runtime.sqlite").exists(),
         "view and deterministic replay should not open the SQLite runtime store"
+    );
+
+    let tui_output = agent_cmd()
+        .args([
+            "--config",
+            &config,
+            "tui",
+            "--registry",
+            &registry,
+            "--once",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tui_output = String::from_utf8(tui_output).expect("tui output is utf8");
+    assert!(tui_output.contains("Agent Runtime"));
+    assert!(tui_output.contains("Chat"));
+    assert!(store.join("runtime.sqlite").exists());
+    assert!(
+        !store.join("tui.log").exists(),
+        "sqlite TUI should not create a file-store TUI log"
     );
 
     let live_output = agent_cmd()

@@ -10,7 +10,9 @@ use serde_json::Value;
 use crate::{
     catalog::{CatalogSummary, read_catalog},
     chat::ChatLlmOptions,
+    config::RuntimeStoreBackend,
     runtime_config::{ResolvedRuntimeSources, RuntimeSourceOptions, compose_runtime_sources},
+    runtime_stores::RuntimeStores,
     tools::ToolOverrides,
 };
 
@@ -384,6 +386,7 @@ pub(crate) struct TuiOptions {
     pub(crate) runtime_sources: ResolvedRuntimeSources,
     pub(crate) trace_path: Option<Utf8PathBuf>,
     pub(crate) store_path: Utf8PathBuf,
+    pub(crate) store_backend: RuntimeStoreBackend,
     pub(crate) tool_overrides: ToolOverrides,
     pub(crate) allow_high_risk_tools: bool,
     pub(crate) chat: ChatLlmOptions,
@@ -439,7 +442,7 @@ impl TuiState {
         let catalog_summary = load_catalog_summary(options.runtime_sources.catalog_path()).await?;
         let trace = load_trace(options.trace_path.as_ref()).await?;
         let trace_label = options.trace_path.as_ref().map(ToString::to_string);
-        let recent_runs = read_recent_runs(&options.store_path).await?;
+        let recent_runs = read_recent_runs(options.store_backend, &options.store_path).await?;
         let tool_inventory = Some(load_tui_tool_inventory(&options).await?);
         let agents = load_agent_summaries(&options).await?;
         let selected_agent_id = select_initial_agent(options.default_agent.as_deref(), &agents)?;
@@ -504,7 +507,8 @@ impl TuiState {
     }
 
     pub(super) async fn refresh_runs(&mut self) -> Result<()> {
-        self.recent_runs = read_recent_runs(&self.options.store_path).await?;
+        self.recent_runs =
+            read_recent_runs(self.options.store_backend, &self.options.store_path).await?;
         self.update_status();
         Ok(())
     }
@@ -1142,29 +1146,16 @@ async fn load_trace(path: Option<&Utf8PathBuf>) -> Result<Option<agent_core::Age
     }
 }
 
-pub(super) async fn read_recent_runs(store_path: &Utf8Path) -> Result<Vec<AgentRunRecord>> {
-    let runs_dir = store_path.join("runs");
-    if !runs_dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut entries = fs_err::tokio::read_dir(&runs_dir)
+pub(super) async fn read_recent_runs(
+    store_backend: RuntimeStoreBackend,
+    store_path: &Utf8Path,
+) -> Result<Vec<AgentRunRecord>> {
+    let stores = RuntimeStores::open(store_backend, store_path.to_owned()).await?;
+    stores
+        .run_store
+        .list_runs(None, Some(8))
         .await
-        .map_err(|e| miette!("failed to read runs at {runs_dir}: {e}"))?;
-    let mut records = Vec::new();
-    while let Some(entry) = entries.next_entry().await.into_diagnostic()? {
-        let path = Utf8PathBuf::from_path_buf(entry.path())
-            .map_err(|path| miette!("non-UTF-8 run path: {}", path.display()))?;
-        if path.extension() != Some("json") {
-            continue;
-        }
-        let record = serde_json::from_value::<AgentRunRecord>(read_json(path).await?)
-            .map_err(|e| miette!("failed to parse run record: {e}"))?;
-        records.push(record);
-    }
-    records.sort_by_key(|record| record.started_at);
-    records.reverse();
-    records.truncate(8);
-    Ok(records)
+        .into_diagnostic()
 }
 
 pub(super) async fn read_trace(path: Utf8PathBuf) -> Result<agent_core::AgentTrace> {
@@ -1237,6 +1228,7 @@ mod tests {
                 ),
                 trace_path: None,
                 store_path: Utf8PathBuf::from("store"),
+                store_backend: RuntimeStoreBackend::File,
                 tool_overrides: ToolOverrides::default(),
                 allow_high_risk_tools: true,
                 chat: ChatLlmOptions {

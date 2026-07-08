@@ -1186,6 +1186,7 @@ mod tests {
     use super::*;
     use crate::{
         chat::ChatLlmOptions,
+        config::RuntimeStoreBackend,
         runtime_config::ResolvedRuntimeSources,
         tools::ToolOverrides,
         tui::{
@@ -1205,6 +1206,7 @@ mod tests {
                 ),
                 trace_path: None,
                 store_path: Utf8PathBuf::from("store"),
+                store_backend: RuntimeStoreBackend::File,
                 tool_overrides: ToolOverrides::default(),
                 allow_high_risk_tools: true,
                 chat: ChatLlmOptions {
