@@ -6,7 +6,8 @@ use std::{
 };
 
 use agent_core::{
-    AgentRunRecord, AgentRunStatus, AgentRunStore, PROTOCOL_VERSION, RunId, RunScope,
+    AgentRunRecord, AgentRunStatus, AgentRunStore, AgentTrace, AgentTraceStore, PROTOCOL_VERSION,
+    RunId, RunScope,
 };
 use agent_store::SqliteStore;
 use assert_cmd::Command;
@@ -320,11 +321,15 @@ registry = "{}"
     let run_id = output["run_id"].as_str().expect("run id");
     assert_eq!(output["status"], "completed");
     assert!(store.join("runtime.sqlite").exists());
+    let stored_trace = read_sqlite_trace(&store, run_id);
+    assert_eq!(stored_trace.run_id.0, run_id);
+    assert_eq!(stored_trace.agent_id, "echo_agent");
     assert!(
-        store
+        !store
             .join("traces")
             .join(format!("{run_id}.trace.json"))
-            .exists()
+            .exists(),
+        "sqlite runtime trace should not be written through the file trace store"
     );
     assert!(!store.join("runs").join(format!("{run_id}.json")).exists());
 
@@ -3349,26 +3354,32 @@ mocks = ['propose_fake={{"http_sqlite":true}}']
     let run_id = run["result"]["run_id"].as_str().expect("run id");
     assert_eq!(run["result"]["status"], "completed");
     assert!(store.join("runtime.sqlite").exists());
+    let stored_trace = read_sqlite_trace(&store, run_id);
+    assert_eq!(stored_trace.run_id.0, run_id);
+    assert_eq!(stored_trace.agent_id, "ai_chat");
+    let trace = http_json_request(port, "GET", &format!("/runs/{run_id}/trace"), None);
+    assert_eq!(trace["run_id"], run_id);
     assert!(
-        store
+        !store
             .join("traces")
             .join(format!("{run_id}.trace.json"))
-            .exists()
+            .exists(),
+        "sqlite HTTP trace should not be written through the file trace store"
     );
+    let trace_dir = store.join("traces");
     assert!(
-        !std::fs::read_dir(store.join("traces"))
-            .expect("trace dir reads")
-            .filter_map(|entry| entry.ok())
-            .any(|entry| entry
-                .path()
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".events.jsonl"))),
+        !trace_dir.exists()
+            || !std::fs::read_dir(&trace_dir)
+                .expect("trace dir reads")
+                .filter_map(|entry| entry.ok())
+                .any(|entry| entry
+                    .path()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".events.jsonl"))),
         "sqlite event store should not write file-backed event logs"
     );
     assert!(!store.join("runs").join(format!("{run_id}.json")).exists());
-    std::fs::remove_file(store.join("traces").join(format!("{run_id}.trace.json")))
-        .expect("trace removed to prove sqlite event store path");
     let events = http_text_request(port, "GET", &format!("/runs/{run_id}/events?after=1"), None);
     assert!(events.contains("id: 2"));
     assert!(events.contains("event: catalog_dry_run.agent_selected"));
@@ -5104,6 +5115,22 @@ fn agent_cmd() -> Command {
 
 fn read_json(path: impl AsRef<std::path::Path>) -> Value {
     serde_json::from_slice(&std::fs::read(path).expect("JSON file exists")).expect("file is JSON")
+}
+
+fn read_sqlite_trace(store: &std::path::Path, run_id: &str) -> AgentTrace {
+    let sqlite_path = camino::Utf8PathBuf::from_path_buf(store.join("runtime.sqlite"))
+        .expect("sqlite path is utf8");
+    let run_id = RunId(run_id.to_owned());
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime starts")
+        .block_on(async {
+            let sqlite = SqliteStore::open(sqlite_path).await.expect("sqlite opens");
+            sqlite
+                .read_trace(&run_id)
+                .await
+                .expect("trace reads")
+                .expect("trace exists")
+        })
 }
 
 fn reserve_local_port() -> u16 {

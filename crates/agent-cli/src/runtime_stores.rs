@@ -85,11 +85,7 @@ impl RuntimeStores {
         );
         let run_store: Arc<dyn AgentRunStore> = sqlite.clone();
         let event_store: Arc<dyn AgentRunEventStore> = sqlite.clone();
-        let trace_store: Arc<dyn AgentTraceStore> = Arc::new(
-            FileTraceStore::new(artifact_store_path.clone())
-                .await
-                .into_diagnostic()?,
-        );
+        let trace_store: Arc<dyn AgentTraceStore> = sqlite.clone();
         let proposal_store: Arc<dyn AgentProposalStore> = sqlite.clone();
         let session_store: Arc<dyn AgentSessionStore> = sqlite.clone();
         let state_store: Arc<dyn AgentStateStore> = sqlite.clone();

@@ -1,4 +1,9 @@
-use agent_core::{AgentLockStore, AgentRunEventStore, AgentRunStore, RunId, TraceEvent};
+use agent_core::AgentLockStore;
+#[cfg(feature = "sqlite")]
+use agent_core::{
+    AgentRunEventStore, AgentRunStore, AgentTrace, AgentTraceStore, PROTOCOL_VERSION, RunId,
+    RunScope, TraceEvent,
+};
 use camino::Utf8PathBuf;
 use std::time::Duration;
 
@@ -75,6 +80,7 @@ async fn sqlite_store_satisfies_conformance() {
     let store = SqliteStore::in_memory().await.expect("sqlite opens");
     assert_run_store_conformance(&store).await;
     assert_run_event_store_conformance(&store).await;
+    assert_trace_store_conformance(&store).await;
     assert_proposal_store_conformance(&store).await;
     assert_session_store_conformance(&store).await;
     assert_state_store_conformance(&store).await;
@@ -86,14 +92,15 @@ async fn sqlite_store_satisfies_conformance() {
 async fn sqlite_store_reopens_file_backed_records() {
     use agent_core::{
         AgentLockStore, AgentProposalStore, AgentRunRecord, AgentRunStatus, AgentRunStore,
-        AgentSessionStore, AgentStateStore, PROTOCOL_VERSION, ProposalEnvelope, RunId, RunScope,
-        SessionRecord, StepRecord, ThreadRecord,
+        AgentSessionStore, AgentStateStore, ProposalEnvelope, RunId, SessionRecord, StepRecord,
+        ThreadRecord,
     };
     use serde_json::json;
     use time::OffsetDateTime;
 
     let path = temp_root().join("store.sqlite");
     let run_id = RunId("run_sqlite_reopen".to_owned());
+    let trace = sqlite_trace_record(run_id.clone(), "sqlite_agent");
     let lock_key = "sqlite_reopen_lock";
     let session = SessionRecord::new("SQLite session", json!({"source": "reopen"}));
     let thread = ThreadRecord::root(
@@ -133,6 +140,7 @@ async fn sqlite_store_reopens_file_backed_records() {
     {
         let store = SqliteStore::open(&path).await.expect("sqlite opens");
         store.create_run(run.clone()).await.expect("run saved");
+        store.write_trace(trace.clone()).await.expect("trace saved");
         store
             .create_proposal(proposal.clone())
             .await
@@ -163,7 +171,17 @@ async fn sqlite_store_reopens_file_backed_records() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        4
+        5
+    );
+    assert_eq!(
+        reopened
+            .read_trace(&run_id)
+            .await
+            .expect("trace reads")
+            .expect("trace exists")
+            .events[0]
+            .kind,
+        "run_started"
     );
     assert_eq!(
         reopened
@@ -257,7 +275,7 @@ async fn sqlite_store_upgrades_old_schema_version() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        4
+        5
     );
 }
 
@@ -298,7 +316,7 @@ async fn sqlite_store_upgrades_v2_schema_with_run_event_tables() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        4
+        5
     );
     reopened
         .append_run_event(&run_id, TraceEvent::new("run_started", json!({"v": 3})))
@@ -436,7 +454,7 @@ async fn sqlite_store_upgrades_v3_schema_with_run_status_index() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        4
+        5
     );
     let running_runs = reopened
         .list_runs_by_status(AgentRunStatus::Running, None)
@@ -450,6 +468,45 @@ async fn sqlite_store_upgrades_v3_schema_with_run_status_index() {
         .expect("completed runs list");
     assert_eq!(completed_runs.len(), 1);
     assert_eq!(completed_runs[0].run_id, completed.run_id);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_store_upgrades_v4_schema_with_trace_table() {
+    let path = temp_root().join("v4-traces.sqlite");
+    let run_id = RunId("run_v4_trace_upgrade".to_owned());
+    {
+        let store = SqliteStore::open(&path).await.expect("sqlite opens");
+        sqlx::query("DROP TABLE agent_traces")
+            .execute(store.pool())
+            .await
+            .expect("trace table dropped");
+        sqlx::query("PRAGMA user_version = 4")
+            .execute(store.pool())
+            .await
+            .expect("schema version rewinds to v4");
+    }
+
+    let reopened = SqliteStore::open(&path).await.expect("v4 schema upgrades");
+    assert_eq!(
+        reopened
+            .schema_version()
+            .await
+            .expect("schema version reads"),
+        5
+    );
+    let trace = sqlite_trace_record(run_id.clone(), "sqlite_agent");
+    reopened
+        .write_trace(trace)
+        .await
+        .expect("trace writes after migration");
+    let stored = reopened
+        .read_trace(&run_id)
+        .await
+        .expect("trace reads after migration")
+        .expect("trace exists");
+    assert_eq!(stored.run_id, run_id);
+    assert_eq!(stored.events[0].kind, "run_started");
 }
 
 #[cfg(feature = "sqlite")]
@@ -504,7 +561,7 @@ async fn sqlite_run_event_append_allocates_unique_cursors_concurrently() {
 #[tokio::test]
 async fn sqlite_store_reports_supported_schema_version_from_migrations() {
     let store = SqliteStore::in_memory().await.expect("sqlite opens");
-    assert_eq!(SqliteStore::supported_schema_version(), 4);
+    assert_eq!(SqliteStore::supported_schema_version(), 5);
     assert_eq!(
         store.schema_version().await.expect("schema version reads"),
         SqliteStore::supported_schema_version()
@@ -534,7 +591,7 @@ async fn sqlite_store_rejects_future_schema_version_without_downgrade() {
     };
     assert!(
         err.message
-            .contains("schema version 999 is newer than supported version 4"),
+            .contains("schema version 999 is newer than supported version 5"),
         "unexpected error: {}",
         err.message
     );
@@ -603,6 +660,31 @@ async fn sqlite_file_lock_allows_one_concurrent_owner() {
         usize::from(first.is_some()) + usize::from(second.is_some()),
         1
     );
+}
+
+#[cfg(feature = "sqlite")]
+fn sqlite_trace_record(run_id: RunId, agent_id: &str) -> AgentTrace {
+    let now = time::OffsetDateTime::now_utc();
+    AgentTrace {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        runtime_version: "test-runtime".to_owned(),
+        run_id,
+        agent_id: agent_id.to_owned(),
+        agent_version: "test-agent".to_owned(),
+        scope: RunScope::Global,
+        started_at: now,
+        finished_at: now,
+        input: serde_json::json!({}),
+        output: serde_json::json!({}),
+        workflow: None,
+        usage_summary: None,
+        spans: Vec::new(),
+        events: vec![TraceEvent::new(
+            "run_started",
+            serde_json::json!({"source": "sqlite_test"}),
+        )],
+        artifact_refs: Vec::new(),
+    }
 }
 
 #[tokio::test]
