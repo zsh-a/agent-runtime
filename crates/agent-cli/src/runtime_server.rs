@@ -699,6 +699,7 @@ impl RuntimeServer {
         build_metrics_summary(
             &self.store_path,
             self.run_store.as_ref(),
+            self.trace_store.as_ref(),
             self.proposal_store.as_ref(),
         )
         .await

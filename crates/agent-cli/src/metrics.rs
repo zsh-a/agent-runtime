@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 
-use agent_core::{AgentProposalStore, AgentRunStore, PROTOCOL_VERSION, ProposalStatus};
+use agent_core::{
+    AgentProposalStore, AgentRunStore, AgentTraceStore, PROTOCOL_VERSION, ProposalStatus,
+};
 use agent_runtime::RUNTIME_VERSION;
 use camino::Utf8Path;
 use miette::{IntoDiagnostic, Result};
 use serde::Serialize;
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
-
-use crate::trace_store::read_store_trace;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct RuntimeMetricsSummary {
@@ -99,6 +99,7 @@ struct LlmProviderMetricsAccumulator {
 pub(crate) async fn build_metrics_summary(
     store_path: &Utf8Path,
     run_store: &dyn AgentRunStore,
+    trace_store: &dyn AgentTraceStore,
     proposal_store: &dyn AgentProposalStore,
 ) -> Result<RuntimeMetricsSummary> {
     let runs = run_store.list_runs(None, None).await.into_diagnostic()?;
@@ -142,7 +143,12 @@ pub(crate) async fn build_metrics_summary(
                     agent_metrics.completed_latency_count.saturating_add(1);
             }
         }
-        if let Some(trace) = read_store_trace(store_path, &run.run_id).await? {
+        if let Some(trace_record) = trace_store
+            .read_trace(&run.run_id)
+            .await
+            .into_diagnostic()?
+        {
+            let trace = serde_json::to_value(trace_record).into_diagnostic()?;
             let terminal_tool_keys = terminal_tool_event_keys(&trace);
             artifact_ref_count = artifact_ref_count.saturating_add(
                 trace

@@ -860,6 +860,7 @@ async fn main() -> Result<()> {
                 let summary = build_metrics_summary(
                     &stores.artifact_store_path,
                     stores.run_store.as_ref(),
+                    stores.trace_store.as_ref(),
                     stores.proposal_store.as_ref(),
                 )
                 .await?;
