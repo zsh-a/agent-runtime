@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use agent_core::{
     AgentCancellation, AgentError, AgentEvent, AgentEventEmitter, AgentRunStatus, AgentServices,
-    AgentSpec, AgentStateAccess, AgentTrace, ArtifactPublisher, PROTOCOL_VERSION, ProposalCreator,
-    RunId, RunRequest, SubagentRunner, ToolCaller, ToolError, ToolSpec, WorkflowRunRequest,
-    WorkflowRunResult,
+    AgentSpec, AgentStateAccess, AgentTrace, AgentTraceStore, ArtifactPublisher, PROTOCOL_VERSION,
+    ProposalCreator, RunId, RunRequest, SubagentRunner, ToolCaller, ToolError, ToolSpec,
+    WorkflowRunRequest, WorkflowRunResult,
 };
 use agent_llm::LlmMessage;
 use agent_runtime::{AgentRunner, RunControl, RunOutcome};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
+use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileTraceStore};
 use async_trait::async_trait;
 use miette::{IntoDiagnostic, Result, miette};
 use serde_json::{Value, json};
@@ -19,7 +19,6 @@ use crate::{
     config::{execution_policy, hook_manager},
     runtime_config::{RuntimeComposition, RuntimeSourceOptions, compose_runtime_sources},
     tools::CliServices,
-    trace_store::{write_store_trace, write_workflow_traces},
 };
 
 use super::{
@@ -33,10 +32,10 @@ pub(super) struct TuiRuntime {
 }
 
 struct TuiRuntimeInner {
-    options: TuiOptions,
     composition: RuntimeComposition,
     services: Arc<CliServices>,
     run_store: Arc<dyn agent_core::AgentRunStore>,
+    trace_store: FileTraceStore,
     runner: AgentRunner,
     policy: TuiToolPolicy,
     cancellation: CancellationToken,
@@ -79,6 +78,9 @@ impl TuiRuntime {
                 .await
                 .into_diagnostic()?,
         );
+        let trace_store = FileTraceStore::new(options.store_path.clone())
+            .await
+            .into_diagnostic()?;
         let runner = AgentRunner::new(
             composition.registry.clone(),
             run_store.clone(),
@@ -94,10 +96,10 @@ impl TuiRuntime {
 
         Ok(Self {
             inner: Arc::new(TuiRuntimeInner {
-                options: options.clone(),
                 composition,
                 services,
                 run_store,
+                trace_store,
                 runner,
                 policy: TuiToolPolicy::new(options.allow_high_risk_tools),
                 cancellation,
@@ -165,7 +167,11 @@ impl TuiRuntime {
             .run_workflow(request)
             .await
             .into_diagnostic()?;
-        write_workflow_traces(&self.inner.options.store_path, &result).await?;
+        self.inner
+            .trace_store
+            .write_workflow_traces(&result)
+            .await
+            .into_diagnostic()?;
         Ok(result)
     }
 
@@ -260,7 +266,11 @@ impl TuiRuntime {
     }
 
     async fn persist_trace(&self, trace: &AgentTrace) -> Result<()> {
-        write_store_trace(&self.inner.options.store_path, trace).await
+        self.inner
+            .trace_store
+            .write_trace(trace.clone())
+            .await
+            .into_diagnostic()
     }
 }
 

@@ -1502,8 +1502,10 @@ mod tests {
         test_support::{test_options, test_state},
     };
     use agent_core::{
-        AgentRunRecord, AgentTrace, PROTOCOL_VERSION, RunScope, ToolRisk, ToolSpec, TraceEvent,
+        AgentRunRecord, AgentTrace, AgentTraceStore, PROTOCOL_VERSION, RunScope, ToolRisk,
+        ToolSpec, TraceEvent,
     };
+    use agent_store::FileTraceStore;
     use camino::Utf8PathBuf;
     use time::OffsetDateTime;
 
@@ -1559,6 +1561,16 @@ mod tests {
         let mut options = test_options(dir, "mock response", allow_high_risk_tools);
         add_high_risk_echo_tool(&mut options);
         TuiState::load(options).await.expect("state loads")
+    }
+
+    async fn write_test_trace(store_path: &Utf8PathBuf, trace: &AgentTrace) {
+        let trace_store = FileTraceStore::new(store_path.clone())
+            .await
+            .expect("trace store loads");
+        trace_store
+            .write_trace(trace.clone())
+            .await
+            .expect("trace writes");
     }
 
     #[tokio::test]
@@ -2127,9 +2139,7 @@ mod tests {
             ],
             artifact_refs: Vec::new(),
         };
-        crate::trace_store::write_store_trace(&state.options.store_path, &trace)
-            .await
-            .expect("trace writes");
+        write_test_trace(&state.options.store_path, &trace).await;
 
         execute_command(&mut state, &format!("/events {} 2", run_id.0))
             .await
@@ -2195,9 +2205,7 @@ mod tests {
             )],
             artifact_refs: Vec::new(),
         };
-        crate::trace_store::write_store_trace(&state.options.store_path, &trace)
-            .await
-            .expect("trace writes");
+        write_test_trace(&state.options.store_path, &trace).await;
         state.set_trace("current trace", trace);
 
         execute_command(&mut state, "/events")
@@ -2242,9 +2250,7 @@ mod tests {
             ],
             artifact_refs: Vec::new(),
         };
-        crate::trace_store::write_store_trace(&state.options.store_path, &trace)
-            .await
-            .expect("trace writes");
+        write_test_trace(&state.options.store_path, &trace).await;
         state.set_trace("current trace", trace);
 
         execute_command(&mut state, "/events 2")
