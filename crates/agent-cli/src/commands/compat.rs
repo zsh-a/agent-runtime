@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use agent_core::{
-    AgentProposalStore, AgentRunResult, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind,
+    AgentProposalStore, AgentRunResult, AgentTraceStore, PROTOCOL_VERSION, RunId, RunRequest,
+    TriggerKind,
 };
 use agent_runtime::{AgentRunner, HookManager, RunOutcome};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
+use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileTraceStore};
 use camino::Utf8PathBuf;
 use clap::Subcommand;
 use miette::{IntoDiagnostic, Result, miette};
@@ -17,7 +18,7 @@ use crate::{
     debug_bundle::write_debug_bundle,
     print_json,
     tools::{CliServices, tool_overrides},
-    trace_store::{read_json, write_store_trace},
+    trace_store::read_json,
 };
 
 #[derive(Debug, Subcommand)]
@@ -404,7 +405,12 @@ async fn execute_compat_run(
         )
         .await
         .into_diagnostic()?;
-    write_store_trace(&options.store, &outcome.trace).await?;
+    FileTraceStore::new(options.store.clone())
+        .await
+        .into_diagnostic()?
+        .write_trace(outcome.trace.clone())
+        .await
+        .into_diagnostic()?;
     Ok(outcome)
 }
 
