@@ -957,8 +957,7 @@ async fn main() -> Result<()> {
             run_catalog_command(command).await?;
         }
         Command::Compat { command } => {
-            context.require_file_store_backend("compat")?;
-            run_compat_command(command).await?;
+            run_compat_command(command, context.store_backend()).await?;
         }
         Command::Config { command } => match command {
             ConfigCommand::Show => {

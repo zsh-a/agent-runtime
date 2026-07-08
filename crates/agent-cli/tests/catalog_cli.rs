@@ -453,9 +453,6 @@ fn sqlite_store_backend_rejects_file_oriented_cli_workflows() {
     let trace_path = std::path::Path::new("../../fixtures/contracts/trace.valid.json")
         .canonicalize()
         .expect("trace fixture exists");
-    let catalog_path = std::path::Path::new("../../fixtures/contracts/catalog.valid.json")
-        .canonicalize()
-        .expect("catalog fixture exists");
     let registry_path = std::path::Path::new("../../examples/agents.yaml")
         .canonicalize()
         .expect("registry fixture exists");
@@ -473,42 +470,28 @@ store_backend = "sqlite"
 
     let config = config_path.to_str().expect("utf8 config path").to_owned();
     let trace = trace_path.to_str().expect("utf8 trace path").to_owned();
-    let catalog = catalog_path.to_str().expect("utf8 catalog path").to_owned();
     let registry = registry_path
         .to_str()
         .expect("utf8 registry path")
         .to_owned();
     let bundle_path = dir.path().join("bundle");
     let bundle = bundle_path.to_str().expect("utf8 bundle path").to_owned();
-    let compat_store = dir
-        .path()
-        .join("compat-store")
+    let compat_store_path = dir.path().join("compat-store");
+    let compat_store = compat_store_path
         .to_str()
         .expect("utf8 compat store path")
         .to_owned();
+    let compat_bundle_path = dir.path().join("compat-bundle");
+    let compat_bundle = compat_bundle_path
+        .to_str()
+        .expect("utf8 compat bundle path")
+        .to_owned();
 
-    let rejected_commands = [
-        (
-            "tui",
-            vec![config.clone(), "tui".to_owned()],
-            "tui does not support runtime.store_backend = \"sqlite\" yet",
-        ),
-        (
-            "compat",
-            vec![
-                config.clone(),
-                "compat".to_owned(),
-                "check".to_owned(),
-                "--catalog".to_owned(),
-                catalog.clone(),
-                "--agent-id".to_owned(),
-                "ai_chat".to_owned(),
-                "--store".to_owned(),
-                compat_store,
-            ],
-            "compat does not support runtime.store_backend = \"sqlite\" yet",
-        ),
-    ];
+    let rejected_commands = [(
+        "tui",
+        vec![config.clone(), "tui".to_owned()],
+        "tui does not support runtime.store_backend = \"sqlite\" yet",
+    )];
 
     for (label, mut args, expected) in rejected_commands {
         args.insert(0, "--config".to_owned());
@@ -642,6 +625,54 @@ store_backend = "sqlite"
     let state_snapshot = read_json(bundle_path.join("state_snapshot.json"));
     assert_eq!(state_snapshot["run_id"], replay_run_id);
     assert_eq!(state_snapshot["agent_id"], "echo_agent");
+
+    let compat_output = agent_cmd()
+        .args([
+            "--config",
+            &config,
+            "compat",
+            "check",
+            "--catalog",
+            "../../examples/business-integration/catalog.json",
+            "--tool-source",
+            "../../examples/business-integration/tool-source.json",
+            "--agent-id",
+            "customer_summary_agent",
+            "--run-input",
+            "../../examples/business-integration/run-customer-summary.json",
+            "--proposal-input",
+            "../../examples/business-integration/run-followup-proposal.json",
+            "--schema-root",
+            "../../schemas",
+            "--store",
+            &compat_store,
+            "--debug-bundle-out",
+            &compat_bundle,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let compat: Value = serde_json::from_slice(&compat_output).expect("sqlite compat is JSON");
+    assert_eq!(compat["status"], "passed");
+    let compat_run_id = compat["proposal_run"]["run_id"]
+        .as_str()
+        .expect("compat proposal run id is string");
+    let compat_trace = read_sqlite_trace(&compat_store_path, compat_run_id);
+    assert_eq!(compat_trace.run_id.0, compat_run_id);
+    assert_eq!(compat_trace.agent_id, "customer_summary_agent");
+    assert_eq!(compat["debug_bundle"]["run_id"], compat_run_id);
+    assert!(compat_store_path.join("runtime.sqlite").exists());
+    assert!(
+        !compat_store_path
+            .join("traces")
+            .join(format!("{compat_run_id}.trace.json"))
+            .exists(),
+        "sqlite compat trace should not be written through the file trace store"
+    );
+    assert!(compat_bundle_path.join("manifest.json").exists());
+    assert!(compat_bundle_path.join("trace.json").exists());
 
     let eval_output = agent_cmd()
         .args([

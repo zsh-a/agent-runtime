@@ -1,11 +1,7 @@
 use std::sync::Arc;
 
-use agent_core::{
-    AgentProposalStore, AgentRunResult, AgentTraceStore, PROTOCOL_VERSION, RunId, RunRequest,
-    TriggerKind,
-};
+use agent_core::{AgentRunResult, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind};
 use agent_runtime::{AgentRunner, HookManager, RunOutcome};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileTraceStore};
 use camino::Utf8PathBuf;
 use clap::Subcommand;
 use miette::{IntoDiagnostic, Result, miette};
@@ -17,6 +13,7 @@ use crate::{
     config::{RuntimeStoreBackend, execution_policy},
     debug_bundle::write_debug_bundle,
     print_json,
+    runtime_stores::RuntimeStores,
     tools::{CliServices, tool_overrides},
     trace_store::read_json,
 };
@@ -62,6 +59,7 @@ struct CompatCheckOptions {
     timeout_seconds: u64,
     max_retries: u32,
     retry_backoff_ms: u64,
+    store_backend: RuntimeStoreBackend,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,7 +104,10 @@ enum CompatStepStatus {
     Skipped,
 }
 
-pub(crate) async fn run_compat_command(command: CompatCommand) -> Result<()> {
+pub(crate) async fn run_compat_command(
+    command: CompatCommand,
+    store_backend: RuntimeStoreBackend,
+) -> Result<()> {
     match command {
         CompatCommand::Check {
             catalog,
@@ -133,6 +134,7 @@ pub(crate) async fn run_compat_command(command: CompatCommand) -> Result<()> {
                 timeout_seconds,
                 max_retries,
                 retry_backoff_ms,
+                store_backend,
             };
             let report = run_compat_check(options).await;
             print_json(&report)?;
@@ -214,7 +216,13 @@ async fn run_compat_check(options: CompatCheckOptions) -> CompatCheckReport {
             Ok(outcome) => {
                 debug_run_id = Some(outcome.result.run_id.clone());
                 report.proposal_run = Some(run_summary(&outcome.result));
-                match proposals_for_run(&options.store, &outcome.result.run_id).await {
+                match proposals_for_run(
+                    options.store_backend,
+                    &options.store,
+                    &outcome.result.run_id,
+                )
+                .await
+                {
                     Ok(proposal_count) if proposal_count > 0 => push_step(
                         &mut report,
                         passed_step(
@@ -361,27 +369,14 @@ async fn execute_compat_run(
         tool_overrides(Vec::new(), Vec::new(), options.tool_source.clone()).await?;
     tool_overrides.extend_tool_specs(catalog.tools.clone());
     let registry = registry_from_catalog(&catalog);
-    let store = Arc::new(
-        FileRunStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let lock_store = Arc::new(
-        FileLockStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let proposal_store = Arc::new(
-        FileProposalStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let services = Arc::new(CliServices::with_proposal_store(
+    let stores = RuntimeStores::open(options.store_backend, options.store.clone()).await?;
+    let services = Arc::new(CliServices::with_stores(
         tool_overrides,
-        proposal_store,
+        stores.state_store.clone(),
+        stores.proposal_store.clone(),
     ));
-    let runner = AgentRunner::new(registry, store, services)
-        .with_lock_store(lock_store)
+    let runner = AgentRunner::new(registry, stores.run_store.clone(), services)
+        .with_lock_store(stores.lock_store.clone())
         .with_hooks(HookManager::default())
         .with_policy(execution_policy(
             options.timeout_seconds,
@@ -405,20 +400,22 @@ async fn execute_compat_run(
         )
         .await
         .into_diagnostic()?;
-    FileTraceStore::new(options.store.clone())
-        .await
-        .into_diagnostic()?
+    stores
+        .trace_store
         .write_trace(outcome.trace.clone())
         .await
         .into_diagnostic()?;
     Ok(outcome)
 }
 
-async fn proposals_for_run(store: &camino::Utf8Path, run_id: &RunId) -> Result<usize> {
-    let proposal_store = FileProposalStore::new(store.to_path_buf())
-        .await
-        .into_diagnostic()?;
-    Ok(proposal_store
+async fn proposals_for_run(
+    store_backend: RuntimeStoreBackend,
+    store: &camino::Utf8Path,
+    run_id: &RunId,
+) -> Result<usize> {
+    let stores = RuntimeStores::open(store_backend, store.to_path_buf()).await?;
+    Ok(stores
+        .proposal_store
         .list_proposals(Some(run_id))
         .await
         .into_diagnostic()?
@@ -433,7 +430,7 @@ async fn verify_debug_bundle(
     let manifest = write_debug_bundle(
         run_id.0,
         options.store.clone(),
-        RuntimeStoreBackend::File,
+        options.store_backend,
         out.clone(),
         Some(options.catalog.clone()),
         None,
