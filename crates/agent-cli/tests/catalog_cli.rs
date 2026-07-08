@@ -478,12 +478,8 @@ store_backend = "sqlite"
         .to_str()
         .expect("utf8 registry path")
         .to_owned();
-    let bundle = dir
-        .path()
-        .join("bundle")
-        .to_str()
-        .expect("utf8 bundle path")
-        .to_owned();
+    let bundle_path = dir.path().join("bundle");
+    let bundle = bundle_path.to_str().expect("utf8 bundle path").to_owned();
     let compat_store = dir
         .path()
         .join("compat-store")
@@ -496,18 +492,6 @@ store_backend = "sqlite"
             "tui",
             vec![config.clone(), "tui".to_owned()],
             "tui does not support runtime.store_backend = \"sqlite\" yet",
-        ),
-        (
-            "debug-bundle export",
-            vec![
-                config.clone(),
-                "debug-bundle".to_owned(),
-                "export".to_owned(),
-                "run_missing".to_owned(),
-                "--out".to_owned(),
-                bundle,
-            ],
-            "debug-bundle export does not support runtime.store_backend = \"sqlite\" yet",
         ),
         (
             "compat",
@@ -629,6 +613,35 @@ store_backend = "sqlite"
             .exists(),
         "sqlite replay trace should not be written through the file trace store"
     );
+
+    let bundle_output = agent_cmd()
+        .args([
+            "--config",
+            &config,
+            "debug-bundle",
+            "export",
+            replay_run_id,
+            "--out",
+            &bundle,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let manifest: Value =
+        serde_json::from_slice(&bundle_output).expect("sqlite debug bundle manifest is JSON");
+    assert_eq!(manifest["bundle_version"], "debug_bundle.v1");
+    assert_eq!(manifest["run_id"], replay_run_id);
+    assert_eq!(manifest["agent_id"], "echo_agent");
+    assert_eq!(manifest["files"]["trace"], "trace.json");
+    assert_eq!(manifest["files"]["state_snapshot"], "state_snapshot.json");
+    let bundled_trace = read_json(bundle_path.join("trace.json"));
+    assert_eq!(bundled_trace["run_id"], replay_run_id);
+    assert_eq!(bundled_trace["agent_id"], "echo_agent");
+    let state_snapshot = read_json(bundle_path.join("state_snapshot.json"));
+    assert_eq!(state_snapshot["run_id"], replay_run_id);
+    assert_eq!(state_snapshot["agent_id"], "echo_agent");
 
     let eval_output = agent_cmd()
         .args([

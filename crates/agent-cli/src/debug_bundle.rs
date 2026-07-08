@@ -1,12 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use agent_core::{
-    AgentProposalStore, AgentRunRecord, AgentRunResult, AgentRunStore, AgentSessionStore,
-    PROTOCOL_VERSION, ProposalEnvelope, RunId, RunRequest, SessionId, SessionRecord, StepRecord,
-    ThreadId, ThreadRecord, TriggerKind, UserContext,
+    AgentProposalStore, AgentRunRecord, AgentRunResult, AgentSessionStore, PROTOCOL_VERSION,
+    ProposalEnvelope, RunId, RunRequest, SessionId, SessionRecord, StepRecord, ThreadId,
+    ThreadRecord, TriggerKind, UserContext,
 };
 use agent_runtime::RUNTIME_VERSION;
-use agent_store::{FileProposalStore, FileRunStore, FileSessionStore};
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
@@ -15,6 +14,8 @@ use time::format_description::well_known::Rfc3339;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::catalog::{build_prompt_manifest, read_catalog, string_metadata};
+use crate::config::RuntimeStoreBackend;
+use crate::runtime_stores::RuntimeStores;
 
 #[derive(Debug, Serialize)]
 struct DebugBundleManifest {
@@ -139,6 +140,7 @@ impl DebugBundleManifest {
 pub(crate) async fn export_debug_bundle(
     run_id: String,
     store_path: Utf8PathBuf,
+    store_backend: RuntimeStoreBackend,
     out: Utf8PathBuf,
     catalog_path: Option<Utf8PathBuf>,
     trace_path: Option<Utf8PathBuf>,
@@ -149,6 +151,7 @@ pub(crate) async fn export_debug_bundle(
     let manifest = write_debug_bundle(
         run_id,
         store_path,
+        store_backend,
         out,
         catalog_path,
         trace_path,
@@ -163,6 +166,7 @@ pub(crate) async fn export_debug_bundle(
 pub(crate) async fn write_debug_bundle(
     run_id: String,
     store_path: Utf8PathBuf,
+    store_backend: RuntimeStoreBackend,
     out: Utf8PathBuf,
     catalog_path: Option<Utf8PathBuf>,
     trace_path: Option<Utf8PathBuf>,
@@ -173,11 +177,10 @@ pub(crate) async fn write_debug_bundle(
     fs_err::tokio::create_dir_all(&out)
         .await
         .into_diagnostic()?;
-    let store = FileRunStore::new(store_path.clone())
-        .await
-        .into_diagnostic()?;
+    let stores = RuntimeStores::open(store_backend, store_path.clone()).await?;
     let run_id = RunId(run_id);
-    let record = store
+    let record = stores
+        .run_store
         .get_run(&run_id)
         .await
         .into_diagnostic()?
@@ -185,7 +188,14 @@ pub(crate) async fn write_debug_bundle(
 
     let trace = match &trace_path {
         Some(path) => Some(read_json_file(path.clone()).await?),
-        None => read_store_trace(&store_path, &run_id).await?,
+        None => stores
+            .trace_store
+            .read_trace(&run_id)
+            .await
+            .into_diagnostic()?
+            .map(|trace| serde_json::to_value(&trace))
+            .transpose()
+            .into_diagnostic()?,
     };
     let catalog = match &catalog_path {
         Some(path) => Some(read_catalog(path.clone()).await?),
@@ -205,7 +215,13 @@ pub(crate) async fn write_debug_bundle(
 
     let run_request = run_request_from_record(&record);
     let run_result = run_result_from_record(&record)?;
-    let state_snapshot = build_debug_state_snapshot(&store_path, &record).await?;
+    let state_snapshot = build_debug_state_snapshot(
+        &store_path,
+        &record,
+        stores.proposal_store.as_ref(),
+        stores.session_store.as_ref(),
+    )
+    .await?;
     let artifact_refs = trace
         .as_ref()
         .map(artifact_ref_records_from_trace)
@@ -345,10 +361,9 @@ pub(crate) async fn write_debug_bundle(
 async fn build_debug_state_snapshot(
     store_path: &Utf8Path,
     record: &AgentRunRecord,
+    proposal_store: &dyn AgentProposalStore,
+    session_store: &dyn AgentSessionStore,
 ) -> Result<DebugStateSnapshot> {
-    let proposal_store = FileProposalStore::new(store_path.to_path_buf())
-        .await
-        .into_diagnostic()?;
     let proposals = proposal_store
         .list_proposals(Some(&record.run_id))
         .await
@@ -356,9 +371,6 @@ async fn build_debug_state_snapshot(
 
     let session_id = string_metadata(&record.metadata, "session_id");
     let thread_id = string_metadata(&record.metadata, "thread_id");
-    let session_store = FileSessionStore::new(store_path.to_path_buf())
-        .await
-        .into_diagnostic()?;
     let session = match &session_id {
         Some(session_id) => session_store
             .get_session(&SessionId(session_id.clone()))
@@ -923,20 +935,6 @@ fn sanitize_artifact_filename(value: &str) -> String {
             }
         })
         .collect()
-}
-
-async fn read_store_trace(store: &Utf8Path, run_id: &RunId) -> Result<Option<Value>> {
-    let path = store_trace_path(store, run_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    read_json_file(path).await.map(Some)
-}
-
-fn store_trace_path(store: &Utf8Path, run_id: &RunId) -> Utf8PathBuf {
-    store
-        .join("traces")
-        .join(format!("{}.trace.json", run_id.0))
 }
 
 async fn read_json_file(path: Utf8PathBuf) -> Result<Value> {

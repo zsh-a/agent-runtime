@@ -837,10 +837,10 @@ async fn main() -> Result<()> {
                 materialize_artifacts,
                 artifact_resolver,
             } => {
-                context.require_file_store_backend("debug-bundle export")?;
                 export_debug_bundle(
                     run_id,
                     context.store(store),
+                    context.store_backend(),
                     out,
                     catalog,
                     trace,

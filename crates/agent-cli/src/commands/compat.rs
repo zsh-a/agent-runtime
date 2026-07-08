@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{
     catalog::{read_catalog, registry_from_catalog},
-    config::execution_policy,
+    config::{RuntimeStoreBackend, execution_policy},
     debug_bundle::write_debug_bundle,
     print_json,
     tools::{CliServices, tool_overrides},
@@ -433,6 +433,7 @@ async fn verify_debug_bundle(
     let manifest = write_debug_bundle(
         run_id.0,
         options.store.clone(),
+        RuntimeStoreBackend::File,
         out.clone(),
         Some(options.catalog.clone()),
         None,
