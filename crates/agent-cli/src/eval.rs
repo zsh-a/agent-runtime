@@ -1,12 +1,12 @@
 use std::{process::Stdio, sync::Arc};
 
 use agent_core::{
-    AgentProposalStore, AgentRunRecord, AgentRunStore, HookEvent, HookEventName,
+    AgentProposalStore, AgentRunRecord, AgentRunStore, AgentTraceStore, HookEvent, HookEventName,
     HookInvocationStatus, HookKind, PROTOCOL_VERSION, PromptManifest, ProposalEnvelope,
     ProposalStatus, RunId, RunRequest, TriggerKind,
 };
 use agent_runtime::{AgentRunner, RunOutcome};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
+use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileTraceStore};
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
@@ -273,6 +273,9 @@ async fn run_eval(
             .await
             .into_diagnostic()?,
     );
+    let trace_store = FileTraceStore::new(trace_store_path.clone())
+        .await
+        .into_diagnostic()?;
     let services = Arc::new(CliServices::with_proposal_store(
         tool_overrides,
         proposal_store.clone(),
@@ -295,7 +298,10 @@ async fn run_eval(
         )
         .await
         .into_diagnostic()?;
-    write_store_trace(&trace_store_path, &outcome.trace).await?;
+    trace_store
+        .write_trace(outcome.trace.clone())
+        .await
+        .into_diagnostic()?;
 
     let mut checked = Vec::new();
     if outcome.result.status != case.expect.status {
@@ -812,10 +818,6 @@ fn absolutize_runtime_path(path: Utf8PathBuf) -> Result<Utf8PathBuf> {
     let cwd = std::env::current_dir().into_diagnostic()?;
     Utf8PathBuf::from_path_buf(cwd.join(path.as_std_path()))
         .map_err(|path| miette!("non-UTF-8 path: {}", path.display()))
-}
-
-async fn write_store_trace(store: &Utf8Path, trace: &agent_core::AgentTrace) -> Result<()> {
-    write_json_file(store_trace_path(store, &trace.run_id), trace).await
 }
 
 async fn read_store_trace(store: &Utf8Path, run_id: &RunId) -> Result<Option<Value>> {
