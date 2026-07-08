@@ -456,6 +456,9 @@ fn sqlite_store_backend_rejects_file_oriented_cli_workflows() {
     let catalog_path = std::path::Path::new("../../fixtures/contracts/catalog.valid.json")
         .canonicalize()
         .expect("catalog fixture exists");
+    let registry_path = std::path::Path::new("../../examples/agents.yaml")
+        .canonicalize()
+        .expect("registry fixture exists");
     std::fs::write(
         &config_path,
         format!(
@@ -471,6 +474,10 @@ store_backend = "sqlite"
     let config = config_path.to_str().expect("utf8 config path").to_owned();
     let trace = trace_path.to_str().expect("utf8 trace path").to_owned();
     let catalog = catalog_path.to_str().expect("utf8 catalog path").to_owned();
+    let registry = registry_path
+        .to_str()
+        .expect("utf8 registry path")
+        .to_owned();
     let bundle = dir
         .path()
         .join("bundle")
@@ -489,17 +496,6 @@ store_backend = "sqlite"
             "tui",
             vec![config.clone(), "tui".to_owned()],
             "tui does not support runtime.store_backend = \"sqlite\" yet",
-        ),
-        (
-            "replay",
-            vec![
-                config.clone(),
-                "replay".to_owned(),
-                trace.clone(),
-                "--mode".to_owned(),
-                "live".to_owned(),
-            ],
-            "replay does not support runtime.store_backend = \"sqlite\" yet",
         ),
         (
             "debug-bundle export",
@@ -607,6 +603,40 @@ store_backend = "sqlite"
     assert!(
         !store.join("runtime.sqlite").exists(),
         "view and deterministic replay should not open the SQLite runtime store"
+    );
+
+    let live_output = agent_cmd()
+        .args([
+            "--config",
+            &config,
+            "replay",
+            &trace,
+            "--mode",
+            "live",
+            "--registry",
+            &registry,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let live: Value = serde_json::from_slice(&live_output).expect("live replay is JSON");
+    let replay_run_id = live["replay_run_id"]
+        .as_str()
+        .expect("replay run id is string");
+    assert_eq!(live["mode"], "live");
+    assert_eq!(live["agent_id"], "echo_agent");
+    assert!(store.join("runtime.sqlite").exists());
+    let stored_trace = read_sqlite_trace(&store, replay_run_id);
+    assert_eq!(stored_trace.run_id.0, replay_run_id);
+    assert_eq!(stored_trace.agent_id, "echo_agent");
+    assert!(
+        !store
+            .join("traces")
+            .join(format!("{replay_run_id}.trace.json"))
+            .exists(),
+        "sqlite replay trace should not be written through the file trace store"
     );
 }
 

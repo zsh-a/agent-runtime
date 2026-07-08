@@ -780,15 +780,13 @@ async fn main() -> Result<()> {
             };
             match mode {
                 ReplayMode::Live | ReplayMode::Deterministic => {
-                    if mode == ReplayMode::Live || execute {
-                        context.require_file_store_backend("replay")?;
-                    }
                     replay_trace(ReplayTraceOptions {
                         trace_file,
                         mode,
                         sources,
                         tools: context.tools(tools),
                         store,
+                        store_backend: context.store_backend(),
                         trace_out,
                         timeout_seconds: execution.timeout_seconds,
                         max_retries: execution.max_retries,

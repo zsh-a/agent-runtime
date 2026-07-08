@@ -4,7 +4,6 @@ use agent_core::{
     AgentRunResult, AgentTraceStore, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind,
 };
 use agent_runtime::{AgentRunner, HookManager};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileTraceStore};
 use camino::Utf8PathBuf;
 use clap::ValueEnum;
 use miette::{IntoDiagnostic, Result};
@@ -12,9 +11,10 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::{
-    config::execution_policy,
+    config::{RuntimeStoreBackend, execution_policy},
     print_json,
     runtime_config::{ResolvedRuntimeSources, RuntimeSourceOptions, compose_runtime_sources},
+    runtime_stores::RuntimeStores,
     tools::{CliServices, ToolSelection},
     trace_store::{read_trace, write_json},
 };
@@ -44,6 +44,7 @@ pub(crate) struct ReplayTraceOptions {
     pub(crate) sources: ResolvedRuntimeSources,
     pub(crate) tools: ToolSelection,
     pub(crate) store: Utf8PathBuf,
+    pub(crate) store_backend: RuntimeStoreBackend,
     pub(crate) trace_out: Option<Utf8PathBuf>,
     pub(crate) timeout_seconds: u64,
     pub(crate) max_retries: u32,
@@ -67,34 +68,27 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
     })
     .await?;
     overrides.extend_tool_specs(composition.tool_specs.clone());
-    let store = Arc::new(
-        FileRunStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let lock_store = Arc::new(
-        FileLockStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let proposal_store = Arc::new(
-        FileProposalStore::new(options.store.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let trace_store = FileTraceStore::new(options.store.clone())
-        .await
-        .into_diagnostic()?;
-    let services = Arc::new(CliServices::with_proposal_store(overrides, proposal_store));
-    let runner = AgentRunner::new(composition.registry, store, services)
-        .with_lock_store(lock_store)
+    let stores = RuntimeStores::open(options.store_backend, options.store).await?;
+    let services = Arc::new(CliServices::with_stores(
+        overrides,
+        stores.state_store.clone(),
+        stores.proposal_store.clone(),
+    ));
+    let runner = AgentRunner::new(composition.registry, stores.run_store.clone(), services)
+        .with_lock_store(stores.lock_store.clone())
         .with_hooks(options.hooks)
         .with_policy(execution_policy(
             options.timeout_seconds,
             options.max_retries,
             options.retry_backoff_ms,
         ));
-    let report = replay_source_trace(&runner, &trace_store, source_trace, options.mode).await?;
+    let report = replay_source_trace(
+        &runner,
+        stores.trace_store.as_ref(),
+        source_trace,
+        options.mode,
+    )
+    .await?;
     if let Some(path) = options.trace_out {
         write_json(path, &report.trace).await?;
     }
