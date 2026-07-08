@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
-use agent_core::{AgentRunResult, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind};
+use agent_core::{
+    AgentRunResult, AgentTraceStore, PROTOCOL_VERSION, RunId, RunRequest, TriggerKind,
+};
 use agent_runtime::{AgentRunner, HookManager};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore};
-use camino::{Utf8Path, Utf8PathBuf};
+use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileTraceStore};
+use camino::Utf8PathBuf;
 use clap::ValueEnum;
 use miette::{IntoDiagnostic, Result};
 use serde::Serialize;
@@ -14,7 +16,7 @@ use crate::{
     print_json,
     runtime_config::{ResolvedRuntimeSources, RuntimeSourceOptions, compose_runtime_sources},
     tools::{CliServices, ToolSelection},
-    trace_store::{read_trace, write_json, write_store_trace},
+    trace_store::{read_trace, write_json},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
@@ -80,6 +82,9 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
             .await
             .into_diagnostic()?,
     );
+    let trace_store = FileTraceStore::new(options.store.clone())
+        .await
+        .into_diagnostic()?;
     let services = Arc::new(CliServices::with_proposal_store(overrides, proposal_store));
     let runner = AgentRunner::new(composition.registry, store, services)
         .with_lock_store(lock_store)
@@ -89,7 +94,7 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
             options.max_retries,
             options.retry_backoff_ms,
         ));
-    let report = replay_source_trace(&runner, &options.store, source_trace, options.mode).await?;
+    let report = replay_source_trace(&runner, &trace_store, source_trace, options.mode).await?;
     if let Some(path) = options.trace_out {
         write_json(path, &report.trace).await?;
     }
@@ -98,7 +103,7 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
 
 pub(crate) async fn replay_source_trace(
     runner: &AgentRunner,
-    store_path: &Utf8Path,
+    trace_store: &dyn AgentTraceStore,
     source_trace: agent_core::AgentTrace,
     mode: ReplayMode,
 ) -> Result<ReplayExecutionReport> {
@@ -110,7 +115,10 @@ pub(crate) async fn replay_source_trace(
         )
         .await
         .into_diagnostic()?;
-    write_store_trace(store_path, &outcome.trace).await?;
+    trace_store
+        .write_trace(outcome.trace.clone())
+        .await
+        .into_diagnostic()?;
     Ok(ReplayExecutionReport {
         mode,
         source_run_id: source_trace.run_id,

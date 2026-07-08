@@ -688,7 +688,7 @@ impl RuntimeServer {
             .map_err(|e| miette!("failed to parse trace for run '{}': {e}", run_id.0))?;
         replay_source_trace(
             self.runner.as_ref(),
-            &self.store_path,
+            self.trace_store.as_ref(),
             source_trace,
             ReplayMode::Live,
         )
