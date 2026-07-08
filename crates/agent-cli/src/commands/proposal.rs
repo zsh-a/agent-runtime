@@ -140,14 +140,14 @@ pub(crate) async fn run_proposal_command(
             proposal.warnings = parse_json_vec("warnings-json", warnings_json)?;
             let store_path = proposal_store_path(store, configured_store.as_ref());
             let stores = RuntimeStores::open(store_backend, store_path).await?;
-            let store_path = stores.artifact_store_path.clone();
-            authorize_proposal_create_policy(&hooks, &store_path, &proposal).await?;
+            authorize_proposal_create_policy(&hooks, stores.trace_store.as_ref(), &proposal)
+                .await?;
             stores
                 .proposal_store
                 .create_proposal(proposal.clone())
                 .await
                 .into_diagnostic()?;
-            append_proposal_created_trace_event(&store_path, &proposal).await?;
+            append_proposal_created_trace_event(stores.trace_store.as_ref(), &proposal).await?;
             print_json(&proposal)
         }
         ProposalCommand::List { store, run_id } => {
@@ -182,7 +182,6 @@ pub(crate) async fn run_proposal_command(
         } => {
             let store_path = proposal_store_path(store, configured_store.as_ref());
             let stores = RuntimeStores::open(store_backend, store_path).await?;
-            let store_path = stores.artifact_store_path.clone();
             let proposal_id = ProposalId(proposal_id);
             let mut proposal = stores
                 .proposal_store
@@ -206,7 +205,7 @@ pub(crate) async fn run_proposal_command(
                 },
             )
             .await?;
-            append_proposal_decision_trace_event(&store_path, &response).await?;
+            append_proposal_decision_trace_event(stores.trace_store.as_ref(), &response).await?;
             print_json(&response)
         }
         ProposalCommand::Apply {
@@ -278,7 +277,6 @@ async fn execute_proposal_action(
 ) -> Result<ProposalActionResponse> {
     let catalog = read_catalog(catalog_path).await?;
     let stores = RuntimeStores::open(store_backend, store_path).await?;
-    let store_path = stores.artifact_store_path.clone();
     tool_overrides.extend_tool_specs(catalog.tools.clone());
     let services = CliServices::with_stores(
         tool_overrides,
@@ -292,7 +290,14 @@ async fn execute_proposal_action(
         .into_diagnostic()?
         .ok_or_else(|| miette!("proposal '{}' was not found", proposal_id.0))?;
     let tool = proposal_action_tool(&catalog, &proposal.kind)?;
-    authorize_proposal_apply_policy(&hooks, &store_path, &proposal, &tool, action).await?;
+    authorize_proposal_apply_policy(
+        &hooks,
+        stores.trace_store.as_ref(),
+        &proposal,
+        &tool,
+        action,
+    )
+    .await?;
     let response = execute_proposal_action_with_store(
         stores.proposal_store.as_ref(),
         &services,
@@ -301,6 +306,6 @@ async fn execute_proposal_action(
         action,
     )
     .await?;
-    append_proposal_action_trace_event(&store_path, &response).await?;
+    append_proposal_action_trace_event(stores.trace_store.as_ref(), &response).await?;
     Ok(response)
 }

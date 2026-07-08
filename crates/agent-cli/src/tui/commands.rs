@@ -4,7 +4,7 @@ use agent_core::{
     TraceEvent, WorkflowRunNodeCompensationResult, WorkflowRunNodeResult, WorkflowRunRequest,
     WorkflowRunResult,
 };
-use agent_store::{FileProposalStore, FileRunStore};
+use agent_store::{FileProposalStore, FileRunStore, FileTraceStore};
 use camino::Utf8PathBuf;
 use miette::{IntoDiagnostic, Result, miette};
 use serde_json::{Value, json};
@@ -529,6 +529,7 @@ async fn decide_proposal_command(
     let store = FileProposalStore::new(store_path.clone())
         .await
         .into_diagnostic()?;
+    let trace_store = FileTraceStore::new(store_path).await.into_diagnostic()?;
     let mut proposal = store
         .get_proposal(&proposal_id)
         .await
@@ -545,7 +546,7 @@ async fn decide_proposal_command(
         },
     )
     .await?;
-    append_proposal_decision_trace_event(&store_path, &response).await?;
+    append_proposal_decision_trace_event(&trace_store, &response).await?;
     state.set_latest_proposals(proposal_list_summary(std::slice::from_ref(
         &response.proposal,
     )));

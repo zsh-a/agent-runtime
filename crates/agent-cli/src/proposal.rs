@@ -1,12 +1,11 @@
 use agent_core::{
-    AgentError, AgentProposalStore, AgentRuntimeCatalog, AgentServices, ApprovalDecision,
-    ApprovalDecisionKind, ApprovalLevel, HookEventName, PROTOCOL_VERSION, ProposalEnvelope,
-    ProposalKindSpec, ProposalStatus, RunId, TraceEvent, TraceSink,
+    AgentError, AgentProposalStore, AgentRuntimeCatalog, AgentServices, AgentTraceStore,
+    ApprovalDecision, ApprovalDecisionKind, ApprovalLevel, HookEventName, PROTOCOL_VERSION,
+    ProposalEnvelope, ProposalKindSpec, ProposalStatus, RunId, TraceEvent, TraceSink,
     normalized_required_approver_count,
 };
 use agent_runtime::HookManager;
 use async_trait::async_trait;
-use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -235,7 +234,7 @@ fn distinct_approver_count(decisions: &[ApprovalDecision]) -> usize {
 
 pub(crate) async fn authorize_proposal_apply_policy(
     hooks: &HookManager,
-    store_path: &Utf8Path,
+    trace_store: &dyn AgentTraceStore,
     proposal: &ProposalEnvelope,
     tool: &str,
     action: ProposalAction,
@@ -248,7 +247,7 @@ pub(crate) async fn authorize_proposal_apply_policy(
     }
 
     let trace = StoreTraceSink {
-        store_path: store_path.to_owned(),
+        trace_store,
         run_id: proposal.run_id.clone(),
     };
     let input = json!({
@@ -306,11 +305,11 @@ pub(crate) async fn authorize_proposal_apply_policy(
 
 pub(crate) async fn authorize_proposal_create_policy(
     hooks: &HookManager,
-    store_path: &Utf8Path,
+    trace_store: &dyn AgentTraceStore,
     proposal: &ProposalEnvelope,
 ) -> Result<()> {
     let trace = StoreTraceSink {
-        store_path: store_path.to_owned(),
+        trace_store,
         run_id: proposal.run_id.clone(),
     };
     let input = json!({
@@ -428,15 +427,15 @@ pub(crate) async fn execute_proposal_action_with_store(
     })
 }
 
-struct StoreTraceSink {
-    store_path: Utf8PathBuf,
+struct StoreTraceSink<'a> {
+    trace_store: &'a dyn AgentTraceStore,
     run_id: RunId,
 }
 
 #[async_trait]
-impl TraceSink for StoreTraceSink {
+impl TraceSink for StoreTraceSink<'_> {
     async fn emit(&self, event: TraceEvent) -> Result<(), AgentError> {
-        append_store_trace_event(&self.store_path, &self.run_id, event)
+        append_store_trace_event(self.trace_store, &self.run_id, event)
             .await
             .map_err(|error| AgentError::internal(error.to_string()))
     }
@@ -458,11 +457,11 @@ pub(crate) fn proposal_kind_spec<'a>(
 }
 
 pub(crate) async fn append_proposal_created_trace_event(
-    store_path: &Utf8Path,
+    trace_store: &dyn AgentTraceStore,
     proposal: &ProposalEnvelope,
 ) -> Result<()> {
     append_store_trace_event(
-        store_path,
+        trace_store,
         &proposal.run_id,
         TraceEvent::new(
             "proposal_created",
@@ -490,11 +489,11 @@ pub(crate) async fn append_proposal_created_trace_event(
 }
 
 pub(crate) async fn append_proposal_decision_trace_event(
-    store_path: &Utf8Path,
+    trace_store: &dyn AgentTraceStore,
     response: &ProposalDecisionResponse,
 ) -> Result<()> {
     append_store_trace_event(
-        store_path,
+        trace_store,
         &response.proposal.run_id,
         TraceEvent::new(
             "proposal_decided",
@@ -525,7 +524,7 @@ pub(crate) async fn append_proposal_decision_trace_event(
 }
 
 pub(crate) async fn append_proposal_action_trace_event(
-    store_path: &Utf8Path,
+    trace_store: &dyn AgentTraceStore,
     response: &ProposalActionResponse,
 ) -> Result<()> {
     let event_kind = match response.action.as_str() {
@@ -534,7 +533,7 @@ pub(crate) async fn append_proposal_action_trace_event(
         _ => "proposal_action_finished",
     };
     append_store_trace_event(
-        store_path,
+        trace_store,
         &response.proposal.run_id,
         TraceEvent::new(
             event_kind,
@@ -586,50 +585,13 @@ pub(crate) fn parse_approval_level(value: &str) -> Result<ApprovalLevel> {
 }
 
 async fn append_store_trace_event(
-    store: &Utf8Path,
+    trace_store: &dyn AgentTraceStore,
     run_id: &RunId,
     event: TraceEvent,
 ) -> Result<()> {
-    let Some(mut trace) = read_store_trace(store, run_id).await? else {
+    let Some(mut trace) = trace_store.read_trace(run_id).await.into_diagnostic()? else {
         return Ok(());
     };
-    let events = trace
-        .get_mut("events")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| miette!("trace for run '{}' has no events array", run_id.0))?;
-    events.push(serde_json::to_value(event).into_diagnostic()?);
-    write_json_file(store_trace_path(store, run_id), &trace).await
-}
-
-async fn read_store_trace(store: &Utf8Path, run_id: &RunId) -> Result<Option<Value>> {
-    let path = store_trace_path(store, run_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    read_json_file(path).await.map(Some)
-}
-
-fn store_trace_path(store: &Utf8Path, run_id: &RunId) -> Utf8PathBuf {
-    store
-        .join("traces")
-        .join(format!("{}.trace.json", run_id.0))
-}
-
-async fn read_json_file(path: Utf8PathBuf) -> Result<Value> {
-    let bytes = fs_err::tokio::read(&path)
-        .await
-        .map_err(|e| miette!("failed to read JSON at {path}: {e}"))?;
-    serde_json::from_slice(&bytes).map_err(|e| miette!("failed to parse JSON at {path}: {e}"))
-}
-
-async fn write_json_file(path: Utf8PathBuf, value: &impl Serialize) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs_err::tokio::create_dir_all(parent)
-            .await
-            .into_diagnostic()?;
-    }
-    let bytes = serde_json::to_vec_pretty(value).into_diagnostic()?;
-    fs_err::tokio::write(&path, bytes)
-        .await
-        .map_err(|e| miette!("failed to write JSON at {path}: {e}"))
+    trace.events.push(event);
+    trace_store.write_trace(trace).await.into_diagnostic()
 }

@@ -726,12 +726,12 @@ impl RuntimeServer {
         .with_kind_policy(kind_spec);
         proposal.diffs = params.diffs;
         proposal.warnings = params.warnings;
-        authorize_proposal_create_policy(&self.hooks, &self.store_path, &proposal).await?;
+        authorize_proposal_create_policy(&self.hooks, self.trace_store.as_ref(), &proposal).await?;
         self.proposal_store
             .create_proposal(proposal.clone())
             .await
             .into_diagnostic()?;
-        append_proposal_created_trace_event(&self.store_path, &proposal).await?;
+        append_proposal_created_trace_event(self.trace_store.as_ref(), &proposal).await?;
         Ok(proposal)
     }
 
@@ -876,7 +876,7 @@ impl RuntimeServer {
             },
         )
         .await?;
-        append_proposal_decision_trace_event(&self.store_path, &response).await?;
+        append_proposal_decision_trace_event(self.trace_store.as_ref(), &response).await?;
         Ok(response)
     }
 
@@ -908,8 +908,14 @@ impl RuntimeServer {
         );
         let mut proposal = self.get_proposal(proposal_id).await?;
         let tool = proposal_action_tool(&self.catalog, &proposal.kind)?;
-        authorize_proposal_apply_policy(&self.hooks, &self.store_path, &proposal, &tool, action)
-            .await?;
+        authorize_proposal_apply_policy(
+            &self.hooks,
+            self.trace_store.as_ref(),
+            &proposal,
+            &tool,
+            action,
+        )
+        .await?;
         let response = execute_proposal_action_with_store(
             self.proposal_store.as_ref(),
             self.services.as_ref(),
@@ -918,7 +924,7 @@ impl RuntimeServer {
             action,
         )
         .await?;
-        append_proposal_action_trace_event(&self.store_path, &response).await?;
+        append_proposal_action_trace_event(self.trace_store.as_ref(), &response).await?;
         Ok(response)
     }
 }
