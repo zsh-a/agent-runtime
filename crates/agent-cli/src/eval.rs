@@ -1,12 +1,10 @@
 use std::{process::Stdio, sync::Arc};
 
 use agent_core::{
-    AgentProposalStore, AgentRunRecord, AgentRunStore, AgentTraceStore, HookEvent, HookEventName,
-    HookInvocationStatus, HookKind, PROTOCOL_VERSION, PromptManifest, ProposalEnvelope,
-    ProposalStatus, RunId, RunRequest, TriggerKind,
+    AgentRunRecord, HookEvent, HookEventName, HookInvocationStatus, HookKind, PROTOCOL_VERSION,
+    PromptManifest, ProposalEnvelope, ProposalStatus, RunId, RunRequest, TriggerKind,
 };
 use agent_runtime::{AgentRunner, RunOutcome};
-use agent_store::{FileLockStore, FileProposalStore, FileRunStore, FileTraceStore};
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
@@ -15,6 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 
 use crate::catalog::{build_prompt_manifest, read_catalog, registry_from_catalog};
+use crate::config::RuntimeStoreBackend;
+use crate::runtime_stores::RuntimeStores;
 use crate::tools::{CliServices, ToolOverrides};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -136,6 +136,7 @@ struct EvalCreateReport {
 pub(crate) async fn run_eval_path(
     eval_path: Utf8PathBuf,
     store_path: Utf8PathBuf,
+    store_backend: RuntimeStoreBackend,
     tool_overrides: ToolOverrides,
     update_golden: bool,
 ) -> Result<Value> {
@@ -146,6 +147,7 @@ pub(crate) async fn run_eval_path(
                 run_eval(
                     path,
                     store_path.clone(),
+                    store_backend,
                     tool_overrides.clone(),
                     update_golden,
                 )
@@ -162,7 +164,14 @@ pub(crate) async fn run_eval_path(
         };
         serde_json::to_value(report).into_diagnostic()
     } else {
-        let report = run_eval(eval_path, store_path, tool_overrides, update_golden).await?;
+        let report = run_eval(
+            eval_path,
+            store_path,
+            store_backend,
+            tool_overrides,
+            update_golden,
+        )
+        .await?;
         serde_json::to_value(report).into_diagnostic()
     }
 }
@@ -170,31 +179,33 @@ pub(crate) async fn run_eval_path(
 pub(crate) async fn create_eval_from_run(
     run_id: String,
     store_path: Utf8PathBuf,
+    store_backend: RuntimeStoreBackend,
     out: Utf8PathBuf,
     catalog: Utf8PathBuf,
     id: Option<String>,
     golden_trace: Option<Utf8PathBuf>,
 ) -> Result<Value> {
-    let store = FileRunStore::new(store_path.clone())
-        .await
-        .into_diagnostic()?;
+    let stores = RuntimeStores::open(store_backend, store_path).await?;
     let run_id = RunId(run_id);
-    let record = store
+    let record = stores
+        .run_store
         .get_run(&run_id)
         .await
         .into_diagnostic()?
         .ok_or_else(|| miette!("run '{}' was not found", run_id.0))?;
-    let trace = read_store_trace(&store_path, &run_id)
-        .await?
+    let trace = stores
+        .trace_store
+        .read_trace(&run_id)
+        .await
+        .into_diagnostic()?
         .ok_or_else(|| miette!("trace for run '{}' was not found", run_id.0))?;
+    let trace_value = serde_json::to_value(&trace).into_diagnostic()?;
     let catalog_path = absolutize_runtime_path(catalog)?;
     let catalog = read_catalog(catalog_path.clone()).await?;
     let prompt_manifest =
         eval_prompt_manifest_expectation(&build_prompt_manifest(&catalog, Some(&record.agent_id))?);
-    let proposal_store = FileProposalStore::new(store_path.clone())
-        .await
-        .into_diagnostic()?;
-    let proposals = proposal_store
+    let proposals = stores
+        .proposal_store
         .list_proposals(Some(&run_id))
         .await
         .into_diagnostic()?;
@@ -204,8 +215,7 @@ pub(crate) async fn create_eval_from_run(
     let golden_trace =
         golden_trace.unwrap_or_else(|| Utf8PathBuf::from(format!("golden/{eval_id}.trace.json")));
     let golden_trace_abs = absolutize_eval_path(eval_dir, &golden_trace);
-    let mut normalized_trace = trace.clone();
-    normalize_volatile_json(&mut normalized_trace);
+    let normalized_trace = normalized_trace_json(&trace)?;
     write_json_file(golden_trace_abs.clone(), &normalized_trace).await?;
 
     let case = EvalCase {
@@ -217,8 +227,8 @@ pub(crate) async fn create_eval_from_run(
         expect: EvalExpect {
             status: record.status.clone(),
             agent_id: Some(record.agent_id.clone()),
-            trace_events: trace_event_kinds(&trace),
-            tool_calls: tool_call_sequence_from_trace_value(&trace),
+            trace_events: trace_event_kinds(&trace_value),
+            tool_calls: tool_call_sequence_from_trace_value(&trace_value),
             proposals: eval_proposal_expectation(&proposals),
             prompt_manifest: Some(prompt_manifest),
             output_mode: record
@@ -244,6 +254,7 @@ pub(crate) async fn create_eval_from_run(
 async fn run_eval(
     eval_file: Utf8PathBuf,
     store_path: Utf8PathBuf,
+    store_backend: RuntimeStoreBackend,
     mut tool_overrides: ToolOverrides,
     update_golden: bool,
 ) -> Result<EvalReport> {
@@ -261,26 +272,14 @@ async fn run_eval(
     };
     tool_overrides.extend_tool_specs(catalog.tools.clone());
     let registry = registry_from_catalog(&catalog);
-    let trace_store_path = store_path.clone();
-    let store = Arc::new(FileRunStore::new(store_path).await.into_diagnostic()?);
-    let lock_store = Arc::new(
-        FileLockStore::new(trace_store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let proposal_store = Arc::new(
-        FileProposalStore::new(trace_store_path.clone())
-            .await
-            .into_diagnostic()?,
-    );
-    let trace_store = FileTraceStore::new(trace_store_path.clone())
-        .await
-        .into_diagnostic()?;
-    let services = Arc::new(CliServices::with_proposal_store(
+    let stores = RuntimeStores::open(store_backend, store_path).await?;
+    let services = Arc::new(CliServices::with_stores(
         tool_overrides,
-        proposal_store.clone(),
+        stores.state_store.clone(),
+        stores.proposal_store.clone(),
     ));
-    let runner = AgentRunner::new(registry, store, services).with_lock_store(lock_store);
+    let runner = AgentRunner::new(registry, stores.run_store.clone(), services)
+        .with_lock_store(stores.lock_store.clone());
     let outcome = runner
         .run_once(
             &case.agent_id,
@@ -298,7 +297,8 @@ async fn run_eval(
         )
         .await
         .into_diagnostic()?;
-    trace_store
+    stores
+        .trace_store
         .write_trace(outcome.trace.clone())
         .await
         .into_diagnostic()?;
@@ -376,7 +376,8 @@ async fn run_eval(
     }
 
     if let Some(expected_proposals) = &case.expect.proposals {
-        let proposals = proposal_store
+        let proposals = stores
+            .proposal_store
             .list_proposals(Some(&outcome.result.run_id))
             .await
             .into_diagnostic()?;
@@ -818,20 +819,6 @@ fn absolutize_runtime_path(path: Utf8PathBuf) -> Result<Utf8PathBuf> {
     let cwd = std::env::current_dir().into_diagnostic()?;
     Utf8PathBuf::from_path_buf(cwd.join(path.as_std_path()))
         .map_err(|path| miette!("non-UTF-8 path: {}", path.display()))
-}
-
-async fn read_store_trace(store: &Utf8Path, run_id: &RunId) -> Result<Option<Value>> {
-    let path = store_trace_path(store, run_id);
-    if !path.exists() {
-        return Ok(None);
-    }
-    read_json_file(path).await.map(Some)
-}
-
-fn store_trace_path(store: &Utf8Path, run_id: &RunId) -> Utf8PathBuf {
-    store
-        .join("traces")
-        .join(format!("{}.trace.json", run_id.0))
 }
 
 async fn read_json_file(path: Utf8PathBuf) -> Result<Value> {

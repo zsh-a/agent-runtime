@@ -1114,13 +1114,13 @@ async fn main() -> Result<()> {
             id,
             golden_trace,
         } => {
-            context.require_file_store_backend("eval")?;
             let store = context.eval_store(store);
             let catalog = context.catalog(catalog);
             let result = if eval_path.as_str() == "create" || from_run.is_some() {
                 create_eval_from_run(
                     from_run.ok_or_else(|| miette!("--from-run is required"))?,
                     store,
+                    context.store_backend(),
                     out.ok_or_else(|| miette!("--out is required"))?,
                     catalog.ok_or_else(|| miette!("--catalog is required"))?,
                     id,
@@ -1131,6 +1131,7 @@ async fn main() -> Result<()> {
                 run_eval_path(
                     eval_path,
                     store,
+                    context.store_backend(),
                     context.tools(tools).load().await?,
                     update_golden,
                 )

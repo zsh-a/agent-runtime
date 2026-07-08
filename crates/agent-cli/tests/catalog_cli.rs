@@ -524,15 +524,6 @@ store_backend = "sqlite"
             ],
             "compat does not support runtime.store_backend = \"sqlite\" yet",
         ),
-        (
-            "eval",
-            vec![
-                config.clone(),
-                "eval".to_owned(),
-                "missing-eval.yaml".to_owned(),
-            ],
-            "eval does not support runtime.store_backend = \"sqlite\" yet",
-        ),
     ];
 
     for (label, mut args, expected) in rejected_commands {
@@ -637,6 +628,33 @@ store_backend = "sqlite"
             .join(format!("{replay_run_id}.trace.json"))
             .exists(),
         "sqlite replay trace should not be written through the file trace store"
+    );
+
+    let eval_output = agent_cmd()
+        .args([
+            "--config",
+            &config,
+            "eval",
+            "../../evals/catalog_dry_run.yaml",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let eval: Value = serde_json::from_slice(&eval_output).expect("sqlite eval is JSON");
+    let eval_run_id = eval["run_id"].as_str().expect("eval run id is string");
+    assert_eq!(eval["passed"], true);
+    assert_eq!(eval["agent_id"], "ai_chat");
+    let eval_trace = read_sqlite_trace(&store, eval_run_id);
+    assert_eq!(eval_trace.run_id.0, eval_run_id);
+    assert_eq!(eval_trace.agent_id, "ai_chat");
+    assert!(
+        !store
+            .join("traces")
+            .join(format!("{eval_run_id}.trace.json"))
+            .exists(),
+        "sqlite eval trace should not be written through the file trace store"
     );
 }
 
