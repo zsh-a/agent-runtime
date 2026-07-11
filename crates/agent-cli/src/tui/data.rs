@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::Instant};
 
 use agent_chat::{ChatToolCall, ChatTurnState};
 use agent_core::{AgentRunRecord, AgentSpec, ContextPolicy, HookSpec};
@@ -279,6 +279,19 @@ pub(super) enum TuiDetailKind {
     Events,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiCompletionItem {
+    pub(super) label: String,
+    pub(super) replacement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TuiCompletionMenu {
+    pub(super) title: String,
+    pub(super) items: Vec<TuiCompletionItem>,
+    pub(super) selected: usize,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct TuiPaneSizing {
     pub(super) side_width: Option<u16>,
@@ -439,6 +452,7 @@ pub(super) struct TuiState {
     pub(super) input_mode: bool,
     pub(super) command_input: String,
     pub(super) input_cursor: usize,
+    pub(super) completion: Option<TuiCompletionMenu>,
     pub(super) transcript: Vec<TranscriptItem>,
     pub(super) active_assistant_index: Option<usize>,
     pub(super) events: VecDeque<String>,
@@ -464,6 +478,8 @@ pub(super) struct TuiState {
     pub(super) history_cursor: Option<usize>,
     pub(super) history_draft: Option<String>,
     pub(super) busy: bool,
+    pub(super) operation_label: Option<String>,
+    pub(super) operation_started_at: Option<Instant>,
 }
 
 impl TuiState {
@@ -493,6 +509,7 @@ impl TuiState {
             input_mode: true,
             command_input: String::new(),
             input_cursor: 0,
+            completion: None,
             transcript: Vec::new(),
             active_assistant_index: None,
             events: VecDeque::new(),
@@ -518,6 +535,8 @@ impl TuiState {
             history_cursor: None,
             history_draft: None,
             busy: false,
+            operation_label: None,
+            operation_started_at: None,
         };
         state.push_event("ready");
         Ok(state)
@@ -598,6 +617,7 @@ impl TuiState {
 
     pub(super) fn enter_command(&mut self, prefix: &str) {
         self.input_mode = true;
+        self.completion = None;
         self.command_input.clear();
         self.command_input.push_str(prefix);
         self.input_cursor = self.command_input.len();
@@ -632,6 +652,7 @@ impl TuiState {
         self.latest_events = None;
         self.pending_approval = None;
         self.approval_selection = None;
+        self.completion = None;
         self.chat_scroll = 0;
         self.context_scroll = 0;
         self.event_scroll = 0;
@@ -709,7 +730,38 @@ impl TuiState {
     }
 
     pub(super) fn set_busy(&mut self, busy: bool) {
+        if busy {
+            if !self.busy {
+                self.operation_started_at = Some(Instant::now());
+            }
+            self.operation_label
+                .get_or_insert_with(|| "running".to_owned());
+        } else {
+            self.operation_label = None;
+            self.operation_started_at = None;
+        }
         self.busy = busy;
+    }
+
+    pub(super) fn start_operation(&mut self, label: impl Into<String>) {
+        self.operation_label = Some(label.into());
+        self.operation_started_at = Some(Instant::now());
+        self.busy = true;
+    }
+
+    pub(super) fn set_operation_label(&mut self, label: impl Into<String>) {
+        if self.busy {
+            self.operation_label = Some(label.into());
+        }
+    }
+
+    pub(super) fn operation_status(&self) -> String {
+        let label = self.operation_label.as_deref().unwrap_or("running");
+        let elapsed = self
+            .operation_started_at
+            .map(|started| started.elapsed().as_secs())
+            .unwrap_or(0);
+        format!("{label} {elapsed}s")
     }
 
     pub(super) fn set_pending_approval(&mut self, approval: TuiPendingApproval) {
@@ -799,6 +851,7 @@ impl TuiState {
     }
 
     pub(super) fn replace_command_input(&mut self, input: impl Into<String>) {
+        self.completion = None;
         self.command_input = input.into();
         self.input_cursor = self.command_input.len();
         self.history_cursor = None;
@@ -806,6 +859,7 @@ impl TuiState {
     }
 
     pub(super) fn clear_command_input(&mut self) {
+        self.completion = None;
         self.command_input.clear();
         self.input_cursor = 0;
         self.history_cursor = None;
@@ -910,6 +964,60 @@ impl TuiState {
         } else {
             self.previous_char_boundary(cursor)
         };
+    }
+
+    pub(super) fn show_completions(
+        &mut self,
+        title: impl Into<String>,
+        items: Vec<TuiCompletionItem>,
+    ) {
+        self.completion = (!items.is_empty()).then(|| TuiCompletionMenu {
+            title: title.into(),
+            items,
+            selected: 0,
+        });
+    }
+
+    pub(super) fn clear_completions(&mut self) {
+        self.completion = None;
+    }
+
+    pub(super) fn select_next_completion(&mut self) -> bool {
+        let Some(menu) = self.completion.as_mut() else {
+            return false;
+        };
+        menu.selected = (menu.selected + 1) % menu.items.len();
+        true
+    }
+
+    pub(super) fn select_previous_completion(&mut self) -> bool {
+        let Some(menu) = self.completion.as_mut() else {
+            return false;
+        };
+        menu.selected = menu.selected.checked_sub(1).unwrap_or(menu.items.len() - 1);
+        true
+    }
+
+    pub(super) fn select_completion(&mut self, index: usize) -> bool {
+        let Some(menu) = self.completion.as_mut() else {
+            return false;
+        };
+        if index >= menu.items.len() {
+            return false;
+        }
+        menu.selected = index;
+        true
+    }
+
+    pub(super) fn accept_completion(&mut self) -> bool {
+        let Some(menu) = self.completion.take() else {
+            return false;
+        };
+        let Some(item) = menu.items.get(menu.selected) else {
+            return false;
+        };
+        self.replace_command_input(item.replacement.clone());
+        true
     }
 
     pub(super) fn move_cursor_to_line_start(&mut self) {
@@ -1084,6 +1192,7 @@ impl TuiState {
     }
 
     fn break_history_navigation(&mut self) {
+        self.completion = None;
         self.history_cursor = None;
         self.history_draft = None;
     }
@@ -1307,6 +1416,7 @@ mod tests {
             input_mode: true,
             command_input: String::new(),
             input_cursor: 0,
+            completion: None,
             transcript: Vec::new(),
             active_assistant_index: None,
             events: VecDeque::new(),
@@ -1332,6 +1442,8 @@ mod tests {
             history_cursor: None,
             history_draft: None,
             busy: false,
+            operation_label: None,
+            operation_started_at: None,
         }
     }
 
@@ -1432,6 +1544,39 @@ mod tests {
 
         state.focus_previous_panel();
         assert_eq!(state.focused_panel, TuiFocusPanel::Activity);
+    }
+
+    #[test]
+    fn editing_input_closes_completion_menu() {
+        let mut state = test_state();
+        state.show_completions(
+            "Commands",
+            vec![TuiCompletionItem {
+                label: "/status".to_owned(),
+                replacement: "/status".to_owned(),
+            }],
+        );
+
+        state.insert_char('/');
+
+        assert!(state.completion.is_none());
+    }
+
+    #[test]
+    fn operation_status_tracks_stage_and_completion() {
+        let mut state = test_state();
+
+        state.start_operation("thinking");
+        assert!(state.busy);
+        assert!(state.operation_status().starts_with("thinking "));
+
+        state.set_operation_label("cancelling");
+        assert!(state.operation_status().starts_with("cancelling "));
+
+        state.set_busy(false);
+        assert!(!state.busy);
+        assert!(state.operation_label.is_none());
+        assert!(state.operation_started_at.is_none());
     }
 
     #[test]

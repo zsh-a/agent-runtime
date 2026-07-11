@@ -32,7 +32,7 @@ pub(super) fn start_natural_language_task(
     let cancellation = CancellationToken::new();
     state.push_user_message(text);
     state.start_assistant_stream();
-    state.set_busy(true);
+    state.start_operation("thinking");
     let join = tokio::spawn({
         let cancellation = cancellation.clone();
         async move {
@@ -71,6 +71,16 @@ pub(super) enum ChatApprovalDecision {
     Deny,
 }
 
+pub(super) struct ChatApprovalResume {
+    pub(super) options: TuiOptions,
+    pub(super) decision: ChatApprovalDecision,
+    pub(super) agent_id: String,
+    pub(super) chat_state: ChatTurnState,
+    pub(super) tool_calls: Vec<ChatToolCall>,
+    pub(super) surface_messages: Vec<LlmMessage>,
+    pub(super) cancellation: CancellationToken,
+}
+
 pub(super) async fn resume_chat_approval(
     state: &mut TuiState,
     decision: ChatApprovalDecision,
@@ -83,6 +93,28 @@ pub(super) async fn resume_chat_approval(
     let options = state.options.clone();
     let mut emit = |update| state.apply_update(update);
     resume_chat_approval_with_emit(
+        ChatApprovalResume {
+            options,
+            decision,
+            agent_id,
+            chat_state,
+            tool_calls,
+            surface_messages,
+            cancellation,
+        },
+        &mut emit,
+    )
+    .await
+}
+
+pub(super) async fn resume_chat_approval_with_emit<Emit>(
+    request: ChatApprovalResume,
+    emit: &mut Emit,
+) -> Result<()>
+where
+    Emit: FnMut(TuiUpdate),
+{
+    let ChatApprovalResume {
         options,
         decision,
         agent_id,
@@ -90,24 +122,7 @@ pub(super) async fn resume_chat_approval(
         tool_calls,
         surface_messages,
         cancellation,
-        &mut emit,
-    )
-    .await
-}
-
-pub(super) async fn resume_chat_approval_with_emit<Emit>(
-    options: TuiOptions,
-    decision: ChatApprovalDecision,
-    agent_id: String,
-    chat_state: ChatTurnState,
-    tool_calls: Vec<ChatToolCall>,
-    surface_messages: Vec<LlmMessage>,
-    cancellation: CancellationToken,
-    emit: &mut Emit,
-) -> Result<()>
-where
-    Emit: FnMut(TuiUpdate),
-{
+    } = request;
     let runtime = TuiRuntime::load_with_cancellation(&options, cancellation.clone()).await?;
     let provider = provider_from_options(&options.chat)?;
     let services = runtime.tool_services(Some(agent_id.clone()));

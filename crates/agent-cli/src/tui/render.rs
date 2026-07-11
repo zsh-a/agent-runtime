@@ -84,6 +84,9 @@ pub(super) fn render_tui_frame(frame: &mut Frame<'_>, state: &TuiState) {
 
     let input = command_panel(state, layout.input);
     frame.render_widget(input.paragraph, layout.input);
+    if state.pending_approval.is_none() {
+        render_completion_menu(frame, state, area, layout.input);
+    }
     if state.input_mode
         && state.pending_approval.is_none()
         && layout.input.width > 2
@@ -101,11 +104,11 @@ pub(super) fn render_tui_frame(frame: &mut Frame<'_>, state: &TuiState) {
 
 fn status_line(state: &TuiState) -> Paragraph<'static> {
     let status = if state.pending_approval.is_some() {
-        "approval required"
+        "approval required".to_owned()
     } else if state.busy {
-        "running"
+        state.operation_status()
     } else {
-        "ready"
+        "ready".to_owned()
     };
     Paragraph::new(Line::from(vec![
         Span::styled("Agent Runtime", theme::strong(theme::ACCENT)),
@@ -690,6 +693,106 @@ fn command_panel(state: &TuiState, area: Rect) -> InputPanel {
         cursor_x: built.cursor_x.min(inner_width.saturating_sub(1)),
         cursor_y: cursor_y.min(area.height.saturating_sub(3)),
     }
+}
+
+fn render_completion_menu(frame: &mut Frame<'_>, state: &TuiState, area: Rect, input: Rect) {
+    let Some(menu) = &state.completion else {
+        return;
+    };
+    let Some(menu_area) = completion_menu_area(state, area, input) else {
+        return;
+    };
+    let visible_count = menu_area.height.saturating_sub(2) as usize;
+    let start = menu
+        .selected
+        .saturating_sub(visible_count.saturating_sub(1));
+    let items = menu
+        .items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible_count)
+        .map(|(index, item)| {
+            let style = if index == menu.selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::TEXT)
+            };
+            ListItem::new(item.label.clone()).style(style)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Clear, menu_area);
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(format!(" {} ", menu.title))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(theme::panel(true)),
+        ),
+        menu_area,
+    );
+}
+
+pub(super) fn completion_menu_area(state: &TuiState, area: Rect, input: Rect) -> Option<Rect> {
+    let menu = state.completion.as_ref()?;
+    let available_height = input.y.saturating_sub(area.y);
+    if available_height < 3 {
+        return None;
+    }
+    let height = (menu.items.len() as u16 + 2).min(9).min(available_height);
+    let content_width = menu
+        .items
+        .iter()
+        .map(|item| item.label.width() as u16)
+        .max()
+        .unwrap_or(12)
+        .saturating_add(4);
+    let margin = if input.width >= 6 { 2 } else { 0 };
+    let width = content_width
+        .clamp(24, 52)
+        .min(input.width.saturating_sub(margin * 2).max(1));
+    Some(Rect::new(
+        input.x.saturating_add(margin),
+        input.y.saturating_sub(height),
+        width,
+        height,
+    ))
+}
+
+pub(super) fn completion_index_at_position(
+    state: &TuiState,
+    area: Rect,
+    input: Rect,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let menu = state.completion.as_ref()?;
+    let menu_area = completion_menu_area(state, area, input)?;
+    if column <= menu_area.x
+        || column
+            >= menu_area
+                .x
+                .saturating_add(menu_area.width)
+                .saturating_sub(1)
+        || row <= menu_area.y
+        || row
+            >= menu_area
+                .y
+                .saturating_add(menu_area.height)
+                .saturating_sub(1)
+    {
+        return None;
+    }
+    let visible_count = menu_area.height.saturating_sub(2) as usize;
+    let start = menu
+        .selected
+        .saturating_sub(visible_count.saturating_sub(1));
+    let index = start + usize::from(row.saturating_sub(menu_area.y + 1));
+    (index < menu.items.len()).then_some(index)
 }
 
 struct BuiltInput {
@@ -1333,6 +1436,7 @@ mod tests {
             input_mode: true,
             command_input: String::new(),
             input_cursor: 0,
+            completion: None,
             transcript: Vec::new(),
             active_assistant_index: None,
             events: VecDeque::new(),
@@ -1358,6 +1462,8 @@ mod tests {
             history_cursor: None,
             history_draft: None,
             busy: false,
+            operation_label: None,
+            operation_started_at: None,
         }
     }
 
@@ -1509,6 +1615,41 @@ mod tests {
         let details = render_tui_at_size(&state, 72, 24).expect("compact details render");
         assert!(details.contains("[Details]"));
         assert!(!details.contains("No messages yet"));
+    }
+
+    #[test]
+    fn completion_menu_renders_above_input() {
+        let mut state = test_state();
+        state.replace_command_input("/help pro");
+        state.show_completions(
+            "Help topics",
+            vec![
+                crate::tui::data::TuiCompletionItem {
+                    label: "proposals".to_owned(),
+                    replacement: "/help proposals".to_owned(),
+                },
+                crate::tui::data::TuiCompletionItem {
+                    label: "proposal".to_owned(),
+                    replacement: "/help proposal".to_owned(),
+                },
+            ],
+        );
+
+        let rendered = render_tui_once(&state).expect("tui renders");
+
+        assert!(rendered.contains("Help topics"));
+        assert!(rendered.contains("proposals"));
+        assert!(rendered.contains("proposal"));
+    }
+
+    #[test]
+    fn status_line_shows_operation_stage_and_elapsed_time() {
+        let mut state = test_state();
+        state.start_operation("thinking");
+
+        let rendered = render_tui_once(&state).expect("tui renders");
+
+        assert!(rendered.contains("thinking "));
     }
 
     #[test]

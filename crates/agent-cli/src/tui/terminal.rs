@@ -16,13 +16,14 @@ use super::{
     chat::{TuiTaskHandle, start_natural_language_task},
     commands::execute_command,
     data::{
-        TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiFocusPanel, TuiSelectionPoint,
-        TuiState, TuiUpdate,
+        TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiCompletionItem, TuiFocusPanel,
+        TuiSelectionPoint, TuiState, TuiUpdate,
     },
     layout::{TuiLayout, TuiResizeHandle, contains},
     render::{
-        TuiContextClickAction, approval_selection_at_position, context_action_for_click,
-        input_cursor_for_click, input_panel_height, render_tui_frame, selected_text_for_layout,
+        TuiContextClickAction, approval_selection_at_position, completion_index_at_position,
+        context_action_for_click, input_cursor_for_click, input_panel_height, render_tui_frame,
+        selected_text_for_layout,
     },
 };
 
@@ -174,7 +175,9 @@ async fn handle_input_key(
     }
     match code {
         KeyCode::Esc => {
-            if state.busy {
+            if state.completion.is_some() {
+                state.clear_completions();
+            } else if state.busy {
                 cancel_active_task(state, active_task);
             } else if state.command_input.is_empty() {
                 state.leave_input_mode();
@@ -191,6 +194,9 @@ async fn handle_input_key(
         }
         KeyCode::Enter if newline_modifier(modifiers) => state.insert_newline(),
         KeyCode::Enter => {
+            if state.accept_completion() {
+                return Ok(false);
+            }
             if state.busy {
                 state.push_activity(TuiActivityItem::new(
                     TuiActivityKind::System,
@@ -283,11 +289,18 @@ async fn handle_input_key(
         KeyCode::End => {
             state.move_cursor_to_line_end();
         }
+        KeyCode::Up if state.completion.is_some() => {
+            state.select_previous_completion();
+        }
+        KeyCode::Down if state.completion.is_some() => {
+            state.select_next_completion();
+        }
         KeyCode::Up => state.history_previous(),
         KeyCode::Down => state.history_next(),
         KeyCode::PageUp => state.scroll_focused_panel_up(),
         KeyCode::PageDown => state.scroll_focused_panel_down(),
         KeyCode::Tab => complete_slash_command(state),
+        KeyCode::BackTab if state.select_previous_completion() => {}
         KeyCode::BackTab => {
             state.scroll_chat_up();
         }
@@ -306,7 +319,7 @@ async fn handle_input_key(
 }
 
 async fn run_command(state: &mut TuiState, command: &str) {
-    state.set_busy(true);
+    state.start_operation("running command");
     if let Err(error) = execute_command(state, command).await {
         push_command_error(state, error.to_string());
     }
@@ -397,6 +410,17 @@ fn handle_mouse_event_with_drag(
                     }
                 }
                 return;
+            }
+            if state.completion.is_some() {
+                let area = Rect::new(0, 0, terminal_width, terminal_height);
+                if let Some(index) =
+                    completion_index_at_position(state, area, layout.input, mouse.column, mouse.row)
+                {
+                    state.select_completion(index);
+                    state.accept_completion();
+                    return;
+                }
+                state.clear_completions();
             }
             if let Some(panel) = sidebar_tab_at_position(&layout, mouse.column, mouse.row) {
                 state.focus_panel(panel);
@@ -669,6 +693,7 @@ fn cancel_active_task(state: &mut TuiState, active_task: &mut Option<TuiTaskHand
         task.cancellation.cancel();
     }
     state.replace_active_assistant("Cancelling...");
+    state.set_operation_label("cancelling");
     state.push_activity(TuiActivityItem::new(
         TuiActivityKind::Cancellation,
         "cancellation requested",
@@ -686,6 +711,9 @@ fn text_modifier(modifiers: KeyModifiers) -> bool {
 }
 
 fn complete_slash_command(state: &mut TuiState) {
+    if state.select_next_completion() {
+        return;
+    }
     if state.input_cursor != state.command_input.len() {
         return;
     }
@@ -794,14 +822,16 @@ fn complete_slash_command_name(state: &mut TuiState, typed: &str) {
     match matches.as_slice() {
         [command] => state.replace_command_input(format!("/{command}")),
         [] => state.push_event("no slash command matches"),
-        commands => state.push_event(format!(
-            "commands: {}",
+        commands => state.show_completions(
+            "Commands",
             commands
                 .iter()
-                .map(|command| format!("/{command}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )),
+                .map(|command| TuiCompletionItem {
+                    label: format!("/{}", command.trim_end()),
+                    replacement: format!("/{command}"),
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -821,15 +851,25 @@ fn complete_slash_argument(
     match matches.as_slice() {
         [candidate] => state.replace_command_input(format!("/{verb} {candidate}{suffix}")),
         [] => state.push_event(format!("no {singular} matches")),
-        candidates => state.push_event(format!(
-            "{plural}: {}",
+        candidates => state.show_completions(
+            title_case(plural),
             candidates
                 .iter()
-                .map(|candidate| format!("/{verb} {candidate}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )),
+                .map(|candidate| TuiCompletionItem {
+                    label: candidate.clone(),
+                    replacement: format!("/{verb} {candidate}{suffix}"),
+                })
+                .collect(),
+        ),
     }
+}
+
+fn title_case(value: &str) -> String {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
 }
 
 fn help_topics() -> Vec<String> {
@@ -991,7 +1031,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tab_lists_help_topic_candidates_when_ambiguous() {
+    async fn tab_opens_help_topic_candidates_when_ambiguous() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(&dir, "mock response").await;
         state.replace_command_input("/help pro");
@@ -999,15 +1039,14 @@ mod tests {
         complete_slash_command(&mut state);
 
         assert_eq!(state.command_input, "/help pro");
-        assert!(state.events.iter().any(|event| {
-            event.contains("help topics:")
-                && event.contains("/help proposals")
-                && event.contains("/help proposal")
-        }));
+        let menu = state.completion.as_ref().expect("completion menu opens");
+        assert_eq!(menu.title, "Help topics");
+        assert!(menu.items.iter().any(|item| item.label == "proposals"));
+        assert!(menu.items.iter().any(|item| item.label == "proposal"));
     }
 
     #[tokio::test]
-    async fn tab_lists_run_id_candidates_when_ambiguous() {
+    async fn tab_opens_run_id_candidates_when_ambiguous() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(&dir, "mock response").await;
         state.recent_runs = vec![
@@ -1019,11 +1058,34 @@ mod tests {
         complete_slash_command(&mut state);
 
         assert_eq!(state.command_input, "/cancel run_");
-        assert!(state.events.iter().any(|event| {
-            event.contains("run ids:")
-                && event.contains("/cancel run_alpha")
-                && event.contains("/cancel run_beta")
-        }));
+        let menu = state.completion.as_ref().expect("completion menu opens");
+        assert_eq!(menu.title, "Run ids");
+        assert_eq!(menu.items[0].replacement, "/cancel run_alpha");
+        assert_eq!(menu.items[1].replacement, "/cancel run_beta");
+    }
+
+    #[tokio::test]
+    async fn completion_menu_cycles_and_accepts_selection() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+        state.replace_command_input("/help pro");
+        complete_slash_command(&mut state);
+        complete_slash_command(&mut state);
+        let (sender, _receiver) = unbounded_channel();
+        let mut active_task = None;
+
+        handle_input_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &sender,
+            &mut active_task,
+        )
+        .await
+        .expect("enter handled");
+
+        assert_eq!(state.command_input, "/help proposal");
+        assert!(state.completion.is_none());
+        assert!(!state.busy);
     }
 
     #[tokio::test]
@@ -1578,6 +1640,36 @@ mod tests {
                 .iter()
                 .any(|item| item.content.contains("Denied high-risk tool 'echo'."))
         );
+    }
+
+    #[tokio::test]
+    async fn mouse_clicking_completion_accepts_candidate() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(&dir, "mock response").await;
+        state.replace_command_input("/help pro");
+        complete_slash_command(&mut state);
+        let area = Rect::new(0, 0, 100, 30);
+        let layout = mouse_layout(&state, area.width, area.height);
+        let menu = crate::tui::render::completion_menu_area(&state, area, layout.input)
+            .expect("completion menu area");
+        let (sender, _receiver) = unbounded_channel();
+        let mut active_task = None;
+
+        handle_mouse_event(
+            &mut state,
+            mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                menu.x + 2,
+                menu.y + 1,
+            ),
+            area.width,
+            area.height,
+            &sender,
+            &mut active_task,
+        );
+
+        assert_eq!(state.command_input, "/help proposals");
+        assert!(state.completion.is_none());
     }
 
     #[tokio::test]

@@ -7,7 +7,8 @@ use crate::cancellation::agent_cancellation;
 
 use super::{
     chat::{
-        ChatApprovalDecision, TuiTaskHandle, resume_chat_approval, resume_chat_approval_with_emit,
+        ChatApprovalDecision, ChatApprovalResume, TuiTaskHandle, resume_chat_approval,
+        resume_chat_approval_with_emit,
     },
     data::{
         TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiOptions, TuiPendingApproval,
@@ -72,7 +73,7 @@ pub(super) fn start_pending_approval_task(
         },
         summary.clone(),
     ));
-    state.set_busy(true);
+    state.start_operation("applying decision");
 
     let options = state.options.clone();
     let cancellation = CancellationToken::new();
@@ -275,13 +276,15 @@ async fn run_pending_approval_task(
                 let _ = sender_for_emit.send(update);
             };
             resume_chat_approval_with_emit(
-                options,
-                ChatApprovalDecision::Approve,
-                agent_id,
-                *chat_state,
-                tool_calls,
-                surface_messages,
-                cancellation,
+                ChatApprovalResume {
+                    options,
+                    decision: ChatApprovalDecision::Approve,
+                    agent_id,
+                    chat_state: *chat_state,
+                    tool_calls,
+                    surface_messages,
+                    cancellation,
+                },
                 &mut emit,
             )
             .await?;
@@ -305,13 +308,15 @@ async fn run_pending_approval_task(
                 let _ = sender_for_emit.send(update);
             };
             resume_chat_approval_with_emit(
-                options,
-                ChatApprovalDecision::Deny,
-                agent_id,
-                *chat_state,
-                tool_calls,
-                surface_messages,
-                cancellation,
+                ChatApprovalResume {
+                    options,
+                    decision: ChatApprovalDecision::Deny,
+                    agent_id,
+                    chat_state: *chat_state,
+                    tool_calls,
+                    surface_messages,
+                    cancellation,
+                },
                 &mut emit,
             )
             .await?;
