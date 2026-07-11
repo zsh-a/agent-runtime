@@ -1,0 +1,39 @@
+{
+  "protocol_version": "agent.v1",
+  "run_id": "run_embedded_fixture",
+  "agent_id": "fixture_agent",
+  "agent_version": "0.1.0",
+  "step_index": 0,
+  "status": "effect_requested",
+  "effect": {
+    "kind": "tool",
+    "effect_id": "effect_fixture_1",
+    "name": "read_fixture",
+    "input": { "id": "first" }
+  },
+  "run_state": {
+    "status": "effect_requested",
+    "step_index": 0,
+    "remaining_effect_count": 0,
+    "effect_result_count": 0,
+    "terminal_reason": null
+  },
+  "trace_event": {
+    "kind": "agent_runtime_step",
+    "run_id": "run_embedded_fixture",
+    "agent_id": "fixture_agent",
+    "status": "effect_requested",
+    "step_index": 0,
+    "effect_id": "effect_fixture_1",
+    "effect_kind": "tool",
+    "tool_name": "read_fixture",
+    "subagent_id": null,
+    "run_state": {
+      "status": "effect_requested",
+      "step_index": 0,
+      "remaining_effect_count": 0,
+      "effect_result_count": 0,
+      "terminal_reason": null
+    }
+  }
+}

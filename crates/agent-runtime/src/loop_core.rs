@@ -1,11 +1,211 @@
 use agent_core::{
-    AgentError, AgentRuntimeCatalog, EffectId, RunId, RunRequest, ToolSpec, protocol_version,
+    AgentError, AgentRuntimeCatalog, EMBEDDED_SNAPSHOT_VERSION, EffectId, EmbeddedEffectResponse,
+    EmbeddedHostEffect, EmbeddedRunLimits, EmbeddedRunProgress, EmbeddedRunSnapshot,
+    EmbeddedRunStep, RunId, RunRequest, ToolSpec, protocol_version,
 };
 use serde_json::{Map, Value, json};
 
 pub struct EffectStepLoop;
 
 impl EffectStepLoop {
+    /// Start a versioned embedded snapshot with runtime-owned effect and
+    /// subagent limits.
+    pub fn start_snapshot(
+        catalog: &AgentRuntimeCatalog,
+        request: RunRequest,
+        agent_id: &str,
+        limits: EmbeddedRunLimits,
+    ) -> Result<EmbeddedRunSnapshot, AgentError> {
+        Self::start_snapshot_at_depth(catalog, request, agent_id, limits, 0, 0)
+    }
+
+    /// Continue a host-persisted snapshot. The runtime validates limits and
+    /// checkpoint identity before consuming the host response.
+    pub fn continue_snapshot(
+        catalog: &AgentRuntimeCatalog,
+        snapshot: EmbeddedRunSnapshot,
+        effect_response: EmbeddedEffectResponse,
+        agent_id: &str,
+    ) -> Result<EmbeddedRunSnapshot, AgentError> {
+        let snapshot = close_snapshot_at_limits(catalog, snapshot, agent_id)?;
+        if snapshot.is_terminal() {
+            return Ok(snapshot);
+        }
+        advance_snapshot(catalog, snapshot, effect_response, agent_id, true)
+    }
+
+    /// Start the subagent currently requested by `parent`. The child inherits
+    /// the parent's shared effect budget and advances subagent depth in Rust.
+    pub fn start_requested_subagent(
+        catalog: &AgentRuntimeCatalog,
+        parent: &EmbeddedRunSnapshot,
+    ) -> Result<EmbeddedRunSnapshot, AgentError> {
+        validate_snapshot(parent, &parent.step.agent_id)?;
+        let Some(EmbeddedHostEffect::Subagent {
+            agent_id,
+            input,
+            run_id,
+            scope,
+            workflow,
+            metadata,
+            ..
+        }) = parent.requested_effect()
+        else {
+            return Err(validation(
+                "embedded snapshot does not request a subagent effect",
+            ));
+        };
+        if parent.remaining_effect_steps() == 0 {
+            return Err(validation("embedded effect budget is exhausted"));
+        }
+        if parent.progress.subagent_depth >= parent.limits.max_subagent_depth {
+            return Err(validation("embedded subagent depth is exhausted"));
+        }
+        let dispatched_effect_count = parent
+            .progress
+            .dispatched_effect_count
+            .checked_add(1)
+            .ok_or_else(|| validation("embedded dispatched effect count overflowed"))?;
+        let request = RunRequest {
+            protocol_version: protocol_version(),
+            run_id: run_id.clone(),
+            input: input.clone(),
+            user: None,
+            scope: scope.clone(),
+            trigger: agent_core::TriggerKind::Manual,
+            trigger_envelope: None,
+            workflow: workflow.as_deref().cloned(),
+            metadata: metadata.clone(),
+        };
+        Self::start_snapshot_at_depth(
+            catalog,
+            request,
+            agent_id,
+            parent.limits,
+            parent.progress.subagent_depth.saturating_add(1),
+            dispatched_effect_count,
+        )
+    }
+
+    /// Resume a parent from a terminal child snapshot without asking the host
+    /// to synthesize subagent bookkeeping or shared-budget counters.
+    pub fn resume_parent_from_subagent(
+        catalog: &AgentRuntimeCatalog,
+        mut parent: EmbeddedRunSnapshot,
+        child: EmbeddedRunSnapshot,
+    ) -> Result<EmbeddedRunSnapshot, AgentError> {
+        validate_snapshot(&parent, &parent.step.agent_id)?;
+        validate_snapshot(&child, &child.step.agent_id)?;
+        let Some(EmbeddedHostEffect::Subagent {
+            effect_id,
+            agent_id,
+            ..
+        }) = parent.requested_effect()
+        else {
+            return Err(validation(
+                "embedded parent does not request a subagent effect",
+            ));
+        };
+        if !child.is_terminal() {
+            return Err(validation("embedded child snapshot is not terminal"));
+        }
+        if child.step.agent_id != *agent_id {
+            return Err(validation(format!(
+                "embedded child agent '{}' does not match requested subagent '{}'",
+                child.step.agent_id, agent_id
+            )));
+        }
+        if child.limits != parent.limits {
+            return Err(validation(
+                "embedded child limits do not match parent limits",
+            ));
+        }
+        if child.progress.dispatched_effect_count <= parent.progress.dispatched_effect_count {
+            return Err(validation(
+                "embedded child did not consume the parent subagent effect budget",
+            ));
+        }
+        let response = EmbeddedEffectResponse {
+            jsonrpc: "2.0".to_owned(),
+            id: effect_id.clone(),
+            result: Some(json!({
+                "agent_id": child.step.agent_id,
+                "terminal_step": child.step,
+                "snapshot": child,
+            })),
+            error: None,
+        };
+        parent.progress.dispatched_effect_count = child.progress.dispatched_effect_count;
+        parent.progress.effect_budget_exhausted |= child.progress.effect_budget_exhausted;
+        parent.progress.subagent_depth_exceeded |= child.progress.subagent_depth_exceeded;
+        let parent_agent_id = parent.step.agent_id.clone();
+        advance_snapshot(catalog, parent, response, &parent_agent_id, false)
+    }
+
+    fn start_snapshot_at_depth(
+        catalog: &AgentRuntimeCatalog,
+        request: RunRequest,
+        agent_id: &str,
+        limits: EmbeddedRunLimits,
+        subagent_depth: u32,
+        dispatched_effect_count: u32,
+    ) -> Result<EmbeddedRunSnapshot, AgentError> {
+        let step = Self::start_typed(catalog, request, agent_id)?;
+        let snapshot = EmbeddedRunSnapshot {
+            protocol_version: protocol_version(),
+            snapshot_version: EMBEDDED_SNAPSHOT_VERSION,
+            step,
+            limits,
+            progress: EmbeddedRunProgress {
+                dispatched_effect_count,
+                subagent_depth,
+                effect_budget_exhausted: false,
+                subagent_depth_exceeded: false,
+            },
+        };
+        close_snapshot_at_limits(catalog, snapshot, agent_id)
+    }
+
+    /// Start an embedded run and return its typed, serializable checkpoint.
+    ///
+    /// Hosts should prefer this method. `start_step` remains available for
+    /// agent.v1 consumers that still exchange untyped JSON values.
+    pub fn start_typed(
+        catalog: &AgentRuntimeCatalog,
+        request: RunRequest,
+        agent_id: &str,
+    ) -> Result<EmbeddedRunStep, AgentError> {
+        let value = Self::start_step(catalog, request, agent_id)?;
+        serde_json::from_value(value).map_err(|error| {
+            AgentError::internal(format!(
+                "runtime produced an invalid embedded run step: {error}"
+            ))
+        })
+    }
+
+    /// Continue a typed embedded checkpoint with a typed host response.
+    pub fn continue_typed(
+        catalog: &AgentRuntimeCatalog,
+        previous_step: EmbeddedRunStep,
+        effect_response: EmbeddedEffectResponse,
+        agent_id: &str,
+    ) -> Result<EmbeddedRunStep, AgentError> {
+        let previous_step = serde_json::to_value(previous_step).map_err(|error| {
+            AgentError::internal(format!("failed to encode embedded run checkpoint: {error}"))
+        })?;
+        let effect_response = serde_json::to_value(effect_response).map_err(|error| {
+            AgentError::internal(format!(
+                "failed to encode embedded effect response: {error}"
+            ))
+        })?;
+        let value = Self::continue_step(catalog, previous_step, effect_response, agent_id)?;
+        serde_json::from_value(value).map_err(|error| {
+            AgentError::internal(format!(
+                "runtime produced an invalid embedded run step: {error}"
+            ))
+        })
+    }
+
     pub fn start_step(
         catalog: &AgentRuntimeCatalog,
         mut request: RunRequest,
@@ -131,6 +331,113 @@ impl EffectStepLoop {
         attach_runtime_metadata(&mut response);
         Ok(response)
     }
+}
+
+fn validate_snapshot(snapshot: &EmbeddedRunSnapshot, agent_id: &str) -> Result<(), AgentError> {
+    if snapshot.protocol_version != protocol_version() {
+        return Err(validation(format!(
+            "embedded snapshot protocol_version '{}' is not supported",
+            snapshot.protocol_version
+        )));
+    }
+    if snapshot.snapshot_version != EMBEDDED_SNAPSHOT_VERSION {
+        return Err(validation(format!(
+            "embedded snapshot version {} is not supported",
+            snapshot.snapshot_version
+        )));
+    }
+    if snapshot.step.protocol_version != snapshot.protocol_version {
+        return Err(validation(
+            "embedded snapshot step protocol_version does not match snapshot",
+        ));
+    }
+    if snapshot.step.agent_id != agent_id {
+        return Err(validation(format!(
+            "embedded snapshot agent '{}' does not match requested agent '{agent_id}'",
+            snapshot.step.agent_id
+        )));
+    }
+    if snapshot.progress.dispatched_effect_count > snapshot.limits.max_effect_steps {
+        return Err(validation(
+            "embedded dispatched effect count exceeds max_effect_steps",
+        ));
+    }
+    Ok(())
+}
+
+fn advance_snapshot(
+    catalog: &AgentRuntimeCatalog,
+    mut snapshot: EmbeddedRunSnapshot,
+    effect_response: EmbeddedEffectResponse,
+    agent_id: &str,
+    count_dispatch: bool,
+) -> Result<EmbeddedRunSnapshot, AgentError> {
+    validate_snapshot(&snapshot, agent_id)?;
+    if snapshot.is_terminal() {
+        return Err(validation("embedded snapshot is already terminal"));
+    }
+    if count_dispatch {
+        snapshot.progress.dispatched_effect_count = snapshot
+            .progress
+            .dispatched_effect_count
+            .checked_add(1)
+            .ok_or_else(|| validation("embedded dispatched effect count overflowed"))?;
+        if snapshot.progress.dispatched_effect_count > snapshot.limits.max_effect_steps {
+            return Err(validation("embedded effect budget is exhausted"));
+        }
+    }
+    snapshot.step =
+        EffectStepLoop::continue_typed(catalog, snapshot.step, effect_response, agent_id)?;
+    close_snapshot_at_limits(catalog, snapshot, agent_id)
+}
+
+fn close_snapshot_at_limits(
+    catalog: &AgentRuntimeCatalog,
+    mut snapshot: EmbeddedRunSnapshot,
+    agent_id: &str,
+) -> Result<EmbeddedRunSnapshot, AgentError> {
+    validate_snapshot(&snapshot, agent_id)?;
+    let Some(effect) = snapshot.requested_effect() else {
+        return Ok(snapshot);
+    };
+    let effect_id = effect.effect_id().to_owned();
+    let is_subagent = matches!(effect, EmbeddedHostEffect::Subagent { .. });
+    let closure = if snapshot.remaining_effect_steps() == 0 {
+        snapshot.progress.effect_budget_exhausted = true;
+        Some((
+            "effect_budget_exhausted",
+            "agent runtime effect budget exhausted",
+        ))
+    } else if is_subagent && snapshot.progress.subagent_depth >= snapshot.limits.max_subagent_depth
+    {
+        snapshot.progress.subagent_depth_exceeded = true;
+        Some((
+            "subagent_depth_exceeded",
+            "agent runtime subagent depth exhausted",
+        ))
+    } else {
+        None
+    };
+    let Some((code, message)) = closure else {
+        return Ok(snapshot);
+    };
+    let response = EmbeddedEffectResponse {
+        jsonrpc: "2.0".to_owned(),
+        id: effect_id,
+        result: Some(json!({
+            "error": {
+                "code": code,
+                "message": message,
+                "max_effect_steps": snapshot.limits.max_effect_steps,
+                "dispatched_effect_count": snapshot.progress.dispatched_effect_count,
+                "max_subagent_depth": snapshot.limits.max_subagent_depth,
+                "subagent_depth": snapshot.progress.subagent_depth,
+            }
+        })),
+        error: None,
+    };
+    snapshot.step = EffectStepLoop::continue_typed(catalog, snapshot.step, response, agent_id)?;
+    Ok(snapshot)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -991,12 +1298,20 @@ fn effect_response_terminal_status(effect_response: &Value) -> Option<&'static s
 fn effect_response_error_code(effect_response: &Value) -> Option<String> {
     effect_response
         .get("error")
-        .and_then(|error| error.get("code"))
-        .and_then(|value| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| value.as_i64().map(|code| code.to_string()))
+        .and_then(|error| error.get("data"))
+        .and_then(|data| data.get("code"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            effect_response
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| value.as_i64().map(|code| code.to_string()))
+                })
         })
         .or_else(|| {
             effect_response
@@ -1376,6 +1691,286 @@ mod tests {
         assert_eq!(
             terminal["trace_event"]["run_state"]["terminal_reason"],
             "done"
+        );
+    }
+
+    #[test]
+    fn effect_step_loop_exposes_typed_embedded_checkpoints() {
+        let catalog = catalog();
+        let request = RunRequest {
+            protocol_version: protocol_version(),
+            run_id: Some(RunId("run_typed".to_owned())),
+            input: json!({
+                "effects": [
+                    {"kind": "tool", "name": "read_first", "input": {"id": "first"}},
+                    {"kind": "subagent", "agent_id": "child", "input": {}}
+                ]
+            }),
+            user: None,
+            scope: None,
+            trigger: agent_core::TriggerKind::Manual,
+            trigger_envelope: None,
+            workflow: None,
+            metadata: json!({}),
+        };
+
+        let first =
+            EffectStepLoop::start_typed(&catalog, request, "parent").expect("typed first step");
+        assert_eq!(
+            first.status,
+            agent_core::EmbeddedRunStepStatus::EffectRequested
+        );
+        assert!(first.requested_effect().unwrap().effect_id().len() > 1);
+        assert_eq!(
+            first
+                .continuation
+                .as_ref()
+                .expect("remaining continuation")
+                .effects
+                .len(),
+            1
+        );
+        let id = first.requested_effect().unwrap().effect_id().to_owned();
+        let second = EffectStepLoop::continue_typed(
+            &catalog,
+            first,
+            agent_core::EmbeddedEffectResponse {
+                jsonrpc: "2.0".to_owned(),
+                id,
+                result: Some(json!({"ok": true})),
+                error: None,
+            },
+            "parent",
+        )
+        .expect("typed second step");
+        assert_eq!(
+            second.status,
+            agent_core::EmbeddedRunStepStatus::EffectRequested
+        );
+        assert!(matches!(
+            second.requested_effect(),
+            Some(agent_core::EmbeddedHostEffect::Subagent { .. })
+        ));
+    }
+
+    #[test]
+    fn effect_step_loop_accepts_stable_embedded_control_error_codes() {
+        let catalog = catalog();
+        let request = RunRequest {
+            protocol_version: protocol_version(),
+            run_id: Some(RunId("run_budget".to_owned())),
+            input: json!({
+                "effects": [
+                    {"kind": "tool", "name": "read_first", "input": {}}
+                ]
+            }),
+            user: None,
+            scope: None,
+            trigger: agent_core::TriggerKind::Manual,
+            trigger_envelope: None,
+            workflow: None,
+            metadata: json!({}),
+        };
+        let first =
+            EffectStepLoop::start_typed(&catalog, request, "parent").expect("typed first step");
+        let id = first.requested_effect().unwrap().effect_id().to_owned();
+
+        let terminal = EffectStepLoop::continue_typed(
+            &catalog,
+            first,
+            agent_core::EmbeddedEffectResponse {
+                jsonrpc: "2.0".to_owned(),
+                id,
+                result: Some(json!({
+                    "error": {
+                        "code": "effect_budget_exhausted",
+                        "message": "agent runtime effect budget exhausted"
+                    }
+                })),
+                error: None,
+            },
+            "parent",
+        )
+        .expect("typed terminal step");
+        assert_eq!(
+            terminal.status,
+            agent_core::EmbeddedRunStepStatus::ClosedEarly
+        );
+        assert_eq!(
+            terminal.run_state.terminal_reason,
+            Some(agent_core::EmbeddedTerminalReason::ClosedEarly)
+        );
+    }
+
+    #[test]
+    fn embedded_snapshot_closes_at_runtime_owned_effect_budget() {
+        let catalog = catalog();
+        let request = RunRequest {
+            protocol_version: protocol_version(),
+            run_id: Some(RunId("run_snapshot_budget".to_owned())),
+            input: json!({
+                "effects": [
+                    {"kind": "tool", "name": "read_first", "input": {"index": 1}},
+                    {"kind": "tool", "name": "read_first", "input": {"index": 2}}
+                ]
+            }),
+            user: None,
+            scope: None,
+            trigger: agent_core::TriggerKind::Manual,
+            trigger_envelope: None,
+            workflow: None,
+            metadata: json!({}),
+        };
+        let first = EffectStepLoop::start_snapshot(
+            &catalog,
+            request,
+            "parent",
+            agent_core::EmbeddedRunLimits {
+                max_effect_steps: 1,
+                max_subagent_depth: 4,
+            },
+        )
+        .expect("snapshot starts");
+        assert_eq!(first.remaining_effect_steps(), 1);
+        let id = first.requested_effect().unwrap().effect_id().to_owned();
+
+        let terminal = EffectStepLoop::continue_snapshot(
+            &catalog,
+            first,
+            agent_core::EmbeddedEffectResponse {
+                jsonrpc: "2.0".to_owned(),
+                id,
+                result: Some(json!({"ok": true})),
+                error: None,
+            },
+            "parent",
+        )
+        .expect("snapshot advances and closes");
+        assert_eq!(
+            terminal.step.status,
+            agent_core::EmbeddedRunStepStatus::ClosedEarly
+        );
+        assert_eq!(terminal.progress.dispatched_effect_count, 1);
+        assert!(terminal.progress.effect_budget_exhausted);
+        assert_eq!(terminal.remaining_effect_steps(), 0);
+        assert_eq!(
+            terminal.step.error.unwrap()["code"],
+            "effect_budget_exhausted"
+        );
+    }
+
+    #[test]
+    fn embedded_snapshot_owns_subagent_depth_and_shared_effect_budget() {
+        let catalog = catalog();
+        let request = RunRequest {
+            protocol_version: protocol_version(),
+            run_id: Some(RunId("run_snapshot_parent".to_owned())),
+            input: json!({
+                "effects": [{
+                    "kind": "subagent",
+                    "agent_id": "child",
+                    "input": {
+                        "effects": [{
+                            "kind": "tool",
+                            "name": "read_first",
+                            "input": {"from": "child"}
+                        }]
+                    }
+                }]
+            }),
+            user: None,
+            scope: None,
+            trigger: agent_core::TriggerKind::Manual,
+            trigger_envelope: None,
+            workflow: None,
+            metadata: json!({}),
+        };
+        let parent = EffectStepLoop::start_snapshot(
+            &catalog,
+            request,
+            "parent",
+            agent_core::EmbeddedRunLimits {
+                max_effect_steps: 3,
+                max_subagent_depth: 2,
+            },
+        )
+        .expect("parent starts");
+        let child = EffectStepLoop::start_requested_subagent(&catalog, &parent)
+            .expect("child starts from parent effect");
+        assert_eq!(child.progress.subagent_depth, 1);
+        assert_eq!(child.progress.dispatched_effect_count, 1);
+        let child_effect_id = child.requested_effect().unwrap().effect_id().to_owned();
+        let child = EffectStepLoop::continue_snapshot(
+            &catalog,
+            child,
+            agent_core::EmbeddedEffectResponse {
+                jsonrpc: "2.0".to_owned(),
+                id: child_effect_id,
+                result: Some(json!({"child": "done"})),
+                error: None,
+            },
+            "child",
+        )
+        .expect("child completes");
+        assert!(child.is_terminal());
+        assert_eq!(child.progress.dispatched_effect_count, 2);
+
+        let parent = EffectStepLoop::resume_parent_from_subagent(&catalog, parent, child)
+            .expect("parent resumes from child");
+        assert!(parent.is_terminal());
+        assert_eq!(
+            parent.step.status,
+            agent_core::EmbeddedRunStepStatus::Completed
+        );
+        assert_eq!(parent.progress.dispatched_effect_count, 2);
+        assert_eq!(parent.remaining_effect_steps(), 1);
+    }
+
+    #[test]
+    fn embedded_snapshot_rejects_tampered_progress() {
+        let catalog = catalog();
+        let request = RunRequest {
+            protocol_version: protocol_version(),
+            run_id: Some(RunId("run_snapshot_tampered".to_owned())),
+            input: json!({
+                "effect": {"kind": "tool", "name": "read_first", "input": {}}
+            }),
+            user: None,
+            scope: None,
+            trigger: agent_core::TriggerKind::Manual,
+            trigger_envelope: None,
+            workflow: None,
+            metadata: json!({}),
+        };
+        let mut snapshot = EffectStepLoop::start_snapshot(
+            &catalog,
+            request,
+            "parent",
+            agent_core::EmbeddedRunLimits {
+                max_effect_steps: 1,
+                max_subagent_depth: 1,
+            },
+        )
+        .expect("snapshot starts");
+        let id = snapshot.requested_effect().unwrap().effect_id().to_owned();
+        snapshot.progress.dispatched_effect_count = 2;
+        let error = EffectStepLoop::continue_snapshot(
+            &catalog,
+            snapshot,
+            agent_core::EmbeddedEffectResponse {
+                jsonrpc: "2.0".to_owned(),
+                id,
+                result: Some(json!({})),
+                error: None,
+            },
+            "parent",
+        )
+        .expect_err("tampered progress is rejected");
+        assert!(
+            error
+                .record
+                .message
+                .contains("dispatched effect count exceeds")
         );
     }
 

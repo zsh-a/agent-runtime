@@ -40,11 +40,13 @@ crates/agent-core/src/
   trace.rs          Trace and hook event wire records
   session.rs        Session/thread/step records
   proposal.rs       Proposal envelope and approval decisions
+  embedded.rs       Typed embedded run-step, host-effect, response, and checkpoint contracts
   services.rs       Host service traits
   stores.rs         Run/state/session/proposal/lock store traits
 
 crates/agent-runtime/src/
   lib.rs            Public exports only
+  loop_core.rs      Embedded host-effect start/continue state machine and typed API
   runner.rs         AgentRunner lifecycle, step hooks, retry/timeout, idempotency keys
   policy.rs         ExecutionPolicy
   lock.rs           AgentLockStore helpers and in-memory lease store

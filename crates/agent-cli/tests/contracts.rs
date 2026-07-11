@@ -4,9 +4,9 @@ use agent_chat::{
     ChatResumeRequest, ChatToolResult, ChatTurnEvent, ChatTurnRequest, ChatTurnState,
 };
 use agent_core::{
-    AgentRunResult, AgentRuntimeCatalog, AgentSpec, AgentTrace, ApprovalDecision, HookEvent,
-    HookSpec, PromptManifest, ProposalEnvelope, RunRequest, SessionRecord, StepRecord,
-    ThreadRecord, WorkflowRunRequest, WorkflowRunResult,
+    AgentRunResult, AgentRuntimeCatalog, AgentSpec, AgentTrace, ApprovalDecision,
+    EmbeddedRunSnapshot, EmbeddedRunStep, HookEvent, HookSpec, PromptManifest, ProposalEnvelope,
+    RunRequest, SessionRecord, StepRecord, ThreadRecord, WorkflowRunRequest, WorkflowRunResult,
 };
 use agent_llm::{LlmRequest, LlmResponse};
 use agent_runtime::RecoveryReport;
@@ -85,6 +85,30 @@ fn committed_fixtures_match_json_schemas() {
     assert_invalid(
         "schemas/trace.schema.json",
         "fixtures/contracts/trace.invalid.mismatched-step-terminal-status.json",
+    );
+    assert_valid(
+        "schemas/embedded-run-step.schema.json",
+        "fixtures/contracts/embedded-run-step.effect-requested.valid.json",
+    );
+    assert_valid(
+        "schemas/embedded-run-step.schema.json",
+        "fixtures/contracts/embedded-run-step.completed.valid.json",
+    );
+    assert_invalid(
+        "schemas/embedded-run-step.schema.json",
+        "fixtures/contracts/embedded-run-step.invalid.missing-run-state.json",
+    );
+    assert_valid_with_resource(
+        "schemas/embedded-run-snapshot.schema.json",
+        "fixtures/contracts/embedded-run-snapshot.valid.json",
+        "https://agent-runtime.local/schemas/embedded-run-step.schema.json",
+        "schemas/embedded-run-step.schema.json",
+    );
+    assert_invalid_with_resource(
+        "schemas/embedded-run-snapshot.schema.json",
+        "fixtures/contracts/embedded-run-snapshot.invalid.version.json",
+        "https://agent-runtime.local/schemas/embedded-run-step.schema.json",
+        "schemas/embedded-run-step.schema.json",
     );
     assert_valid(
         "schemas/catalog.schema.json",
@@ -233,6 +257,15 @@ fn committed_valid_fixtures_deserialize_to_runtime_types() {
     assert_deserializes::<AgentRunResult>("fixtures/contracts/run-result.completed.valid.json");
     assert_deserializes::<AgentTrace>("fixtures/contracts/trace.valid.json");
     assert_deserializes::<AgentTrace>("fixtures/contracts/trace.valid.closed-early-step.json");
+    assert_deserializes::<EmbeddedRunStep>(
+        "fixtures/contracts/embedded-run-step.effect-requested.valid.json",
+    );
+    assert_deserializes::<EmbeddedRunStep>(
+        "fixtures/contracts/embedded-run-step.completed.valid.json",
+    );
+    assert_deserializes::<EmbeddedRunSnapshot>(
+        "fixtures/contracts/embedded-run-snapshot.valid.json",
+    );
     assert_deserializes::<AgentRuntimeCatalog>("fixtures/contracts/catalog.valid.json");
     assert_deserializes::<AgentSpec>("fixtures/contracts/agent-spec.cron.valid.json");
     assert_deserializes::<RecoveryReport>("fixtures/contracts/recovery-report.valid.json");
@@ -537,6 +570,47 @@ fn assert_invalid(schema_path: &str, instance_path: &str) {
         !validator.is_valid(&instance),
         "{instance_path} unexpectedly matched {schema_path}"
     );
+}
+
+fn assert_valid_with_resource(
+    schema_path: &str,
+    instance_path: &str,
+    resource_uri: &str,
+    resource_path: &str,
+) {
+    let validator = validator_with_resource(schema_path, resource_uri, resource_path);
+    assert_json_valid(&validator, &read_json(instance_path));
+}
+
+fn assert_invalid_with_resource(
+    schema_path: &str,
+    instance_path: &str,
+    resource_uri: &str,
+    resource_path: &str,
+) {
+    let validator = validator_with_resource(schema_path, resource_uri, resource_path);
+    assert!(
+        !validator.is_valid(&read_json(instance_path)),
+        "{instance_path} unexpectedly matched {schema_path}"
+    );
+}
+
+fn validator_with_resource(
+    schema_path: &str,
+    resource_uri: &str,
+    resource_path: &str,
+) -> jsonschema::Validator {
+    let schema = read_json(schema_path);
+    let resource = read_json(resource_path);
+    let registry = jsonschema::Registry::new()
+        .add(resource_uri, &resource)
+        .expect("schema resource is accepted")
+        .prepare()
+        .expect("schema registry builds");
+    jsonschema::options()
+        .with_registry(&registry)
+        .build(&schema)
+        .expect("schema compiles with resource")
 }
 
 fn assert_deserializes<T>(instance_path: &str)
