@@ -34,6 +34,43 @@ impl EffectStepLoop {
         advance_snapshot(catalog, snapshot, effect_response, agent_id, true)
     }
 
+    /// Cancel a non-terminal embedded snapshot without dispatching its pending
+    /// host effect. Cancellation is recorded as a runtime-owned terminal step
+    /// and does not consume the shared effect budget.
+    pub fn cancel_snapshot(
+        catalog: &AgentRuntimeCatalog,
+        snapshot: EmbeddedRunSnapshot,
+        agent_id: &str,
+        reason: &str,
+    ) -> Result<EmbeddedRunSnapshot, AgentError> {
+        validate_snapshot(&snapshot, agent_id)?;
+        if snapshot.is_terminal() {
+            return Ok(snapshot);
+        }
+        let effect_id = snapshot
+            .requested_effect()
+            .ok_or_else(|| validation("embedded snapshot has no pending effect to cancel"))?
+            .effect_id()
+            .to_owned();
+        let message = if reason.trim().is_empty() {
+            "embedded run cancelled by host"
+        } else {
+            reason.trim()
+        };
+        let response = EmbeddedEffectResponse {
+            jsonrpc: "2.0".to_owned(),
+            id: effect_id,
+            result: Some(json!({
+                "error": {
+                    "code": "user_cancel",
+                    "message": message,
+                }
+            })),
+            error: None,
+        };
+        advance_snapshot(catalog, snapshot, response, agent_id, false)
+    }
+
     /// Start the subagent currently requested by `parent`. The child inherits
     /// the parent's shared effect budget and advances subagent depth in Rust.
     pub fn start_requested_subagent(
@@ -1924,6 +1961,54 @@ mod tests {
         );
         assert_eq!(parent.progress.dispatched_effect_count, 2);
         assert_eq!(parent.remaining_effect_steps(), 1);
+    }
+
+    #[test]
+    fn embedded_snapshot_cancellation_is_terminal_without_consuming_budget() {
+        let catalog = catalog();
+        let request = RunRequest {
+            protocol_version: protocol_version(),
+            run_id: Some(RunId("run_snapshot_cancelled".to_owned())),
+            input: json!({
+                "effect": {"kind": "tool", "name": "read_first", "input": {}}
+            }),
+            user: None,
+            scope: None,
+            trigger: agent_core::TriggerKind::Manual,
+            trigger_envelope: None,
+            workflow: None,
+            metadata: json!({}),
+        };
+        let snapshot = EffectStepLoop::start_snapshot(
+            &catalog,
+            request,
+            "parent",
+            agent_core::EmbeddedRunLimits {
+                max_effect_steps: 2,
+                max_subagent_depth: 1,
+            },
+        )
+        .expect("snapshot starts");
+
+        let cancelled = EffectStepLoop::cancel_snapshot(
+            &catalog,
+            snapshot,
+            "parent",
+            "app moved to background",
+        )
+        .expect("snapshot cancels");
+
+        assert_eq!(
+            cancelled.step.status,
+            agent_core::EmbeddedRunStepStatus::Cancelled
+        );
+        assert_eq!(
+            cancelled.step.run_state.terminal_reason,
+            Some(agent_core::EmbeddedTerminalReason::UserCancel)
+        );
+        assert_eq!(cancelled.progress.dispatched_effect_count, 0);
+        assert_eq!(cancelled.remaining_effect_steps(), 2);
+        assert_eq!(cancelled.step.error.unwrap()["code"], "user_cancel");
     }
 
     #[test]
