@@ -291,18 +291,13 @@ struct Cli {
 struct ToolCliArgs {
     #[arg(
         long = "tool-host",
-        visible_alias = "tool-cmd",
         num_args = 1..,
         value_name = "COMMAND"
     )]
     tool_host: Vec<String>,
-    #[arg(
-        long = "mock-tool",
-        visible_alias = "mock",
-        value_name = "NAME=JSON_OR_@PATH"
-    )]
+    #[arg(long = "mock-tool", value_name = "NAME=JSON_OR_@PATH")]
     mock_tool: Vec<String>,
-    #[arg(long = "tool-source", visible_alias = "tools", value_name = "PATH")]
+    #[arg(long = "tool-source", value_name = "PATH")]
     tool_source: Vec<Utf8PathBuf>,
 }
 
@@ -373,10 +368,8 @@ enum Command {
     },
     Replay {
         trace_file: Utf8PathBuf,
-        #[arg(long, value_enum)]
-        mode: Option<ReplayMode>,
-        #[arg(long)]
-        execute: bool,
+        #[arg(long, value_enum, default_value_t = ReplayMode::View)]
+        mode: ReplayMode,
         #[arg(long, default_value = DEFAULT_REGISTRY)]
         registry: Utf8PathBuf,
         #[arg(long)]
@@ -746,7 +739,6 @@ async fn main() -> Result<()> {
         Command::Replay {
             trace_file,
             mode,
-            execute,
             registry,
             catalog,
             tools,
@@ -759,16 +751,6 @@ async fn main() -> Result<()> {
             let sources = context.runtime_sources(registry, catalog);
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
-            let mode = if execute {
-                match mode {
-                    Some(ReplayMode::View | ReplayMode::Deterministic) => {
-                        return Err(miette!("--execute is only compatible with --mode live"));
-                    }
-                    Some(ReplayMode::Live) | None => ReplayMode::Live,
-                }
-            } else {
-                mode.unwrap_or(ReplayMode::View)
-            };
             match mode {
                 ReplayMode::Live | ReplayMode::Deterministic => {
                     replay_trace(ReplayTraceOptions {

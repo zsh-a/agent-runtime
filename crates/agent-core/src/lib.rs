@@ -58,3 +58,23 @@ pub fn protocol_version() -> String {
 pub fn catalog_version() -> String {
     CATALOG_VERSION.to_owned()
 }
+
+pub fn validate_protocol_version(actual: &str) -> Result<(), String> {
+    if actual == PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(format!(
+            "protocol_version '{actual}' is not supported; expected '{PROTOCOL_VERSION}'"
+        ))
+    }
+}
+
+pub fn validate_catalog_version(actual: &str) -> Result<(), String> {
+    if actual == CATALOG_VERSION {
+        Ok(())
+    } else {
+        Err(format!(
+            "catalog_version '{actual}' is not supported; expected '{CATALOG_VERSION}'"
+        ))
+    }
+}

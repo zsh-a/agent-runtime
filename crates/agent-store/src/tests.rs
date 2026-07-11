@@ -1,8 +1,8 @@
 use agent_core::AgentLockStore;
 #[cfg(feature = "sqlite")]
 use agent_core::{
-    AgentRunEventStore, AgentRunStore, AgentTrace, AgentTraceStore, PROTOCOL_VERSION, RunId,
-    RunScope, TraceEvent,
+    AgentRunEventStore, AgentRunStore, AgentStateStore, AgentTrace, AgentTraceStore,
+    PROTOCOL_VERSION, RunId, RunScope, TraceEvent,
 };
 use camino::Utf8PathBuf;
 use std::time::Duration;
@@ -176,7 +176,7 @@ async fn sqlite_store_reopens_file_backed_records() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        7
+        8
     );
     assert_eq!(
         reopened
@@ -280,8 +280,61 @@ async fn sqlite_store_upgrades_old_schema_version() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        7
+        8
     );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_store_migrates_unscoped_state_and_removes_legacy_table() {
+    use serde_json::json;
+    use sqlx::Row;
+
+    let path = temp_root().join("v7-unscoped-state.sqlite");
+    {
+        let store = SqliteStore::open(&path).await.expect("sqlite opens");
+        sqlx::query(
+            r#"
+            CREATE TABLE agent_state (
+                agent_id TEXT NOT NULL,
+                state_key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                PRIMARY KEY(agent_id, state_key)
+            )
+            "#,
+        )
+        .execute(store.pool())
+        .await
+        .expect("legacy state table is recreated");
+        sqlx::query("INSERT INTO agent_state(agent_id, state_key, value_json) VALUES (?, ?, ?)")
+            .bind("legacy_agent")
+            .bind("settings")
+            .bind(json!({"enabled": true}).to_string())
+            .execute(store.pool())
+            .await
+            .expect("legacy state is inserted");
+        sqlx::query("PRAGMA user_version = 7")
+            .execute(store.pool())
+            .await
+            .expect("schema version rewinds to v7");
+    }
+
+    let reopened = SqliteStore::open(&path).await.expect("v7 schema upgrades");
+    assert_eq!(
+        reopened
+            .load("legacy_agent", &RunScope::Global, "settings")
+            .await
+            .expect("migrated state reads"),
+        Some(json!({"enabled": true}))
+    );
+    let legacy_table_count = sqlx::query(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'agent_state'",
+    )
+    .fetch_one(reopened.pool())
+    .await
+    .expect("sqlite schema reads")
+    .get::<i64, _>("count");
+    assert_eq!(legacy_table_count, 0);
 }
 
 #[cfg(feature = "sqlite")]
@@ -321,7 +374,7 @@ async fn sqlite_store_upgrades_v2_schema_with_run_event_tables() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        7
+        8
     );
     reopened
         .append_run_event(&run_id, TraceEvent::new("run_started", json!({"v": 3})))
@@ -459,7 +512,7 @@ async fn sqlite_store_upgrades_v3_schema_with_run_status_index() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        7
+        8
     );
     let running_runs = reopened
         .list_runs_by_status(AgentRunStatus::Running, None)
@@ -498,7 +551,7 @@ async fn sqlite_store_upgrades_v4_schema_with_trace_table() {
             .schema_version()
             .await
             .expect("schema version reads"),
-        7
+        8
     );
     let trace = sqlite_trace_record(run_id.clone(), "sqlite_agent");
     reopened
@@ -566,7 +619,7 @@ async fn sqlite_run_event_append_allocates_unique_cursors_concurrently() {
 #[tokio::test]
 async fn sqlite_store_reports_supported_schema_version_from_migrations() {
     let store = SqliteStore::in_memory().await.expect("sqlite opens");
-    assert_eq!(SqliteStore::supported_schema_version(), 7);
+    assert_eq!(SqliteStore::supported_schema_version(), 8);
     assert_eq!(
         store.schema_version().await.expect("schema version reads"),
         SqliteStore::supported_schema_version()
@@ -596,7 +649,7 @@ async fn sqlite_store_rejects_future_schema_version_without_downgrade() {
     };
     assert!(
         err.message
-            .contains("schema version 999 is newer than supported version 7"),
+            .contains("schema version 999 is newer than supported version 8"),
         "unexpected error: {}",
         err.message
     );

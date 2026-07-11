@@ -392,7 +392,7 @@ mod tests {
                     "command": "sh",
                     "args": [
                         "-c",
-                        "if [ ! -f \"$1\" ]; then touch \"$1\"; printf '%s\\n' '{\"error\":{\"code\":-32000,\"message\":\"try again\",\"data\":{\"retryable\":true}}}'; else printf '%s\\n' '{\"result\":{\"ok\":true}}'; fi",
+                        "read _; if [ ! -f \"$1\" ]; then touch \"$1\"; printf '%s\\n' '{\"error\":{\"code\":-32000,\"message\":\"try again\",\"data\":{\"retryable\":true}}}'; else printf '%s\\n' '{\"result\":{\"ok\":true}}'; fi",
                         "retry-source",
                         flag.to_str().expect("utf8 flag path")
                     ],

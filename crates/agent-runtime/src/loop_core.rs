@@ -1,13 +1,9 @@
 use agent_core::{
-    AgentError, AgentRuntimeCatalog, EffectId, RunId, RunRequest, ToolSpec, catalog_version,
-    protocol_version,
+    AgentError, AgentRuntimeCatalog, EffectId, RunId, RunRequest, ToolSpec, protocol_version,
 };
 use serde_json::{Map, Value, json};
 
 pub struct EffectStepLoop;
-
-#[deprecated(note = "use EffectStepLoop; this type is a protocol stepper, not the executor loop")]
-pub type RunLoop = EffectStepLoop;
 
 impl EffectStepLoop {
     pub fn start_step(
@@ -812,21 +808,23 @@ fn require_previous_step_runtime_metadata(
     run_id: &Value,
     step_index: u64,
 ) -> Result<(), AgentError> {
-    if let Some(run_state) = previous_step.get("run_state") {
-        require_previous_step_run_state(previous_step, run_state, step_index).map_err(|error| {
-            validation(format!("previous step run_state: {}", error.record.message))
-        })?;
-    }
-    if let Some(trace_event) = previous_step.get("trace_event") {
-        require_previous_step_trace_event(previous_step, trace_event, run_id, step_index).map_err(
-            |error| {
-                validation(format!(
-                    "previous step trace_event: {}",
-                    error.record.message
-                ))
-            },
-        )?;
-    }
+    let run_state = previous_step
+        .get("run_state")
+        .ok_or_else(|| validation("previous step run_state is required"))?;
+    require_previous_step_run_state(previous_step, run_state, step_index).map_err(|error| {
+        validation(format!("previous step run_state: {}", error.record.message))
+    })?;
+    let trace_event = previous_step
+        .get("trace_event")
+        .ok_or_else(|| validation("previous step trace_event is required"))?;
+    require_previous_step_trace_event(previous_step, trace_event, run_id, step_index).map_err(
+        |error| {
+            validation(format!(
+                "previous step trace_event: {}",
+                error.record.message
+            ))
+        },
+    )?;
     Ok(())
 }
 
@@ -912,14 +910,15 @@ fn require_previous_step_trace_event(
             ));
         }
     }
-    if let Some(run_state) = previous_step.get("run_state") {
-        match trace_event.get("run_state") {
-            Some(value) if value == run_state => {}
-            _ => {
-                return Err(validation(
-                    "previous step trace_event.run_state must match run_state",
-                ));
-            }
+    let run_state = previous_step
+        .get("run_state")
+        .ok_or_else(|| validation("previous step run_state is required"))?;
+    match trace_event.get("run_state") {
+        Some(value) if value == run_state => {}
+        _ => {
+            return Err(validation(
+                "previous step trace_event.run_state must match run_state",
+            ));
         }
     }
     Ok(())
@@ -930,21 +929,17 @@ fn require_matching_effect_response_id(
     effect_response: &Value,
     kind: RunEffectKind,
 ) -> Result<(), AgentError> {
-    let Some(expected_id) = effect_call.get(kind.id_field()).and_then(Value::as_str) else {
-        return Ok(());
-    };
-    let Some(response_id) = effect_response.get("id") else {
-        return Ok(());
-    };
-    match response_id.as_str() {
+    let expected_id = effect_call
+        .get(kind.id_field())
+        .and_then(Value::as_str)
+        .ok_or_else(|| validation(format!("effect.{} is required", kind.id_field())))?;
+    match effect_response.get("id").and_then(Value::as_str) {
         Some(value) if value == expected_id => Ok(()),
         Some(value) => Err(validation(format!(
             "effect response id '{value}' does not match requested {} '{expected_id}'",
             kind.id_field()
         ))),
-        None => Err(validation(
-            "effect response id must be a string when present",
-        )),
+        None => Err(validation("effect response id must be a string")),
     }
 }
 
@@ -952,47 +947,35 @@ fn require_effect_response_envelope(effect_response: &Value) -> Result<(), Agent
     let Some(object) = effect_response.as_object() else {
         return Err(validation("effect response must be an object"));
     };
-    if let Some(jsonrpc) = object.get("jsonrpc") {
-        match jsonrpc.as_str() {
-            Some("2.0") => {}
-            Some(_) => return Err(validation("effect response jsonrpc must be '2.0'")),
-            None => return Err(validation("effect response jsonrpc must be a string")),
-        }
-        if !object.contains_key("id") {
+    match object.get("jsonrpc").and_then(Value::as_str) {
+        Some("2.0") => {}
+        Some(_) => return Err(validation("effect response jsonrpc must be '2.0'")),
+        None => return Err(validation("effect response jsonrpc must be '2.0'")),
+    }
+    if !object.contains_key("id") {
+        return Err(validation("effect response id is required"));
+    }
+    match (object.contains_key("result"), object.contains_key("error")) {
+        (true, false) | (false, true) => {}
+        (true, true) => {
             return Err(validation(
-                "effect response id is required when jsonrpc is present",
+                "effect response cannot contain both result and error",
             ));
         }
-        match (object.contains_key("result"), object.contains_key("error")) {
-            (true, false) | (false, true) => {}
-            (true, true) => {
-                return Err(validation(
-                    "effect response cannot contain both result and error",
-                ));
-            }
-            (false, false) => {
-                return Err(validation("effect response must contain result or error"));
-            }
-        }
-        if let Some(error) = object.get("error") {
-            let error = error
-                .as_object()
-                .ok_or_else(|| validation("effect response error must be an object"))?;
-            if error.get("code").and_then(Value::as_i64).is_none() {
-                return Err(validation("effect response error.code must be an integer"));
-            }
-            if error.get("message").and_then(Value::as_str).is_none() {
-                return Err(validation("effect response error.message must be a string"));
-            }
+        (false, false) => {
+            return Err(validation("effect response must contain result or error"));
         }
     }
-    if !object.contains_key("jsonrpc")
-        && object.contains_key("result")
-        && object.contains_key("error")
-    {
-        return Err(validation(
-            "effect response cannot contain both result and error",
-        ));
+    if let Some(error) = object.get("error") {
+        let error = error
+            .as_object()
+            .ok_or_else(|| validation("effect response error must be an object"))?;
+        if error.get("code").and_then(Value::as_i64).is_none() {
+            return Err(validation("effect response error.code must be an integer"));
+        }
+        if error.get("message").and_then(Value::as_str).is_none() {
+            return Err(validation("effect response error.message must be a string"));
+        }
     }
     Ok(())
 }
@@ -1150,13 +1133,7 @@ fn attach_trace_event(step: &mut Value) {
 }
 
 fn normalize_run_request_contract(request: &mut RunRequest) -> Result<(), AgentError> {
-    let expected = protocol_version();
-    if request.protocol_version != expected {
-        return Err(validation(format!(
-            "run request protocol_version '{}' does not match runtime protocol_version '{expected}'",
-            request.protocol_version
-        )));
-    }
+    agent_core::validate_protocol_version(&request.protocol_version).map_err(validation)?;
     if request.input.is_null() {
         request.input = json!({});
     } else if !request.input.is_object() {
@@ -1185,21 +1162,7 @@ fn normalize_run_request_contract(request: &mut RunRequest) -> Result<(), AgentE
 }
 
 fn require_catalog_contract(catalog: &AgentRuntimeCatalog) -> Result<(), AgentError> {
-    let expected_protocol = protocol_version();
-    if catalog.protocol_version != expected_protocol {
-        return Err(validation(format!(
-            "catalog protocol_version '{}' does not match runtime protocol_version '{expected_protocol}'",
-            catalog.protocol_version
-        )));
-    }
-    let expected_catalog = catalog_version();
-    if catalog.catalog_version != expected_catalog {
-        return Err(validation(format!(
-            "catalog catalog_version '{}' does not match runtime catalog_version '{expected_catalog}'",
-            catalog.catalog_version
-        )));
-    }
-    Ok(())
+    catalog.validate_versions().map_err(validation)
 }
 
 fn validate_requested_effect(
@@ -1335,7 +1298,7 @@ fn validation(message: impl Into<String>) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{PROTOCOL_VERSION, ScheduleSpec};
+    use agent_core::{PROTOCOL_VERSION, ScheduleSpec, catalog_version};
     use serde_json::json;
     use time::OffsetDateTime;
 
@@ -1381,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn run_loop_requests_and_completes_host_tool_effect() {
+    fn effect_step_loop_requests_and_completes_host_tool_effect() {
         let catalog = catalog();
         let request = RunRequest {
             protocol_version: protocol_version(),
@@ -1422,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn run_loop_exposes_subagent_as_native_effect() {
+    fn effect_step_loop_exposes_subagent_as_native_effect() {
         let catalog = catalog();
         let request = RunRequest {
             protocol_version: protocol_version(),
@@ -1463,5 +1426,54 @@ mod tests {
             terminal["output"]["effect_result"]["result"]["status"],
             "completed"
         );
+    }
+
+    #[test]
+    fn effect_step_loop_requires_current_step_metadata_and_json_rpc_response() {
+        let catalog = catalog();
+        let request = RunRequest {
+            protocol_version: protocol_version(),
+            run_id: Some(RunId("run_strict_contract".to_owned())),
+            input: json!({
+                "effects": [
+                    {"kind": "tool", "name": "read_first", "input": {}}
+                ]
+            }),
+            user: None,
+            scope: None,
+            trigger: agent_core::TriggerKind::Manual,
+            trigger_envelope: None,
+            workflow: None,
+            metadata: json!({}),
+        };
+
+        let first = EffectStepLoop::start_step(&catalog, request, "parent").expect("first step");
+        let id = first["effect"]["effect_id"]
+            .as_str()
+            .expect("effect id")
+            .to_owned();
+
+        let mut missing_metadata = first.clone();
+        missing_metadata
+            .as_object_mut()
+            .expect("step object")
+            .remove("run_state");
+        let error = EffectStepLoop::continue_step(
+            &catalog,
+            missing_metadata,
+            json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+            "parent",
+        )
+        .expect_err("run_state is required");
+        assert!(error.record.message.contains("run_state is required"));
+
+        let error = EffectStepLoop::continue_step(
+            &catalog,
+            first,
+            json!({"id": id, "result": {}}),
+            "parent",
+        )
+        .expect_err("JSON-RPC envelope is required");
+        assert!(error.record.message.contains("jsonrpc must be '2.0'"));
     }
 }

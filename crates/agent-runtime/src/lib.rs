@@ -13,8 +13,6 @@ mod trace;
 
 pub use hooks::{FnHook, HookInvocation, HookManager, HookRegistration};
 pub use lock::InMemoryLockStore;
-#[allow(deprecated)]
-pub use loop_core::RunLoop;
 pub use loop_core::{EffectStepLoop, RunEffectKind};
 pub use policy::ExecutionPolicy;
 pub use recovery::{RecoveredRun, RecoveryReport, recover_stale_runs};

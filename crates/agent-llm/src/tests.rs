@@ -6,6 +6,17 @@ use tokio::net::TcpListener;
 
 use super::*;
 
+#[test]
+fn llm_request_requires_explicit_protocol_version() {
+    let error = serde_json::from_value::<LlmRequest>(json!({
+        "provider": "mock",
+        "model": "mock-model",
+        "messages": []
+    }))
+    .expect_err("missing protocol version is rejected");
+    assert!(error.to_string().contains("protocol_version"));
+}
+
 #[tokio::test]
 async fn mock_provider_completes_and_streams() {
     let provider = MockLlmProvider::new("mock", "mock-fast", "hello");

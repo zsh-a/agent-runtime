@@ -46,7 +46,12 @@ pub(crate) async fn read_catalog(path: Utf8PathBuf) -> Result<AgentRuntimeCatalo
     let bytes = fs_err::tokio::read(&path)
         .await
         .map_err(|e| miette!("failed to read catalog at {path}: {e}"))?;
-    serde_json::from_slice(&bytes).map_err(|e| miette!("failed to parse catalog at {path}: {e}"))
+    let catalog: AgentRuntimeCatalog = serde_json::from_slice(&bytes)
+        .map_err(|e| miette!("failed to parse catalog at {path}: {e}"))?;
+    catalog
+        .validate_versions()
+        .map_err(|e| miette!("invalid catalog at {path}: {e}"))?;
+    Ok(catalog)
 }
 
 pub(crate) fn build_prompt_manifest(

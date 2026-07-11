@@ -12,7 +12,6 @@ pub type LlmEventStream = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> 
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LlmRequest {
-    #[serde(default = "protocol_version")]
     pub protocol_version: String,
     pub provider: String,
     pub model: String,
@@ -27,6 +26,19 @@ pub struct LlmRequest {
     pub response_format: Option<LlmResponseFormat>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+impl LlmRequest {
+    pub fn validate_protocol(&self) -> Result<(), LlmError> {
+        if self.protocol_version == PROTOCOL_VERSION {
+            Ok(())
+        } else {
+            Err(LlmError::validation(format!(
+                "protocol_version '{}' is not supported; expected '{PROTOCOL_VERSION}'",
+                self.protocol_version
+            )))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

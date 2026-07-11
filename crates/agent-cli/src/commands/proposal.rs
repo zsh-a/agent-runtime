@@ -64,7 +64,7 @@ pub(crate) enum ProposalCommand {
         decision: String,
         #[arg(long)]
         approval_level: Option<String>,
-        #[arg(long, alias = "actor")]
+        #[arg(long)]
         decided_by: Option<String>,
         #[arg(long)]
         comment: Option<String>,
@@ -77,18 +77,13 @@ pub(crate) enum ProposalCommand {
         catalog: Utf8PathBuf,
         #[arg(
             long = "tool-host",
-            visible_alias = "tool-cmd",
             num_args = 1..,
             value_name = "COMMAND"
         )]
         tool_host: Vec<String>,
-        #[arg(
-            long = "mock-tool",
-            visible_alias = "mock",
-            value_name = "NAME=JSON_OR_@PATH"
-        )]
+        #[arg(long = "mock-tool", value_name = "NAME=JSON_OR_@PATH")]
         mock_tool: Vec<String>,
-        #[arg(long = "tool-source", visible_alias = "tools", value_name = "PATH")]
+        #[arg(long = "tool-source", value_name = "PATH")]
         tool_source: Vec<Utf8PathBuf>,
     },
     Undo {
@@ -99,18 +94,13 @@ pub(crate) enum ProposalCommand {
         catalog: Utf8PathBuf,
         #[arg(
             long = "tool-host",
-            visible_alias = "tool-cmd",
             num_args = 1..,
             value_name = "COMMAND"
         )]
         tool_host: Vec<String>,
-        #[arg(
-            long = "mock-tool",
-            visible_alias = "mock",
-            value_name = "NAME=JSON_OR_@PATH"
-        )]
+        #[arg(long = "mock-tool", value_name = "NAME=JSON_OR_@PATH")]
         mock_tool: Vec<String>,
-        #[arg(long = "tool-source", visible_alias = "tools", value_name = "PATH")]
+        #[arg(long = "tool-source", value_name = "PATH")]
         tool_source: Vec<Utf8PathBuf>,
     },
 }

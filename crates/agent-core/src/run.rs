@@ -8,7 +8,6 @@ use crate::{AgentErrorRecord, PROTOCOL_VERSION, RunId, protocol_version, trace::
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AgentSpec {
-    #[serde(default = "protocol_version")]
     pub protocol_version: String,
     pub id: String,
     pub name: String,
@@ -72,7 +71,6 @@ pub struct TriggerEnvelope {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RunRequest {
-    #[serde(default = "protocol_version")]
     pub protocol_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
@@ -134,7 +132,6 @@ pub struct RunCompensation {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowRunRequest {
-    #[serde(default = "protocol_version")]
     pub protocol_version: String,
     pub workflow_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -455,4 +452,16 @@ fn format_rfc3339(value: OffsetDateTime) -> String {
     value
         .format(&Rfc3339)
         .unwrap_or_else(|_| value.unix_timestamp().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_request_requires_explicit_protocol_version() {
+        let error = serde_json::from_value::<RunRequest>(json!({"input": {}}))
+            .expect_err("missing protocol version is rejected");
+        assert!(error.to_string().contains("protocol_version"));
+    }
 }

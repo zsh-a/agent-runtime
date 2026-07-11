@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use agent_core::{AgentCancellation, AgentServices, CancellationFuture, CancellationSignal};
+use agent_core::{
+    AgentCancellation, AgentServices, CancellationFuture, CancellationSignal, PROTOCOL_VERSION,
+};
 use agent_llm::{LlmEventKind, LlmProvider, LlmResponse};
 use futures::stream;
 use serde_json::json;
@@ -75,6 +77,18 @@ async fn run_chat_turn(
     sender: mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
     cancellation: CancellationToken,
 ) {
+    if request.protocol_version != PROTOCOL_VERSION {
+        send_error(
+            &sender,
+            0,
+            ChatError::validation(format!(
+                "protocol_version '{}' is not supported; expected '{PROTOCOL_VERSION}'",
+                request.protocol_version
+            )),
+        )
+        .await;
+        return;
+    }
     let turn_timer = std::time::Instant::now();
     info!(
         turn_id = request.turn_id.as_deref().unwrap_or("none"),
@@ -128,6 +142,19 @@ async fn run_chat_resume(
     sender: mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
     cancellation: CancellationToken,
 ) {
+    if request.protocol_version != PROTOCOL_VERSION
+        || request.state.protocol_version != PROTOCOL_VERSION
+    {
+        send_error(
+            &sender,
+            request.state.round,
+            ChatError::validation(format!(
+                "chat resume protocol versions must be '{PROTOCOL_VERSION}'"
+            )),
+        )
+        .await;
+        return;
+    }
     let turn_timer = std::time::Instant::now();
     let pending_calls = request.state.pending_tool_calls.clone();
     let previous_round = request.state.round;

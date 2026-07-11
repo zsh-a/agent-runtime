@@ -977,7 +977,8 @@ fn replay_can_execute_from_trace() {
         .args([
             "replay",
             trace_path.to_str().expect("utf8 trace path"),
-            "--execute",
+            "--mode",
+            "live",
             "--catalog",
             "../../fixtures/contracts/catalog.valid.json",
             "--store",
@@ -1457,7 +1458,7 @@ fn inspect_and_debug_bundle_export_use_file_store() {
     let replay_config = read_json(bundle.join("replay_config.json"));
     assert_eq!(replay_config["run_id"], run_id);
     assert_eq!(replay_config["agent_id"], "ai_chat");
-    assert_eq!(replay_config["replay_mode"], "trace_execute");
+    assert_eq!(replay_config["replay_mode"], "live");
     assert_eq!(replay_config["assets"]["trace"], "trace.json");
     assert_eq!(replay_config["assets"]["events"], "events.jsonl");
     assert_eq!(replay_config["assets"]["tool_calls"], "tool_calls.jsonl");
@@ -1808,7 +1809,7 @@ fn catalog_dry_run_can_call_process_tool_host() {
             input_path.to_str().expect("utf8 input path"),
             "--trace-out",
             trace_path.to_str().expect("utf8 trace path"),
-            "--tool-cmd",
+            "--tool-host",
             agent_bin.to_str().expect("utf8 agent bin"),
             "dev-tool-host",
             "--store",
@@ -2144,7 +2145,7 @@ fn catalog_dry_run_can_call_mock_tool_from_file() {
             "../../fixtures/contracts/catalog.valid.json",
             "--input",
             input_path.to_str().expect("utf8 input path"),
-            "--mock",
+            "--mock-tool",
             &format!(
                 "propose_fake=@{}",
                 mock_path.to_str().expect("utf8 mock path")
@@ -2287,7 +2288,7 @@ fn tool_cli_lists_and_calls_tool_source_manifest() {
         .args([
             "tool",
             "list",
-            "--tools",
+            "--tool-source",
             source_path.to_str().expect("utf8 source path"),
         ])
         .assert()
@@ -2577,7 +2578,7 @@ fn tui_once_renders_catalog_and_trace_snapshot() {
             "../../fixtures/contracts/catalog.valid.json",
             "--trace",
             "../../fixtures/contracts/trace.valid.json",
-            "--tools",
+            "--tool-source",
             "../../fixtures/contracts/tool-source.example.json",
             "--once",
         ])
@@ -4838,7 +4839,7 @@ fn proposal_cli_requires_sufficient_approval_level() {
             "approve",
             "--approval-level",
             "admin",
-            "--actor",
+            "--decided-by",
             "user_admin_reviewer",
         ])
         .assert()
@@ -4904,7 +4905,7 @@ fn proposal_cli_accumulates_multi_approver_decisions() {
             "approve",
             "--approval-level",
             "single_user",
-            "--actor",
+            "--decided-by",
             "user_reviewer_one",
         ])
         .assert()
@@ -4933,7 +4934,7 @@ fn proposal_cli_accumulates_multi_approver_decisions() {
             "approve",
             "--approval-level",
             "single_user",
-            "--actor",
+            "--decided-by",
             "user_reviewer_one",
         ])
         .assert()
@@ -4956,7 +4957,7 @@ fn proposal_cli_accumulates_multi_approver_decisions() {
             "approve",
             "--approval-level",
             "single_user",
-            "--actor",
+            "--decided-by",
             "user_reviewer_two",
         ])
         .assert()

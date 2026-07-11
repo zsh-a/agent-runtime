@@ -20,7 +20,7 @@
     "runtime_version": { "type": "string", "minLength": 1 },
     "run_id": { "type": "string", "pattern": "^run_" },
     "agent_id": { "type": "string", "minLength": 1 },
-    "replay_mode": { "const": "trace_execute" },
+    "replay_mode": { "const": "live" },
     "source_store": { "type": "string", "minLength": 1 },
     "source_trace": { "type": "string", "minLength": 1 },
     "catalog": { "type": "string", "minLength": 1 },

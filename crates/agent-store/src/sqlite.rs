@@ -20,7 +20,7 @@ struct SqliteMigration {
     statements: &'static [&'static str],
 }
 
-const CURRENT_SCHEMA_STATEMENTS: &[&str] = &[
+const V2_SCHEMA_STATEMENTS: &[&str] = &[
     r#"
     CREATE TABLE IF NOT EXISTS agent_runs (
         run_id TEXT PRIMARY KEY NOT NULL,
@@ -116,8 +116,8 @@ const CURRENT_SCHEMA_STATEMENTS: &[&str] = &[
 const SQLITE_MIGRATIONS: &[SqliteMigration] = &[
     SqliteMigration {
         version: 2,
-        name: "current_schema",
-        statements: CURRENT_SCHEMA_STATEMENTS,
+        name: "initial_schema",
+        statements: V2_SCHEMA_STATEMENTS,
     },
     SqliteMigration {
         version: 3,
@@ -193,6 +193,32 @@ const SQLITE_MIGRATIONS: &[SqliteMigration] = &[
             ON agent_runs(agent_id, scope_type, scope_id, json_extract(record_json, '$.idempotency_key'))
             WHERE json_extract(record_json, '$.idempotency_key') IS NOT NULL
         "#],
+    },
+    SqliteMigration {
+        version: 8,
+        name: "remove_unscoped_state",
+        statements: &[
+            r#"
+            CREATE TABLE IF NOT EXISTS agent_state (
+                agent_id TEXT NOT NULL,
+                state_key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                PRIMARY KEY(agent_id, state_key)
+            )
+            "#,
+            r#"
+            INSERT OR IGNORE INTO agent_state_scoped(
+                agent_id,
+                scope_type,
+                scope_id,
+                state_key,
+                value_json
+            )
+            SELECT agent_id, 'global', '', state_key, value_json
+            FROM agent_state
+            "#,
+            "DROP TABLE agent_state",
+        ],
     },
 ];
 

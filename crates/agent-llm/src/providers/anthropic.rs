@@ -561,6 +561,7 @@ impl AnthropicSseState {
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        request.validate_protocol()?;
         if request.messages.is_empty() {
             return Err(LlmError::validation(
                 "llm request requires at least one message",
@@ -712,6 +713,7 @@ impl LlmProvider for AnthropicProvider {
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmEventStream, LlmError> {
+        request.validate_protocol()?;
         if request.messages.is_empty() {
             return Err(LlmError::validation(
                 "llm request requires at least one message",

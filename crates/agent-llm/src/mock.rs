@@ -74,6 +74,7 @@ impl MockLlmProvider {
 #[async_trait]
 impl LlmProvider for MockLlmProvider {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        request.validate_protocol()?;
         debug!(
             provider = %self.provider,
             model = %request.model,
@@ -91,6 +92,7 @@ impl LlmProvider for MockLlmProvider {
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmEventStream, LlmError> {
+        request.validate_protocol()?;
         debug!(
             provider = %self.provider,
             model = %request.model,

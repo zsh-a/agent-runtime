@@ -44,6 +44,17 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn chat_request_requires_explicit_protocol_version() {
+        let error = serde_json::from_value::<ChatTurnRequest>(json!({
+            "provider": "mock",
+            "model": "mock-model",
+            "messages": []
+        }))
+        .expect_err("missing protocol version is rejected");
+        assert!(error.to_string().contains("protocol_version"));
+    }
+
     #[tokio::test]
     async fn mock_chat_turn_streams_text_and_done() {
         let runner = ChatTurnRunner::new(

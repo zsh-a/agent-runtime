@@ -175,7 +175,7 @@ rtk cargo run -p agent-cli -- list
 rtk cargo run -p agent-cli -- run echo_agent --input examples/fixtures/echo-input.json
 rtk cargo run -p agent-cli -- tui
 rtk cargo run -p agent-cli -- serve --catalog fixtures/contracts/catalog.valid.json
-curl -N -X POST http://127.0.0.1:8765/chat/turn -H 'content-type: application/json' -d '{"provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}]}'
+curl -N -X POST http://127.0.0.1:8765/chat/turn -H 'content-type: application/json' -d '{"protocol_version":"agent.v1","provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}]}'
 rtk cargo run -p agent-cli -- validate schemas/run-request.schema.json fixtures/contracts/run-request.valid.json
 ```
 
@@ -348,5 +348,4 @@ These are intentional or pending differences from the long-term design:
   that intent into their local cancellation token. Full pause/resume and
   terminal redraw/cancel remain future work.
 
-When code and older handoff notes disagree, use this document and current tests
-as authority.
+Use this document and the current test suite as the implementation authority.

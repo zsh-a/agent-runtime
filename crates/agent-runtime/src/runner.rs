@@ -183,6 +183,8 @@ impl AgentRunner {
         &self,
         request: WorkflowRunRequest,
     ) -> Result<WorkflowRunResult, AgentError> {
+        agent_core::validate_protocol_version(&request.protocol_version)
+            .map_err(AgentError::validation)?;
         let started_at = OffsetDateTime::now_utc();
         let order = workflow_execution_order(&request.nodes)?;
         let scope = workflow_request_scope(&request)?;
@@ -589,6 +591,8 @@ impl AgentRunner {
         request: RunRequest,
         control: RunControl,
     ) -> Result<RunOutcome, AgentError> {
+        agent_core::validate_protocol_version(&request.protocol_version)
+            .map_err(AgentError::validation)?;
         let run_timer = std::time::Instant::now();
         let _permit = if self.is_nested {
             self.subagent_concurrency
@@ -609,6 +613,8 @@ impl AgentRunner {
             .await?
             .ok_or_else(|| AgentError::validation(format!("unknown agent '{agent_id}'")))?;
         let spec = agent.spec();
+        agent_core::validate_protocol_version(&spec.protocol_version)
+            .map_err(AgentError::validation)?;
         let run_id = request.run_id.clone().unwrap_or_else(RunId::new_v7);
         let started_at = OffsetDateTime::now_utc();
         let scope = request_scope(&request)?;

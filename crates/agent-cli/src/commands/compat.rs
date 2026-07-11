@@ -23,7 +23,7 @@ pub(crate) enum CompatCommand {
     Check {
         #[arg(long)]
         catalog: Utf8PathBuf,
-        #[arg(long = "tool-source", visible_alias = "tools", value_name = "PATH")]
+        #[arg(long = "tool-source", value_name = "PATH")]
         tool_source: Vec<Utf8PathBuf>,
         #[arg(long)]
         agent_id: String,

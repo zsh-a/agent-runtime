@@ -2,10 +2,7 @@
 
 > Current implementation note: this document describes the long-term design
 > direction. For the current code map, maintenance routing, and known design
-> drift, start with
-> [`current.md`](current.md), then use
-> [`../legacy/mvp.md`](../legacy/mvp.md) for implemented
-> feature status.
+> drift, use [`current.md`](current.md) as the implementation authority.
 
 ## 1. 背景与目标
 

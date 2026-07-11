@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::{AgentSpec, ProposalKindSpec, catalog_version, protocol_version};
+use crate::{
+    AgentSpec, ProposalKindSpec, protocol_version, validate_catalog_version,
+    validate_protocol_version,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ToolSpec {
@@ -28,9 +31,7 @@ pub enum ToolRisk {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AgentRuntimeCatalog {
-    #[serde(default = "protocol_version")]
     pub protocol_version: String,
-    #[serde(default = "catalog_version")]
     pub catalog_version: String,
     #[schemars(with = "String")]
     #[serde(with = "time::serde::rfc3339")]
@@ -45,6 +46,17 @@ pub struct AgentRuntimeCatalog {
     pub proposal_kinds: Vec<ProposalKindSpec>,
     #[serde(default)]
     pub prompt_blocks: Vec<PromptBlockSpec>,
+}
+
+impl AgentRuntimeCatalog {
+    pub fn validate_versions(&self) -> Result<(), String> {
+        validate_protocol_version(&self.protocol_version)?;
+        validate_catalog_version(&self.catalog_version)?;
+        for agent in &self.agents {
+            validate_protocol_version(&agent.protocol_version)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -81,4 +93,25 @@ pub struct PromptManifestBlock {
     pub source: String,
     pub content_hash: String,
     pub text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn catalog_requires_explicit_protocol_versions() {
+        let error = serde_json::from_value::<AgentRuntimeCatalog>(json!({
+            "catalog_version": "agent_catalog.v1",
+            "generated_at": "2026-01-01T00:00:00Z",
+            "active_domains": [],
+            "agents": [],
+            "tools": [],
+            "proposal_kinds": [],
+            "prompt_blocks": []
+        }))
+        .expect_err("missing protocol version is rejected");
+        assert!(error.to_string().contains("protocol_version"));
+    }
 }

@@ -36,8 +36,7 @@ cargo run -p agent-cli -- run echo_agent --input examples/fixtures/echo-input.js
 cargo run -p agent-cli -- validate schemas/run-request.schema.json fixtures/contracts/run-request.valid.json
 cargo run -p agent-cli -- eval evals --store /private/tmp/agent-runtime-eval-store
 cargo run -p agent-cli -- serve --catalog fixtures/contracts/catalog.valid.json --store /private/tmp/agent-runtime-http-store
-curl -N -X POST http://127.0.0.1:8765/chat/turn -H 'content-type: application/json' -d '{"provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}]}'
+curl -N -X POST http://127.0.0.1:8765/chat/turn -H 'content-type: application/json' -d '{"protocol_version":"agent.v1","provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}]}'
 ```
 
-Current architecture notes live under `docs/architecture/`. Historical
-integration notes live under `docs/legacy/`.
+Current architecture and maintenance notes live under `docs/architecture/`.

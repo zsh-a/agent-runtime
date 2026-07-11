@@ -13,7 +13,6 @@ pub type ChatEventStream = Pin<Box<dyn Stream<Item = Result<ChatTurnEvent, ChatE
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ChatTurnRequest {
-    #[serde(default = "protocol_version")]
     pub protocol_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
@@ -117,7 +116,6 @@ pub enum ChatToolExecution {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ChatResumeRequest {
-    #[serde(default = "protocol_version")]
     pub protocol_version: String,
     pub state: ChatTurnState,
     #[serde(default)]
