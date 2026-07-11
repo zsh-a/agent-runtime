@@ -287,7 +287,7 @@ impl ToolSourceExecutionPolicy {
 
 fn tool_timeout_error(name: &str, timeout_duration: Duration) -> ToolError {
     ToolError {
-        record: AgentErrorRecord {
+        record: Box::new(AgentErrorRecord {
             kind: AgentErrorKind::Timeout,
             code: "tool_source_timeout".to_owned(),
             message: format!(
@@ -299,7 +299,7 @@ fn tool_timeout_error(name: &str, timeout_duration: Duration) -> ToolError {
                 "tool_name": name,
                 "timeout_ms": timeout_duration.as_millis(),
             }),
-        },
+        }),
     }
 }
 

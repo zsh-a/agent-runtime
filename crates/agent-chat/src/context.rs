@@ -1,6 +1,6 @@
 use agent_core::{
     CompactionRecord, ContextBlock, ContextBlockKind, ContextPolicy, ContextSnapshot,
-    PROTOCOL_VERSION, ToolSpec,
+    ContextSnapshotInput, PROTOCOL_VERSION, ToolSpec,
 };
 use agent_llm::{LlmMessage, LlmRequest, LlmRole};
 use serde_json::{Value, json};
@@ -34,27 +34,27 @@ pub(crate) fn prepare_llm_request(state: &mut ChatTurnState) -> Result<PreparedC
     let blocks = context_blocks(&messages, &state.tools);
     let token_estimate = total_tokens(&blocks);
     let content_hash = blocks_hash(&blocks);
-    let snapshot = ContextSnapshot::new(
-        format!(
+    let snapshot = ContextSnapshot::new(ContextSnapshotInput {
+        snapshot_id: format!(
             "ctx_{}",
             content_hash
                 .strip_prefix("blake3:")
                 .unwrap_or(&content_hash)
         ),
-        content_hash.clone(),
+        content_hash: content_hash.clone(),
         token_estimate,
-        budget,
+        max_input_tokens: budget,
         omitted_block_count,
-        omitted_block_count > 0,
+        compacted: omitted_block_count > 0,
         blocks,
-        json!({
+        metadata: json!({
             "turn_id": state.turn_id,
             "session_id": state.session_id,
             "thread_id": state.thread_id,
             "agent_id": state.agent_id,
             "round": state.round,
         }),
-    );
+    });
     let compaction = summary.map(|summary| CompactionRecord {
         protocol_version: PROTOCOL_VERSION.to_owned(),
         before_snapshot_hash: before_hash,

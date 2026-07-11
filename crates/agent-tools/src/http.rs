@@ -185,6 +185,17 @@ pub(crate) fn validate_http_tool_endpoint(source_id: &str, endpoint: &str) -> Re
     }
 }
 
+fn truncate_for_log(value: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,16 +228,5 @@ mod tests {
                 .to_string()
                 .contains("references missing environment variable 'MISSING_TOKEN'")
         );
-    }
-}
-
-fn truncate_for_log(value: &str) -> String {
-    const MAX_CHARS: usize = 500;
-    let mut chars = value.chars();
-    let truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
     }
 }

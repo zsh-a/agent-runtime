@@ -115,17 +115,14 @@ impl EffectStepLoop {
                     )?
                 }
                 None => {
-                    let effect_result_count = effect_results.len();
                     let effect_results_json = EffectResultRecord::to_values(&effect_results);
                     terminal_completed_step(
                         &agent.id,
                         &agent.version,
                         run_id,
                         next_step_index,
-                        previous_kind,
                         effect_call,
                         effect_response,
-                        effect_result_count,
                         effect_results_json,
                     )
                 }
@@ -172,7 +169,7 @@ impl RunEffectKind {
 #[derive(Debug, Clone)]
 enum RequestedEffect {
     Tool(RequestedToolEffect),
-    Subagent(RequestedSubagentEffect),
+    Subagent(Box<RequestedSubagentEffect>),
 }
 
 #[derive(Debug, Clone)]
@@ -489,9 +486,9 @@ fn parse_requested_effect(value: &Value, label: &str) -> Result<RequestedEffect,
         .ok_or_else(|| validation(format!("{label} must be an object")))?;
     match object.get("kind").and_then(Value::as_str) {
         Some("tool") => parse_requested_tool_effect(value, label).map(RequestedEffect::Tool),
-        Some("subagent") => {
-            parse_requested_subagent_effect(value, label).map(RequestedEffect::Subagent)
-        }
+        Some("subagent") => parse_requested_subagent_effect(value, label)
+            .map(Box::new)
+            .map(RequestedEffect::Subagent),
         Some(kind) => Err(validation(format!(
             "{label}.kind '{kind}' is not supported"
         ))),
@@ -600,6 +597,7 @@ fn build_effect_call(
             }))
         }
         RequestedEffect::Subagent(subagent_effect) => {
+            let subagent_effect = *subagent_effect;
             catalog_agent(catalog, &subagent_effect.agent_id)?;
             let mut call = json!({
                 "effect_id": EffectId::new_v7(),
@@ -628,14 +626,11 @@ fn terminal_completed_step(
     agent_version: &str,
     run_id: Value,
     step_index: u64,
-    previous_kind: RunEffectKind,
     effect_call: Value,
     effect_response: Value,
-    effect_result_count: usize,
     effect_results: Vec<Value>,
 ) -> Value {
-    let _ = previous_kind;
-    let mode = if effect_result_count > 1 {
+    let mode = if effect_results.len() > 1 {
         "frb_effect_loop"
     } else {
         "frb_effect_step"

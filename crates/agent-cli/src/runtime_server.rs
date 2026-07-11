@@ -203,17 +203,29 @@ fn merge_run_metadata(metadata: Value, session_id: Option<&str>, thread_id: Opti
     metadata
 }
 
+pub(crate) struct RuntimeServerOptions {
+    pub(crate) sources: ResolvedRuntimeSources,
+    pub(crate) store_path: Utf8PathBuf,
+    pub(crate) store_backend: RuntimeStoreBackend,
+    pub(crate) tool_overrides: ToolOverrides,
+    pub(crate) hooks: HookManager,
+    pub(crate) context_policy: ContextPolicy,
+    pub(crate) default_agent: Option<String>,
+    pub(crate) chat: ChatLlmOptions,
+}
+
 impl RuntimeServer {
-    pub(crate) async fn new(
-        sources: ResolvedRuntimeSources,
-        store_path: Utf8PathBuf,
-        store_backend: RuntimeStoreBackend,
-        mut tool_overrides: ToolOverrides,
-        hooks: HookManager,
-        context_policy: ContextPolicy,
-        default_agent: Option<String>,
-        chat: ChatLlmOptions,
-    ) -> Result<Self> {
+    pub(crate) async fn new(options: RuntimeServerOptions) -> Result<Self> {
+        let RuntimeServerOptions {
+            sources,
+            store_path,
+            store_backend,
+            mut tool_overrides,
+            hooks,
+            context_policy,
+            default_agent,
+            chat,
+        } = options;
         info!(
             registry = %sources.registry,
             catalog = sources.catalog.as_ref().map(|path| path.as_str()).unwrap_or("none"),
@@ -431,10 +443,11 @@ impl RuntimeServer {
             input_bytes = serialized_value_len(&input),
             "server run_agent requested",
         );
-        let mut control = RunControl::default();
-        control.cancellation = cancellation;
-        control.trace_events = Some(events);
-        control.trace_event_buffer = Some(event_buffer);
+        let control = RunControl {
+            cancellation,
+            trace_events: Some(events),
+            trace_event_buffer: Some(event_buffer),
+        };
         let outcome = self
             .runner
             .run_once_with_control(
@@ -1086,15 +1099,15 @@ mod tests {
         let store = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("utf8 store");
         let registry = Utf8PathBuf::from("../../examples/agents.yaml");
         let catalog = Utf8PathBuf::from("../../fixtures/contracts/catalog.valid.json");
-        let server = RuntimeServer::new(
-            ResolvedRuntimeSources::new(registry, Some(catalog)),
-            store,
-            RuntimeStoreBackend::File,
-            ToolOverrides::default(),
-            HookManager::default(),
-            ContextPolicy::default(),
-            None,
-            ChatLlmOptions {
+        let server = RuntimeServer::new(RuntimeServerOptions {
+            sources: ResolvedRuntimeSources::new(registry, Some(catalog)),
+            store_path: store,
+            store_backend: RuntimeStoreBackend::File,
+            tool_overrides: ToolOverrides::default(),
+            hooks: HookManager::default(),
+            context_policy: ContextPolicy::default(),
+            default_agent: None,
+            chat: ChatLlmOptions {
                 provider: "mock".to_owned(),
                 model: "mock-model".to_owned(),
                 mock_response: "unused".to_owned(),
@@ -1105,7 +1118,7 @@ mod tests {
                 max_output_tokens: None,
                 max_tool_rounds: 4,
             },
-        )
+        })
         .await
         .expect("server initializes");
 

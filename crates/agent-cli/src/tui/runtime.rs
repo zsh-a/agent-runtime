@@ -103,8 +103,10 @@ impl TuiRuntime {
         input: Value,
         input_mode: &str,
     ) -> Result<RunOutcome> {
-        let mut control = RunControl::default();
-        control.cancellation = self.inner.cancellation.clone();
+        let control = RunControl {
+            cancellation: self.inner.cancellation.clone(),
+            ..RunControl::default()
+        };
         let outcome = self
             .inner
             .runner

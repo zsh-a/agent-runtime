@@ -44,7 +44,7 @@ use commands::workflow::{
     run_workflow_request,
 };
 use config::{RuntimeStoreBackend, load_agent_config};
-use debug_bundle::export_debug_bundle;
+use debug_bundle::{DebugBundleOptions, export_debug_bundle};
 use dev_stdio::{run_dev_mcp_server, run_dev_tool_host};
 use eval::{create_eval_from_run, run_dev_score_hook, run_eval_path};
 use metrics::build_metrics_summary;
@@ -53,7 +53,7 @@ use replay::{ReplayMode, ReplayTraceOptions, replay_trace};
 use runtime_config::{
     ResolvedRuntimeSources, RuntimeSourceOptions, RuntimeSources, compose_runtime_sources,
 };
-use runtime_server::RuntimeServer;
+use runtime_server::{RuntimeServer, RuntimeServerOptions};
 use runtime_stores::RuntimeStores;
 use server::{serve_http, serve_stdio};
 use shell_tool_host::run_shell_tool_host;
@@ -108,7 +108,7 @@ impl AppContext {
         catalog: Option<Utf8PathBuf>,
     ) -> ResolvedRuntimeSources {
         let mut sources = self.config.runtime.sources.clone();
-        if registry != Utf8PathBuf::from(DEFAULT_REGISTRY) || sources.registry.is_none() {
+        if registry != DEFAULT_REGISTRY || sources.registry.is_none() {
             sources.registry = Some(registry);
         }
         if catalog.is_some() {
@@ -151,7 +151,7 @@ impl AppContext {
     }
 
     fn eval_store(&self, value: Utf8PathBuf) -> Utf8PathBuf {
-        if value == Utf8PathBuf::from(DEFAULT_EVAL_STORE) {
+        if value == DEFAULT_EVAL_STORE {
             self.config
                 .runtime
                 .eval_store
@@ -810,17 +810,17 @@ async fn main() -> Result<()> {
                 materialize_artifacts,
                 artifact_resolver,
             } => {
-                export_debug_bundle(
+                export_debug_bundle(DebugBundleOptions {
                     run_id,
-                    context.store(store),
-                    context.store_backend(),
+                    store_path: context.store(store),
+                    store_backend: context.store_backend(),
                     out,
-                    catalog,
-                    trace,
+                    catalog_path: catalog,
+                    trace_path: trace,
                     timeout_seconds,
                     materialize_artifacts,
-                    artifact_resolver,
-                )
+                    artifact_resolver_path: artifact_resolver,
+                })
                 .await?;
             }
         },
@@ -1022,16 +1022,16 @@ async fn main() -> Result<()> {
             let host = context.host(host);
             let port = context.port(port);
             let hooks = context.hooks()?;
-            let server = RuntimeServer::new(
+            let server = RuntimeServer::new(RuntimeServerOptions {
                 sources,
-                store,
-                context.store_backend(),
-                context.tools(tools).load().await?,
+                store_path: store,
+                store_backend: context.store_backend(),
+                tool_overrides: context.tools(tools).load().await?,
                 hooks,
-                context.context_policy(),
-                context.default_agent(),
-                context.chat(chat),
-            )
+                context_policy: context.context_policy(),
+                default_agent: context.default_agent(),
+                chat: context.chat(chat),
+            })
             .await?;
             if stdio {
                 serve_stdio(server).await?;
@@ -1168,9 +1168,8 @@ fn init_logging(mode: LogMode) {
 }
 
 fn log_filter() -> tracing_subscriber::EnvFilter {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
-    filter
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER))
 }
 
 fn open_log_file(path: &Utf8PathBuf) -> Option<fs::File> {

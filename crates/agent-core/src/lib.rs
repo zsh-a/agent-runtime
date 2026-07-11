@@ -15,6 +15,7 @@ pub use catalog::{
 };
 pub use context::{
     CompactionRecord, ContextBlock, ContextBlockKind, ContextPolicy, ContextSnapshot,
+    ContextSnapshotInput,
 };
 pub use errors::{AgentError, AgentErrorKind, AgentErrorRecord, StoreError, ToolError};
 pub use hooks::{HookEffect, HookSpec, PolicyDecision, PolicyDecisionKind};

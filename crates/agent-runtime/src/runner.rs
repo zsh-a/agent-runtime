@@ -70,6 +70,18 @@ impl Default for RunControl {
     }
 }
 
+#[derive(Clone)]
+struct RunExecution {
+    agent: Arc<dyn Agent>,
+    spec: AgentSpec,
+    run_id: RunId,
+    started_at: OffsetDateTime,
+    request: RunRequest,
+    scope: RunScope,
+    trace: Arc<MemoryTraceSink>,
+    cancellation: CancellationToken,
+}
+
 pub struct AgentRunner {
     registry: Arc<dyn AgentRegistry>,
     run_store: Arc<dyn AgentRunStore>,
@@ -402,7 +414,7 @@ impl AgentRunner {
                     run_id,
                     depends_on: node.depends_on.clone(),
                     output: json!({}),
-                    error: Some(error.record),
+                    error: Some(*error.record),
                     trace: None,
                     compensation: None,
                     metadata: json!({
@@ -464,7 +476,7 @@ impl AgentRunner {
                 run_id,
                 depends_on: node.depends_on.clone(),
                 output: json!({}),
-                error: Some(error.record),
+                error: Some(*error.record),
                 trace: None,
                 compensation: None,
                 metadata: json!({}),
@@ -578,7 +590,7 @@ impl AgentRunner {
                 status: AgentRunStatus::Failed,
                 run_id: Some(run_id),
                 output: json!({}),
-                error: Some(error.record),
+                error: Some(*error.record),
                 trace: None,
                 metadata: json!({}),
             },
@@ -838,16 +850,16 @@ impl AgentRunner {
                 .await?;
 
             let result = self
-                .run_with_retries(
+                .run_with_retries(RunExecution {
                     agent,
-                    &spec,
-                    run_id.clone(),
+                    spec: spec.clone(),
+                    run_id: run_id.clone(),
                     started_at,
-                    request.clone(),
-                    scope.clone(),
-                    trace.clone(),
-                    control.cancellation.clone(),
-                )
+                    request: request.clone(),
+                    scope: scope.clone(),
+                    trace: trace.clone(),
+                    cancellation: control.cancellation.clone(),
+                })
                 .await;
             cancellation_watcher.abort();
             let mut result = result?;
@@ -961,7 +973,7 @@ impl AgentRunner {
                     Ok(Some(mut record)) if record.status == AgentRunStatus::Running => {
                         record.status = AgentRunStatus::Failed;
                         record.finished_at = Some(OffsetDateTime::now_utc());
-                        record.error = Some(run_error.record.clone());
+                        record.error = Some((*run_error.record).clone());
                         if let Err(store_error) = self.run_store.update_run(record).await {
                             error!(
                                 run_id = %run_id.0,
@@ -1009,15 +1021,19 @@ impl AgentRunner {
 
     async fn run_with_retries(
         &self,
-        agent: Arc<dyn Agent>,
-        spec: &AgentSpec,
-        run_id: RunId,
-        started_at: OffsetDateTime,
-        request: RunRequest,
-        scope: RunScope,
-        trace: Arc<MemoryTraceSink>,
-        cancellation: CancellationToken,
+        execution: RunExecution,
     ) -> Result<AgentRunResult, AgentError> {
+        let step_execution = execution.clone();
+        let RunExecution {
+            agent: _,
+            spec,
+            run_id,
+            started_at,
+            request,
+            scope: _,
+            trace,
+            cancellation,
+        } = execution;
         let max_attempts = self.policy.max_retries.saturating_add(1);
         let trace_attempts = self.policy.max_retries > 0;
         let mut attempt = 1_u32;
@@ -1139,19 +1155,8 @@ impl AgentRunner {
                     )
                     .await?;
 
-                self.execute_agent_step(
-                    agent.clone(),
-                    spec,
-                    &run_id,
-                    started_at,
-                    &request,
-                    &scope,
-                    trace.clone(),
-                    cancellation.clone(),
-                    attempt,
-                    attempt_timer,
-                )
-                .await?
+                self.execute_agent_step(&step_execution, attempt, attempt_timer)
+                    .await?
             };
             let retryable = result_is_retryable(&result);
             debug!(
@@ -1265,20 +1270,23 @@ impl AgentRunner {
 
     async fn execute_agent_step(
         &self,
-        agent: Arc<dyn Agent>,
-        spec: &AgentSpec,
-        run_id: &RunId,
-        started_at: OffsetDateTime,
-        request: &RunRequest,
-        scope: &RunScope,
-        trace: Arc<MemoryTraceSink>,
-        cancellation: CancellationToken,
+        execution: &RunExecution,
         attempt: u32,
         attempt_timer: std::time::Instant,
     ) -> Result<AgentRunResult, AgentError> {
+        let RunExecution {
+            agent,
+            spec,
+            run_id,
+            started_at,
+            request,
+            scope,
+            trace,
+            cancellation,
+        } = execution;
         let ctx = AgentContext {
             run_id: run_id.clone(),
-            now: started_at,
+            now: *started_at,
             user: request.user.clone(),
             scope: scope.clone(),
             input: request.input.clone(),
@@ -1325,7 +1333,7 @@ impl AgentRunner {
                 failure_result(
                     run_id.clone(),
                     &spec.id,
-                    started_at,
+                    *started_at,
                     AgentError::cancelled("agent run cancelled"),
                 )
             }
@@ -1357,7 +1365,7 @@ impl AgentRunner {
                         )
                         .await?;
                     }
-                    failure_result(run_id.clone(), &spec.id, started_at, err)
+                    failure_result(run_id.clone(), &spec.id, *started_at, err)
                 }
                 Err(_) => {
                     warn!(
@@ -1371,7 +1379,7 @@ impl AgentRunner {
                     failure_result(
                         run_id.clone(),
                         &spec.id,
-                        started_at,
+                        *started_at,
                         AgentError::timeout(self.policy.timeout),
                     )
                 }
@@ -2707,7 +2715,7 @@ fn failure_result(
         finished_at: OffsetDateTime::now_utc(),
         summary: Some(err.record.message.clone()),
         output: json!({}),
-        error: Some(err.record),
+        error: Some(*err.record),
         workflow: None,
     }
 }

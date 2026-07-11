@@ -48,13 +48,13 @@ impl ChatError {
 impl From<ChatError> for agent_core::AgentError {
     fn from(error: ChatError) -> Self {
         agent_core::AgentError {
-            record: AgentErrorRecord {
+            record: Box::new(AgentErrorRecord {
                 kind: AgentErrorKind::LlmError,
                 code: error.record.code,
                 message: error.record.message,
                 retryable: error.record.retryable,
                 details: error.record.details,
-            },
+            }),
         }
     }
 }

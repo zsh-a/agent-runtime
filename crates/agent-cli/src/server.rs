@@ -149,7 +149,7 @@ async fn http_chat_turn(State(server): State<RuntimeServer>, body: Bytes) -> Res
         "chat-turn-request",
     ) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match server.stream_chat_turn(request).await {
@@ -165,7 +165,7 @@ async fn http_chat_resume(State(server): State<RuntimeServer>, body: Bytes) -> R
         "chat-resume-request",
     ) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match server.stream_chat_resume(request).await {
@@ -205,7 +205,7 @@ async fn http_agent_run(
         "http-agent-run-request",
     ) {
         Ok(params) => params,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match server.run_agent(agent_id, params).await {
@@ -221,7 +221,7 @@ async fn http_workflow_run(State(server): State<RuntimeServer>, body: Bytes) -> 
         "workflow-run-request",
     ) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match server.run_workflow(request).await {
@@ -273,7 +273,7 @@ async fn http_run_events(
     let run_id = RunId(run_id);
     let after = match run_event_cursor_from_request(&params, &headers) {
         Ok(after) => after,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let follow = params.follow.unwrap_or(true);
     if let Some(active_events) = server.subscribe_run_events(&run_id).await {
@@ -542,7 +542,7 @@ fn chat_error_event(error: ChatError) -> ChatTurnEvent {
 fn run_event_cursor_from_request(
     params: &RunEventsQuery,
     headers: &HeaderMap,
-) -> std::result::Result<RunEventCursor, Response> {
+) -> std::result::Result<RunEventCursor, Box<Response>> {
     if let Some(after) = params.after.as_deref() {
         return parse_run_event_cursor(after, "after");
     }
@@ -550,11 +550,11 @@ fn run_event_cursor_from_request(
         return Ok(0);
     };
     let last_event_id = last_event_id.to_str().map_err(|err| {
-        http_error(
+        Box::new(http_error(
             StatusCode::BAD_REQUEST,
             "invalid_event_cursor",
             format!("Last-Event-ID must be valid UTF-8: {err}"),
-        )
+        ))
     })?;
     parse_run_event_cursor(last_event_id, "Last-Event-ID")
 }
@@ -562,21 +562,21 @@ fn run_event_cursor_from_request(
 fn parse_run_event_cursor(
     value: &str,
     label: &str,
-) -> std::result::Result<RunEventCursor, Response> {
+) -> std::result::Result<RunEventCursor, Box<Response>> {
     let value = value.trim();
     if value.is_empty() {
-        return Err(http_error(
+        return Err(Box::new(http_error(
             StatusCode::BAD_REQUEST,
             "invalid_event_cursor",
             format!("{label} cursor cannot be empty"),
-        ));
+        )));
     }
     value.parse::<RunEventCursor>().map_err(|err| {
-        http_error(
+        Box::new(http_error(
             StatusCode::BAD_REQUEST,
             "invalid_event_cursor",
             format!("{label} cursor must be a non-negative integer: {err}"),
-        )
+        ))
     })
 }
 
@@ -649,7 +649,7 @@ fn decode_schema_json<T: DeserializeOwned>(
     body: &Bytes,
     schema_json: &str,
     schema_name: &str,
-) -> std::result::Result<T, Response> {
+) -> std::result::Result<T, Box<Response>> {
     let body = if body.is_empty() {
         b"{}"
     } else {
@@ -658,31 +658,31 @@ fn decode_schema_json<T: DeserializeOwned>(
     let value = match serde_json::from_slice::<Value>(body) {
         Ok(value) => value,
         Err(err) => {
-            return Err(http_error(
+            return Err(Box::new(http_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_json",
                 format!("request body is not valid JSON: {err}"),
-            ));
+            )));
         }
     };
     let schema = match serde_json::from_str::<Value>(schema_json) {
         Ok(schema) => schema,
         Err(err) => {
-            return Err(http_error(
+            return Err(Box::new(http_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "schema_load_failed",
                 format!("failed to load {schema_name} schema: {err}"),
-            ));
+            )));
         }
     };
     let validator = match jsonschema::validator_for(&schema) {
         Ok(validator) => validator,
         Err(err) => {
-            return Err(http_error(
+            return Err(Box::new(http_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "schema_compile_failed",
                 format!("failed to compile {schema_name} schema: {err}"),
-            ));
+            )));
         }
     };
     let errors = validator
@@ -690,22 +690,22 @@ fn decode_schema_json<T: DeserializeOwned>(
         .map(|error| format!("{}: {}", error.instance_path(), error))
         .collect::<Vec<_>>();
     if !errors.is_empty() {
-        return Err(http_error(
+        return Err(Box::new(http_error(
             StatusCode::BAD_REQUEST,
             "schema_validation_failed",
             format!(
                 "{schema_name} request failed schema validation: {}",
                 errors.join("; ")
             ),
-        ));
+        )));
     }
 
     serde_json::from_value(value).map_err(|err| {
-        http_error(
+        Box::new(http_error(
             StatusCode::BAD_REQUEST,
             "request_decode_failed",
             format!("failed to decode {schema_name} request: {err}"),
-        )
+        ))
     })
 }
 

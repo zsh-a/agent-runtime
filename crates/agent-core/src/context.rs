@@ -77,6 +77,17 @@ impl Default for ContextPolicy {
     }
 }
 
+pub struct ContextSnapshotInput {
+    pub snapshot_id: String,
+    pub content_hash: String,
+    pub token_estimate: u32,
+    pub max_input_tokens: u32,
+    pub omitted_block_count: u32,
+    pub compacted: bool,
+    pub blocks: Vec<ContextBlock>,
+    pub metadata: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CompactionRecord {
     #[serde(default = "protocol_version")]
@@ -93,27 +104,18 @@ pub struct CompactionRecord {
 }
 
 impl ContextSnapshot {
-    pub fn new(
-        snapshot_id: String,
-        content_hash: String,
-        token_estimate: u32,
-        max_input_tokens: u32,
-        omitted_block_count: u32,
-        compacted: bool,
-        blocks: Vec<ContextBlock>,
-        metadata: Value,
-    ) -> Self {
+    pub fn new(input: ContextSnapshotInput) -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION.to_owned(),
-            snapshot_id,
-            content_hash,
+            snapshot_id: input.snapshot_id,
+            content_hash: input.content_hash,
             created_at: OffsetDateTime::now_utc(),
-            token_estimate,
-            max_input_tokens,
-            omitted_block_count,
-            compacted,
-            blocks,
-            metadata,
+            token_estimate: input.token_estimate,
+            max_input_tokens: input.max_input_tokens,
+            omitted_block_count: input.omitted_block_count,
+            compacted: input.compacted,
+            blocks: input.blocks,
+            metadata: input.metadata,
         }
     }
 }

@@ -112,8 +112,10 @@ pub async fn run_subagent(
         ))
         .await
         .map_err(ToolError::from_agent_error)?;
-    let mut control = RunControl::default();
-    control.cancellation = context.cancellation;
+    let control = RunControl {
+        cancellation: context.cancellation,
+        ..RunControl::default()
+    };
     let outcome = runner
         .run_once_with_control(
             &agent_id,

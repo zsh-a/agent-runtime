@@ -1,8 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use agent_core::{
-    Agent, AgentRuntimeCatalog, AgentSpec, PROTOCOL_VERSION, PromptBlockSpec, ProposalKindSpec,
-    ToolSpec, catalog_version,
+    Agent, AgentRuntimeCatalog, AgentSpec, PROTOCOL_VERSION, ToolSpec, catalog_version,
 };
 use agent_llm::{LlmMessage, LlmRole};
 use agent_runtime::InMemoryAgentRegistry;
@@ -225,10 +224,10 @@ fn runtime_catalog_view(
 ) -> AgentRuntimeCatalog {
     let proposal_kinds = catalog
         .map(|catalog| catalog.proposal_kinds.clone())
-        .unwrap_or_else(Vec::<ProposalKindSpec>::new);
+        .unwrap_or_default();
     let prompt_blocks = catalog
         .map(|catalog| catalog.prompt_blocks.clone())
-        .unwrap_or_else(Vec::<PromptBlockSpec>::new);
+        .unwrap_or_default();
     AgentRuntimeCatalog {
         protocol_version: catalog
             .map(|catalog| catalog.protocol_version.clone())

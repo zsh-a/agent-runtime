@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::{
     catalog::{read_catalog, registry_from_catalog},
     config::{RuntimeStoreBackend, execution_policy},
-    debug_bundle::write_debug_bundle,
+    debug_bundle::{DebugBundleOptions, write_debug_bundle},
     print_json,
     runtime_stores::RuntimeStores,
     tools::{CliServices, tool_overrides},
@@ -429,17 +429,17 @@ async fn verify_debug_bundle(
     run_id: RunId,
     out: Utf8PathBuf,
 ) -> Result<(Value, usize)> {
-    let manifest = write_debug_bundle(
-        run_id.0,
-        options.store.clone(),
-        options.store_backend,
-        out.clone(),
-        Some(options.catalog.clone()),
-        None,
-        options.timeout_seconds,
-        false,
-        None,
-    )
+    let manifest = write_debug_bundle(DebugBundleOptions {
+        run_id: run_id.0,
+        store_path: options.store.clone(),
+        store_backend: options.store_backend,
+        out: out.clone(),
+        catalog_path: Some(options.catalog.clone()),
+        trace_path: None,
+        timeout_seconds: options.timeout_seconds,
+        materialize_artifacts: false,
+        artifact_resolver_path: None,
+    })
     .await?;
     let redactions = read_json(out.join("redactions.json")).await?;
     let redaction_count = redactions

@@ -439,7 +439,7 @@ mod tests {
             metadata: json!({}),
         }];
         for index in 0..8 {
-            messages.push(user_message(&format!(
+            messages.push(user_message(format!(
                 "older message {index} with enough text to exceed the tiny context budget"
             )));
         }

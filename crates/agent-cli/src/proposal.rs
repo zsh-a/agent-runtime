@@ -112,7 +112,7 @@ pub(crate) async fn decide_proposal_with_store(
         proposal.required_approval_level,
         proposal.required_approver_count,
     );
-    let approval_level = input.approval_level.unwrap_or_else(|| {
+    let approval_level = input.approval_level.unwrap_or({
         if proposal.approval_required {
             ApprovalLevel::SingleUser
         } else {

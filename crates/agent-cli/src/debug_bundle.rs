@@ -137,43 +137,37 @@ impl DebugBundleManifest {
     }
 }
 
-pub(crate) async fn export_debug_bundle(
-    run_id: String,
-    store_path: Utf8PathBuf,
-    store_backend: RuntimeStoreBackend,
-    out: Utf8PathBuf,
-    catalog_path: Option<Utf8PathBuf>,
-    trace_path: Option<Utf8PathBuf>,
-    timeout_seconds: u64,
-    materialize_artifacts: bool,
-    artifact_resolver_path: Option<Utf8PathBuf>,
-) -> Result<()> {
-    let manifest = write_debug_bundle(
+#[derive(Debug, Clone)]
+pub(crate) struct DebugBundleOptions {
+    pub(crate) run_id: String,
+    pub(crate) store_path: Utf8PathBuf,
+    pub(crate) store_backend: RuntimeStoreBackend,
+    pub(crate) out: Utf8PathBuf,
+    pub(crate) catalog_path: Option<Utf8PathBuf>,
+    pub(crate) trace_path: Option<Utf8PathBuf>,
+    pub(crate) timeout_seconds: u64,
+    pub(crate) materialize_artifacts: bool,
+    pub(crate) artifact_resolver_path: Option<Utf8PathBuf>,
+}
+
+pub(crate) async fn export_debug_bundle(options: DebugBundleOptions) -> Result<()> {
+    let manifest = write_debug_bundle(options).await?;
+    crate::print_json(&manifest)
+}
+
+pub(crate) async fn write_debug_bundle(options: DebugBundleOptions) -> Result<Value> {
+    let replay_options = options.clone();
+    let DebugBundleOptions {
         run_id,
         store_path,
         store_backend,
         out,
         catalog_path,
         trace_path,
-        timeout_seconds,
+        timeout_seconds: _,
         materialize_artifacts,
         artifact_resolver_path,
-    )
-    .await?;
-    crate::print_json(&manifest)
-}
-
-pub(crate) async fn write_debug_bundle(
-    run_id: String,
-    store_path: Utf8PathBuf,
-    store_backend: RuntimeStoreBackend,
-    out: Utf8PathBuf,
-    catalog_path: Option<Utf8PathBuf>,
-    trace_path: Option<Utf8PathBuf>,
-    timeout_seconds: u64,
-    materialize_artifacts: bool,
-    artifact_resolver_path: Option<Utf8PathBuf>,
-) -> Result<Value> {
+    } = options;
     fs_err::tokio::create_dir_all(&out)
         .await
         .into_diagnostic()?;
@@ -236,13 +230,12 @@ pub(crate) async fn write_debug_bundle(
         None
     };
     let replay_config = build_debug_replay_config(
-        &store_path,
-        catalog_path.as_ref(),
-        trace_path.as_ref(),
-        timeout_seconds,
-        prompt_manifest.is_some(),
-        !artifact_refs.is_empty(),
-        materialization_manifest.is_some(),
+        &replay_options,
+        DebugReplayAssets {
+            prompt_manifest: prompt_manifest.is_some(),
+            artifacts: !artifact_refs.is_empty(),
+            artifact_materializations: materialization_manifest.is_some(),
+        },
         &record,
         &run_request,
     );
@@ -413,14 +406,15 @@ async fn build_debug_state_snapshot(
     })
 }
 
+struct DebugReplayAssets {
+    prompt_manifest: bool,
+    artifacts: bool,
+    artifact_materializations: bool,
+}
+
 fn build_debug_replay_config(
-    store_path: &Utf8Path,
-    catalog_path: Option<&Utf8PathBuf>,
-    trace_path: Option<&Utf8PathBuf>,
-    timeout_seconds: u64,
-    include_prompt_manifest: bool,
-    include_artifacts: bool,
-    include_artifact_materializations: bool,
+    options: &DebugBundleOptions,
+    included: DebugReplayAssets,
     record: &AgentRunRecord,
     run_request: &RunRequest,
 ) -> DebugReplayConfig {
@@ -433,16 +427,16 @@ fn build_debug_replay_config(
         "state_snapshot".to_owned(),
         "state_snapshot.json".to_owned(),
     );
-    if include_prompt_manifest {
+    if included.prompt_manifest {
         assets.insert(
             "prompt_manifest".to_owned(),
             "prompt_manifest.json".to_owned(),
         );
     }
-    if include_artifacts {
+    if included.artifacts {
         assets.insert("artifacts".to_owned(), "artifacts.json".to_owned());
     }
-    if include_artifact_materializations {
+    if included.artifact_materializations {
         assets.insert(
             "artifact_materializations".to_owned(),
             "artifact_materializations.json".to_owned(),
@@ -456,11 +450,11 @@ fn build_debug_replay_config(
         "--mode".to_owned(),
         "live".to_owned(),
         "--store".to_owned(),
-        store_path.to_string(),
+        options.store_path.to_string(),
         "--timeout-seconds".to_owned(),
-        timeout_seconds.to_string(),
+        options.timeout_seconds.to_string(),
     ];
-    if let Some(catalog_path) = catalog_path {
+    if let Some(catalog_path) = &options.catalog_path {
         replay_command.push("--catalog".to_owned());
         replay_command.push(catalog_path.to_string());
     }
@@ -471,10 +465,10 @@ fn build_debug_replay_config(
         run_id: record.run_id.0.clone(),
         agent_id: record.agent_id.clone(),
         replay_mode: "live".to_owned(),
-        source_store: store_path.to_string(),
-        source_trace: trace_path.map(ToString::to_string),
-        catalog: catalog_path.map(ToString::to_string),
-        timeout_seconds,
+        source_store: options.store_path.to_string(),
+        source_trace: options.trace_path.as_ref().map(ToString::to_string),
+        catalog: options.catalog_path.as_ref().map(ToString::to_string),
+        timeout_seconds: options.timeout_seconds,
         assets,
         replay_command,
         run_request: run_request.clone(),
@@ -914,11 +908,11 @@ fn artifact_materialized_filename(
     if name.is_empty() {
         name = format!("artifact_{}", index + 1);
     }
-    if !name.contains('.') {
-        if let Some(extension) = source_path.extension() {
-            name.push('.');
-            name.push_str(extension);
-        }
+    if !name.contains('.')
+        && let Some(extension) = source_path.extension()
+    {
+        name.push('.');
+        name.push_str(extension);
     }
     format!("{:03}_{name}", index + 1)
 }

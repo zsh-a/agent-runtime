@@ -81,12 +81,15 @@ struct OtlpAttribute {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 enum OtlpAnyValue {
-    StringValue(String),
-    IntValue(String),
-    DoubleValue(f64),
-    BoolValue(bool),
+    #[serde(rename = "stringValue")]
+    String(String),
+    #[serde(rename = "intValue")]
+    Int(String),
+    #[serde(rename = "doubleValue")]
+    Double(f64),
+    #[serde(rename = "boolValue")]
+    Bool(bool),
 }
 
 #[derive(Debug, Serialize)]
@@ -308,24 +311,24 @@ async fn read_trace(path: Utf8PathBuf) -> Result<AgentTrace> {
 fn otlp_attribute(key: &str, value: &str) -> OtlpAttribute {
     OtlpAttribute {
         key: key.to_owned(),
-        value: OtlpAnyValue::StringValue(value.to_owned()),
+        value: OtlpAnyValue::String(value.to_owned()),
     }
 }
 
 fn otlp_json_attribute(key: &str, value: &Value) -> OtlpAttribute {
     let value = match value {
-        Value::Bool(value) => OtlpAnyValue::BoolValue(*value),
+        Value::Bool(value) => OtlpAnyValue::Bool(*value),
         Value::Number(value) => {
             if let Some(value) = value.as_i64() {
-                OtlpAnyValue::IntValue(value.to_string())
+                OtlpAnyValue::Int(value.to_string())
             } else if let Some(value) = value.as_u64() {
-                OtlpAnyValue::IntValue(value.to_string())
+                OtlpAnyValue::Int(value.to_string())
             } else {
-                OtlpAnyValue::DoubleValue(value.as_f64().unwrap_or_default())
+                OtlpAnyValue::Double(value.as_f64().unwrap_or_default())
             }
         }
-        Value::String(value) => OtlpAnyValue::StringValue(value.clone()),
-        other => OtlpAnyValue::StringValue(other.to_string()),
+        Value::String(value) => OtlpAnyValue::String(value.clone()),
+        other => OtlpAnyValue::String(other.to_string()),
     };
     OtlpAttribute {
         key: key.to_owned(),

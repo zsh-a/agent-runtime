@@ -31,67 +31,67 @@ pub struct AgentErrorRecord {
 #[derive(Debug, Error)]
 #[error("{record:?}")]
 pub struct AgentError {
-    pub record: AgentErrorRecord,
+    pub record: Box<AgentErrorRecord>,
 }
 
 impl AgentError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
-            record: AgentErrorRecord {
+            record: Box::new(AgentErrorRecord {
                 kind: AgentErrorKind::InternalError,
                 code: "internal_error".to_owned(),
                 message: message.into(),
                 retryable: false,
                 details: json!({}),
-            },
+            }),
         }
     }
 
     pub fn validation(message: impl Into<String>) -> Self {
         Self {
-            record: AgentErrorRecord {
+            record: Box::new(AgentErrorRecord {
                 kind: AgentErrorKind::ValidationError,
                 code: "validation_error".to_owned(),
                 message: message.into(),
                 retryable: false,
                 details: json!({}),
-            },
+            }),
         }
     }
 
     pub fn timeout(duration: Duration) -> Self {
         Self {
-            record: AgentErrorRecord {
+            record: Box::new(AgentErrorRecord {
                 kind: AgentErrorKind::Timeout,
                 code: "timeout".to_owned(),
                 message: format!("agent run timed out after {}ms", duration.as_millis()),
                 retryable: true,
                 details: json!({"timeout_ms": duration.as_millis()}),
-            },
+            }),
         }
     }
 
     pub fn cancelled(message: impl Into<String>) -> Self {
         Self {
-            record: AgentErrorRecord {
+            record: Box::new(AgentErrorRecord {
                 kind: AgentErrorKind::Cancelled,
                 code: "cancelled".to_owned(),
                 message: message.into(),
                 retryable: false,
                 details: json!({}),
-            },
+            }),
         }
     }
 
     pub fn policy_denied(message: impl Into<String>, details: Value) -> Self {
         Self {
-            record: AgentErrorRecord {
+            record: Box::new(AgentErrorRecord {
                 kind: AgentErrorKind::ApprovalRequired,
                 code: "policy_denied".to_owned(),
                 message: message.into(),
                 retryable: false,
                 details,
-            },
+            }),
         }
     }
 }
@@ -113,7 +113,7 @@ impl StoreError {
 #[derive(Debug, Error)]
 #[error("{record:?}")]
 pub struct ToolError {
-    pub record: AgentErrorRecord,
+    pub record: Box<AgentErrorRecord>,
 }
 
 impl ToolError {

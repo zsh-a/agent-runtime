@@ -1849,10 +1849,11 @@ async fn runner_can_cancel_active_run_and_broadcast_events() {
         let cancellation = cancellation.clone();
         let event_buffer = event_buffer.clone();
         async move {
-            let mut control = RunControl::default();
-            control.cancellation = cancellation;
-            control.trace_events = Some(events);
-            control.trace_event_buffer = Some(event_buffer.clone());
+            let control = RunControl {
+                cancellation,
+                trace_events: Some(events),
+                trace_event_buffer: Some(event_buffer.clone()),
+            };
             runner
                 .run_once_with_control("blocking", request, control)
                 .await
@@ -2043,8 +2044,10 @@ async fn runner_observes_persisted_cancellation_request() {
     let run = tokio::spawn({
         let runner = runner.clone();
         async move {
-            let mut control = RunControl::default();
-            control.trace_events = Some(events);
+            let control = RunControl {
+                trace_events: Some(events),
+                ..RunControl::default()
+            };
             runner
                 .run_once_with_control("blocking", request, control)
                 .await
@@ -2250,13 +2253,13 @@ impl Agent for FlakyAgent {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt == 1 {
             return Err(AgentError {
-                record: AgentErrorRecord {
+                record: Box::new(AgentErrorRecord {
                     kind: AgentErrorKind::TransientExternalError,
                     code: "transient_test_error".to_owned(),
                     message: "transient failure".to_owned(),
                     retryable: true,
                     details: json!({"attempt": attempt}),
-                },
+                }),
             });
         }
         Ok(AgentRunResult::completed(

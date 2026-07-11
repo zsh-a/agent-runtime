@@ -307,7 +307,7 @@ pub(crate) fn configured_path(
     default: &str,
     configured: Option<&Utf8PathBuf>,
 ) -> Utf8PathBuf {
-    if value == Utf8PathBuf::from(default) {
+    if value == default {
         configured.cloned().unwrap_or(value)
     } else {
         value

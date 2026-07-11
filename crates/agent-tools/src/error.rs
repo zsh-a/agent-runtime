@@ -3,13 +3,13 @@ use serde_json::{Value, json};
 
 pub(crate) fn tool_error(code: &str, message: impl Into<String>) -> ToolError {
     ToolError {
-        record: AgentErrorRecord {
+        record: Box::new(AgentErrorRecord {
             kind: AgentErrorKind::ToolError,
             code: code.to_owned(),
             message: message.into(),
             retryable: false,
             details: json!({}),
-        },
+        }),
     }
 }
 
@@ -19,13 +19,13 @@ pub(crate) fn retryable_tool_error(
     details: Value,
 ) -> ToolError {
     ToolError {
-        record: AgentErrorRecord {
+        record: Box::new(AgentErrorRecord {
             kind: AgentErrorKind::ToolError,
             code: code.to_owned(),
             message: message.into(),
             retryable: true,
             details,
-        },
+        }),
     }
 }
 
@@ -35,13 +35,13 @@ pub(crate) fn tool_error_with_details(
     details: Value,
 ) -> ToolError {
     ToolError {
-        record: AgentErrorRecord {
+        record: Box::new(AgentErrorRecord {
             kind: AgentErrorKind::ToolError,
             code: code.to_owned(),
             message: message.into(),
             retryable: false,
             details,
-        },
+        }),
     }
 }
 
@@ -62,12 +62,12 @@ pub(crate) fn tool_error_from_json(default_code: &str, error: &Value) -> ToolErr
         .and_then(Value::as_bool)
         .unwrap_or(false);
     ToolError {
-        record: AgentErrorRecord {
+        record: Box::new(AgentErrorRecord {
             kind: AgentErrorKind::ToolError,
             code,
             message,
             retryable,
             details: error.get("data").cloned().unwrap_or_else(|| json!({})),
-        },
+        }),
     }
 }
