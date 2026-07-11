@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod context;
+pub mod embedded;
 pub mod errors;
 pub mod hooks;
 pub mod ids;
@@ -16,6 +17,12 @@ pub use catalog::{
 pub use context::{
     CompactionRecord, ContextBlock, ContextBlockKind, ContextPolicy, ContextSnapshot,
     ContextSnapshotInput,
+};
+pub use embedded::{
+    EMBEDDED_SNAPSHOT_VERSION, EmbeddedEffectError, EmbeddedEffectKind, EmbeddedEffectResponse,
+    EmbeddedEffectResult, EmbeddedHostEffect, EmbeddedPendingHostEffect, EmbeddedRunContinuation,
+    EmbeddedRunLimits, EmbeddedRunProgress, EmbeddedRunSnapshot, EmbeddedRunState, EmbeddedRunStep,
+    EmbeddedRunStepStatus, EmbeddedStepTraceEvent, EmbeddedTerminalReason,
 };
 pub use errors::{AgentError, AgentErrorKind, AgentErrorRecord, StoreError, ToolError};
 pub use hooks::{HookEffect, HookSpec, PolicyDecision, PolicyDecisionKind};

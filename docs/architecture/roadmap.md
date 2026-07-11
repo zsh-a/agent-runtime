@@ -14,6 +14,8 @@ The runtime currently works well as a schema-first agent execution kernel for:
 - JSON tool dispatch through host adapters
 - proposal envelope creation and approval/application flows
 - provider-neutral chat turn state and event contracts
+- typed, versioned embedded run snapshots with Rust-owned effect/subagent
+  limits for pause/resume host runtimes
 - HTTP/SSE chat turn streaming over `agent-chat`
 - HTTP/SSE chat resume, active-run event streaming, and active-run cancellation
 - CLI, HTTP, stdio, TUI, replay, eval, and debug-bundle development workflows

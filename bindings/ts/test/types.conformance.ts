@@ -13,6 +13,8 @@ import type {
   ChatTurnEvent,
   ChatTurnState,
   ChatTurnRequest,
+  EmbeddedRunSnapshot,
+  EmbeddedRunStep,
   ErrorResponse,
   GenerateObjectRequest,
   GenerateObjectResult,
@@ -173,6 +175,62 @@ const workflowRunRequest = {
   nodes: workflowRunNodes,
   metadata: {tenant_id: 'tenant_acme'},
 } as const satisfies WorkflowRunRequest
+
+const embeddedRunStep = {
+  protocol_version: 'agent.v1',
+  run_id: 'run_embedded_1',
+  agent_id: 'collector',
+  agent_version: '0.1.0',
+  step_index: 0,
+  status: 'effect_requested',
+  effect: {
+    kind: 'tool',
+    effect_id: 'effect_1',
+    name: 'read_task',
+    input: {id: 'task_1'},
+  },
+  run_state: {
+    status: 'effect_requested',
+    step_index: 0,
+    remaining_effect_count: 0,
+    effect_result_count: 0,
+    terminal_reason: null,
+  },
+  trace_event: {
+    kind: 'agent_runtime_step',
+    run_id: 'run_embedded_1',
+    agent_id: 'collector',
+    status: 'effect_requested',
+    step_index: 0,
+    effect_id: 'effect_1',
+    effect_kind: 'tool',
+    tool_name: 'read_task',
+    subagent_id: null,
+    run_state: {
+      status: 'effect_requested',
+      step_index: 0,
+      remaining_effect_count: 0,
+      effect_result_count: 0,
+      terminal_reason: null,
+    },
+  },
+} as const satisfies EmbeddedRunStep
+
+const embeddedRunSnapshot = {
+  protocol_version: 'agent.v1',
+  snapshot_version: 1,
+  step: embeddedRunStep,
+  limits: {
+    max_effect_steps: 4,
+    max_subagent_depth: 4,
+  },
+  progress: {
+    dispatched_effect_count: 0,
+    subagent_depth: 0,
+    effect_budget_exhausted: false,
+    subagent_depth_exceeded: false,
+  },
+} as const satisfies EmbeddedRunSnapshot
 
 const traceEvents = [
   {
@@ -817,6 +875,8 @@ void cancelRunResponse
 void errorResponse
 void replayExecutionResponse
 void workflowRunRequest
+void embeddedRunStep
+void embeddedRunSnapshot
 void workflowRunResult
 void agentRunResult
 void agentSpec

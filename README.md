@@ -10,6 +10,8 @@ and CLI/server development.
 - `crates/agent-store`: in-memory and file-backed run/proposal/session stores.
 - `crates/agent-llm`: provider-neutral LLM DTOs and mock/OpenAI/Anthropic/Ollama providers.
 - `crates/agent-chat`: shared ChatTurn request/event contract and tool-round loop.
+- Typed, versioned embedded run snapshots for pause/resume hosts such as
+  Flutter/FRB, including Rust-owned effect/subagent limits and JSON Schemas.
 - `crates/agent-cli`: local CLI, HTTP/stdio server, replay, eval, debug bundle, TUI.
 - `bindings/ts`: dependency-light TypeScript wire types, HTTP client, and structured output helpers.
 - `schemas`: JSON Schema wire contracts.

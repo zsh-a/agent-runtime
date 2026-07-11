@@ -121,6 +121,133 @@ export interface RunWorkflow {
   workflow_id?: null | string
 }
 
+export type EmbeddedRunStepStatus =
+  | 'effect_requested'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'policy_denied'
+  | 'closed_early'
+  | 'timed_out'
+
+export type EmbeddedTerminalReason =
+  | 'done'
+  | 'stream_error'
+  | 'user_cancel'
+  | 'policy_denied'
+  | 'closed_early'
+
+export type EmbeddedEffectKind = 'tool' | 'subagent'
+
+export type EmbeddedHostEffect =
+  | {effect_id: string; input: JsonObject; kind: 'tool'; name: string}
+  | {
+      agent_id: string
+      effect_id: string
+      input: JsonObject
+      kind: 'subagent'
+      metadata: JsonObject
+      run_id?: string | null
+      scope?: RunScope | null
+      workflow?: RunWorkflow | null
+    }
+
+export type EmbeddedPendingHostEffect =
+  | {input: JsonObject; kind: 'tool'; name: string}
+  | {
+      agent_id: string
+      input: JsonObject
+      kind: 'subagent'
+      metadata: JsonObject
+      run_id?: string | null
+      scope?: RunScope | null
+      workflow?: RunWorkflow | null
+    }
+
+export interface EmbeddedEffectError {
+  code: number
+  data?: JsonValue
+  message: string
+  [key: string]: JsonValue | undefined
+}
+
+export type EmbeddedEffectResponse =
+  | {error: EmbeddedEffectError; id: string; jsonrpc: '2.0'; result?: never}
+  | {error?: never; id: string; jsonrpc: '2.0'; result: JsonValue}
+
+export interface EmbeddedEffectResult {
+  effect: EmbeddedHostEffect
+  effect_response: EmbeddedEffectResponse
+  kind: EmbeddedEffectKind
+}
+
+export interface EmbeddedRunContinuation {
+  effect_results: EmbeddedEffectResult[]
+  effects: EmbeddedPendingHostEffect[]
+  llm_response?: JsonValue
+  next_step_index: number
+}
+
+export interface EmbeddedRunState {
+  effect_result_count: number
+  remaining_effect_count: number
+  status: EmbeddedRunStepStatus
+  step_index: number
+  terminal_reason: EmbeddedTerminalReason | null
+}
+
+export interface EmbeddedStepTraceEvent {
+  agent_id: string
+  effect_id: null | string
+  effect_kind: EmbeddedEffectKind | null
+  kind: 'agent_runtime_step'
+  run_id: string
+  run_state: EmbeddedRunState
+  status: EmbeddedRunStepStatus
+  step_index: number
+  subagent_id: null | string
+  tool_name: null | string
+}
+
+export interface EmbeddedRunStep {
+  agent_id: string
+  agent_version: string
+  continuation?: EmbeddedRunContinuation | null
+  effect?: EmbeddedHostEffect | null
+  effect_response?: EmbeddedEffectResponse | null
+  effect_result?: JsonValue
+  effect_results?: EmbeddedEffectResult[]
+  error?: JsonValue
+  output?: JsonValue
+  proposal?: JsonValue
+  protocol_version: ProtocolVersion
+  run_id: string
+  run_state: EmbeddedRunState
+  status: EmbeddedRunStepStatus
+  step_index: number
+  trace_event: EmbeddedStepTraceEvent
+}
+
+export interface EmbeddedRunLimits {
+  max_effect_steps: number
+  max_subagent_depth: number
+}
+
+export interface EmbeddedRunProgress {
+  dispatched_effect_count: number
+  effect_budget_exhausted: boolean
+  subagent_depth: number
+  subagent_depth_exceeded: boolean
+}
+
+export interface EmbeddedRunSnapshot {
+  limits: EmbeddedRunLimits
+  progress: EmbeddedRunProgress
+  protocol_version: ProtocolVersion
+  snapshot_version: 1
+  step: EmbeddedRunStep
+}
+
 export interface WorkflowRunNode {
   agent_id: string
   compensation?: null | WorkflowRunNodeCompensation

@@ -1,0 +1,15 @@
+{
+  "protocol_version": "agent.v1",
+  "snapshot_version": 2,
+  "step": {},
+  "limits": {
+    "max_effect_steps": 4,
+    "max_subagent_depth": 4
+  },
+  "progress": {
+    "dispatched_effect_count": 0,
+    "subagent_depth": 0,
+    "effect_budget_exhausted": false,
+    "subagent_depth_exceeded": false
+  }
+}

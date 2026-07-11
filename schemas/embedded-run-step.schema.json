@@ -1,0 +1,333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-runtime.local/schemas/embedded-run-step.schema.json",
+  "title": "EmbeddedRunStep",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "run_id",
+    "agent_id",
+    "agent_version",
+    "step_index",
+    "status",
+    "run_state",
+    "trace_event"
+  ],
+  "properties": {
+    "protocol_version": { "const": "agent.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "agent_id": { "type": "string", "minLength": 1 },
+    "agent_version": { "type": "string", "minLength": 1 },
+    "step_index": { "type": "integer", "minimum": 0 },
+    "status": { "$ref": "#/$defs/status" },
+    "effect": { "$ref": "#/$defs/host_effect" },
+    "effect_response": { "$ref": "#/$defs/effect_response" },
+    "effect_result": true,
+    "effect_results": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/effect_result" },
+      "default": []
+    },
+    "continuation": { "$ref": "#/$defs/continuation" },
+    "output": true,
+    "error": true,
+    "proposal": true,
+    "run_state": { "$ref": "#/$defs/run_state" },
+    "trace_event": { "$ref": "#/$defs/trace_event" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "const": "effect_requested" } },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["effect"],
+        "properties": {
+          "run_state": {
+            "properties": {
+              "status": { "const": "effect_requested" },
+              "terminal_reason": { "const": null }
+            }
+          },
+          "trace_event": {
+            "properties": { "status": { "const": "effect_requested" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "completed" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "run_state": {
+            "properties": {
+              "status": { "const": "completed" },
+              "terminal_reason": { "const": "done" }
+            }
+          },
+          "trace_event": {
+            "properties": { "status": { "const": "completed" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "failed" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "run_state": {
+            "properties": {
+              "status": { "const": "failed" },
+              "terminal_reason": { "const": "stream_error" }
+            }
+          },
+          "trace_event": {
+            "properties": { "status": { "const": "failed" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "cancelled" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "run_state": {
+            "properties": {
+              "status": { "const": "cancelled" },
+              "terminal_reason": { "const": "user_cancel" }
+            }
+          },
+          "trace_event": {
+            "properties": { "status": { "const": "cancelled" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "status": { "const": "policy_denied" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "run_state": {
+            "properties": {
+              "status": { "const": "policy_denied" },
+              "terminal_reason": { "const": "policy_denied" }
+            }
+          },
+          "trace_event": {
+            "properties": { "status": { "const": "policy_denied" } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "enum": ["closed_early", "timed_out"] }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "run_state": {
+            "properties": {
+              "status": { "enum": ["closed_early", "timed_out"] },
+              "terminal_reason": { "const": "closed_early" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "status": {
+      "enum": [
+        "effect_requested",
+        "completed",
+        "failed",
+        "cancelled",
+        "policy_denied",
+        "closed_early",
+        "timed_out"
+      ]
+    },
+    "terminal_reason": {
+      "enum": [
+        "done",
+        "stream_error",
+        "user_cancel",
+        "policy_denied",
+        "closed_early",
+        null
+      ]
+    },
+    "host_effect": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "effect_id", "name", "input"],
+          "properties": {
+            "kind": { "const": "tool" },
+            "effect_id": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "input": { "type": "object" }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": ["kind", "effect_id", "agent_id", "input", "metadata"],
+          "properties": {
+            "kind": { "const": "subagent" },
+            "effect_id": { "type": "string", "minLength": 1 },
+            "agent_id": { "type": "string", "minLength": 1 },
+            "input": { "type": "object" },
+            "run_id": { "type": "string", "minLength": 1 },
+            "scope": { "type": "object" },
+            "workflow": { "type": "object" },
+            "metadata": { "type": "object" }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "effect_response": {
+      "type": "object",
+      "required": ["jsonrpc", "id"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "type": "string", "minLength": 1 },
+        "result": true,
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "integer" },
+            "message": { "type": "string" },
+            "data": true
+          },
+          "additionalProperties": true
+        }
+      },
+      "oneOf": [
+        { "required": ["result"], "not": { "required": ["error"] } },
+        { "required": ["error"], "not": { "required": ["result"] } }
+      ],
+      "additionalProperties": true
+    },
+    "effect_result": {
+      "type": "object",
+      "required": ["kind", "effect", "effect_response"],
+      "properties": {
+        "kind": { "enum": ["tool", "subagent"] },
+        "effect": { "$ref": "#/$defs/host_effect" },
+        "effect_response": { "$ref": "#/$defs/effect_response" }
+      },
+      "additionalProperties": false
+    },
+    "continuation": {
+      "type": "object",
+      "required": ["effects", "effect_results", "next_step_index"],
+      "properties": {
+        "effects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/pending_host_effect" }
+        },
+        "effect_results": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/effect_result" }
+        },
+        "llm_response": true,
+        "next_step_index": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "pending_host_effect": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "name", "input"],
+          "properties": {
+            "kind": { "const": "tool" },
+            "name": { "type": "string", "minLength": 1 },
+            "input": { "type": "object" }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": ["kind", "agent_id", "input", "metadata"],
+          "properties": {
+            "kind": { "const": "subagent" },
+            "agent_id": { "type": "string", "minLength": 1 },
+            "input": { "type": "object" },
+            "run_id": { "type": "string", "minLength": 1 },
+            "scope": { "type": "object" },
+            "workflow": { "type": "object" },
+            "metadata": { "type": "object" }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "run_state": {
+      "type": "object",
+      "required": [
+        "status",
+        "step_index",
+        "remaining_effect_count",
+        "effect_result_count",
+        "terminal_reason"
+      ],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "step_index": { "type": "integer", "minimum": 0 },
+        "remaining_effect_count": { "type": "integer", "minimum": 0 },
+        "effect_result_count": { "type": "integer", "minimum": 0 },
+        "terminal_reason": { "$ref": "#/$defs/terminal_reason" }
+      },
+      "additionalProperties": true
+    },
+    "trace_event": {
+      "type": "object",
+      "required": [
+        "kind",
+        "run_id",
+        "agent_id",
+        "status",
+        "step_index",
+        "effect_id",
+        "effect_kind",
+        "tool_name",
+        "subagent_id",
+        "run_state"
+      ],
+      "properties": {
+        "kind": { "const": "agent_runtime_step" },
+        "run_id": { "type": "string", "minLength": 1 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "step_index": { "type": "integer", "minimum": 0 },
+        "effect_id": { "type": ["string", "null"], "minLength": 1 },
+        "effect_kind": { "enum": ["tool", "subagent", null] },
+        "tool_name": { "type": ["string", "null"], "minLength": 1 },
+        "subagent_id": { "type": ["string", "null"], "minLength": 1 },
+        "run_state": { "$ref": "#/$defs/run_state" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-runtime.local/schemas/embedded-run-snapshot.schema.json",
+  "title": "EmbeddedRunSnapshot",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "snapshot_version",
+    "step",
+    "limits",
+    "progress"
+  ],
+  "properties": {
+    "protocol_version": { "const": "agent.v1" },
+    "snapshot_version": { "const": 1 },
+    "step": {
+      "$ref": "https://agent-runtime.local/schemas/embedded-run-step.schema.json"
+    },
+    "limits": {
+      "type": "object",
+      "required": ["max_effect_steps", "max_subagent_depth"],
+      "properties": {
+        "max_effect_steps": { "type": "integer", "minimum": 0 },
+        "max_subagent_depth": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "progress": {
+      "type": "object",
+      "required": [
+        "dispatched_effect_count",
+        "subagent_depth",
+        "effect_budget_exhausted",
+        "subagent_depth_exceeded"
+      ],
+      "properties": {
+        "dispatched_effect_count": { "type": "integer", "minimum": 0 },
+        "subagent_depth": { "type": "integer", "minimum": 0 },
+        "effect_budget_exhausted": { "type": "boolean" },
+        "subagent_depth_exceeded": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

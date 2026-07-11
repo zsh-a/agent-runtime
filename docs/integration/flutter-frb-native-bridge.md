@@ -113,6 +113,35 @@ Each function should return either a canonical JSON payload or a structured
 bridge error encoded as JSON. Avoid returning partially typed native structs to
 Dart until the contract is stable enough to generate bindings from `schemas/`.
 
+For device tools that must execute in Dart, expose the typed embedded
+start/continue state machine rather than reimplementing step validation in the
+bridge:
+
+```rust
+let snapshot = EffectStepLoop::start_snapshot(
+    &catalog,
+    request,
+    agent_id,
+    EmbeddedRunLimits::default(),
+)?;
+// Serialize `snapshot` across FRB. The host executes only the requested effect.
+let next = EffectStepLoop::continue_snapshot(
+    &catalog,
+    snapshot,
+    effect_response,
+    agent_id,
+)?;
+```
+
+`EmbeddedRunSnapshot` is a versioned serializable checkpoint defined by
+`schemas/embedded-run-snapshot.schema.json`; its current step is defined by
+`schemas/embedded-run-step.schema.json`. Flutter may persist the snapshot JSON
+in an app-owned store and return it on resume, but it must not mutate
+continuation, progress, run-state, or trace fields. Rust validates those fields
+before advancing and owns effect-budget/subagent-depth termination. Use
+`start_requested_subagent` and `resume_parent_from_subagent` so nested runs
+share the same effect budget.
+
 ## Catalog Composition
 
 The Flutter app should compose a catalog from active domains and product
