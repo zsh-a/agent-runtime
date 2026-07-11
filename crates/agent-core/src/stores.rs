@@ -20,6 +20,12 @@ pub trait AgentRunStore: Send + Sync {
     async fn create_run(&self, run: AgentRunRecord) -> Result<(), StoreError>;
     async fn update_run(&self, run: AgentRunRecord) -> Result<(), StoreError>;
     async fn get_run(&self, run_id: &RunId) -> Result<Option<AgentRunRecord>, StoreError>;
+    async fn find_run_by_idempotency_key(
+        &self,
+        agent_id: &str,
+        scope: &RunScope,
+        idempotency_key: &str,
+    ) -> Result<Option<AgentRunRecord>, StoreError>;
     async fn list_runs(
         &self,
         agent_id: Option<&str>,
@@ -102,14 +108,25 @@ pub trait AgentLockStore: Send + Sync {
         owner: &str,
         ttl: Duration,
     ) -> Result<Option<RunLease>, StoreError>;
-    async fn renew(&self, lease: &RunLease, ttl: Duration) -> Result<(), StoreError>;
+    async fn renew(&self, lease: &RunLease, ttl: Duration) -> Result<bool, StoreError>;
     async fn release(&self, lease: RunLease) -> Result<(), StoreError>;
 }
 
 #[async_trait]
 pub trait AgentStateStore: Send + Sync {
-    async fn load(&self, agent_id: &str, key: &str) -> Result<Option<Value>, StoreError>;
-    async fn save(&self, agent_id: &str, key: &str, value: Value) -> Result<(), StoreError>;
+    async fn load(
+        &self,
+        agent_id: &str,
+        scope: &RunScope,
+        key: &str,
+    ) -> Result<Option<Value>, StoreError>;
+    async fn save(
+        &self,
+        agent_id: &str,
+        scope: &RunScope,
+        key: &str,
+        value: Value,
+    ) -> Result<(), StoreError>;
 }
 
 #[async_trait]
@@ -130,7 +147,11 @@ pub trait AgentSessionStore: Send + Sync {
 #[async_trait]
 pub trait AgentProposalStore: Send + Sync {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError>;
-    async fn update_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError>;
+    async fn update_proposal(
+        &self,
+        proposal: ProposalEnvelope,
+        expected_version: u64,
+    ) -> Result<bool, StoreError>;
     async fn get_proposal(
         &self,
         proposal_id: &ProposalId,

@@ -63,12 +63,11 @@ impl TuiRuntime {
             stores.state_store.clone(),
             stores.proposal_store.clone(),
         ));
-        let runner_services: Arc<dyn AgentServices> = services.clone();
         let run_store = stores.run_store.clone();
-        let runner = AgentRunner::new(
+        let runner = AgentRunner::new_with_factory(
             composition.registry.clone(),
             run_store.clone(),
-            runner_services,
+            services.clone(),
         )
         .with_lock_store(stores.lock_store.clone())
         .with_hooks(hook_manager(options.hooks.clone())?)
@@ -130,7 +129,9 @@ impl TuiRuntime {
             )
             .await
             .into_diagnostic()?;
-        self.persist_trace(&outcome.trace).await?;
+        if outcome.should_persist_trace() {
+            self.persist_trace(&outcome.trace).await?;
+        }
         Ok(outcome)
     }
 

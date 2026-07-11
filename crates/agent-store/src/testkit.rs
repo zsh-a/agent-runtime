@@ -310,16 +310,29 @@ pub async fn assert_proposal_store_conformance(store: &dyn AgentProposalStore) {
 
     let mut updated = second.clone();
     updated.status = ProposalStatus::Approved;
+    updated.version = 1;
     store
-        .update_proposal(updated.clone())
+        .update_proposal(updated.clone(), 0)
         .await
-        .expect("proposal updated");
+        .expect("proposal updated")
+        .then_some(())
+        .expect("proposal CAS matched");
     let fetched = store
         .get_proposal(&updated.proposal_id)
         .await
         .expect("proposal fetched")
         .expect("proposal exists");
     assert_eq!(fetched.status, ProposalStatus::Approved);
+
+    let mut stale = second.clone();
+    stale.status = ProposalStatus::Denied;
+    stale.version = 1;
+    assert!(
+        !store
+            .update_proposal(stale, 0)
+            .await
+            .expect("stale proposal update is checked")
+    );
 }
 
 /// Assert the shared behavior expected from an `AgentSessionStore`
@@ -425,31 +438,33 @@ pub async fn assert_state_store_conformance(store: &dyn AgentStateStore) {
     let agent_b = id(&prefix, "agent_b");
     let key = id(&prefix, "shared_key");
     let missing_key = id(&prefix, "missing_key");
+    let global = RunScope::Global;
+    let tenant = RunScope::Tenant(id(&prefix, "tenant"));
 
     assert!(
         store
-            .load(&agent_a, &missing_key)
+            .load(&agent_a, &global, &missing_key)
             .await
             .expect("missing state reads")
             .is_none()
     );
 
     store
-        .save(&agent_a, &key, json!({"value": 1}))
+        .save(&agent_a, &global, &key, json!({"value": 1}))
         .await
         .expect("state saved");
     store
-        .save(&agent_b, &key, json!({"value": 2}))
+        .save(&agent_b, &global, &key, json!({"value": 2}))
         .await
         .expect("isolated agent state saved");
     store
-        .save(&agent_a, &key, json!({"value": 3}))
+        .save(&agent_a, &global, &key, json!({"value": 3}))
         .await
         .expect("state overwritten");
 
     assert_eq!(
         store
-            .load(&agent_a, &key)
+            .load(&agent_a, &global, &key)
             .await
             .expect("state reads")
             .expect("state exists"),
@@ -457,11 +472,18 @@ pub async fn assert_state_store_conformance(store: &dyn AgentStateStore) {
     );
     assert_eq!(
         store
-            .load(&agent_b, &key)
+            .load(&agent_b, &global, &key)
             .await
             .expect("isolated state reads")
             .expect("isolated state exists"),
         json!({"value": 2})
+    );
+    assert!(
+        store
+            .load(&agent_a, &tenant, &key)
+            .await
+            .expect("tenant state reads")
+            .is_none()
     );
 }
 

@@ -1125,8 +1125,8 @@ pub trait AgentRunStore: Send + Sync {
 ```rust
 #[async_trait::async_trait]
 pub trait AgentStateStore: Send + Sync {
-    async fn load(&self, agent_id: &str, key: &str) -> Result<Option<serde_json::Value>, StoreError>;
-    async fn save(&self, agent_id: &str, key: &str, value: serde_json::Value) -> Result<(), StoreError>;
+    async fn load(&self, agent_id: &str, scope: &RunScope, key: &str) -> Result<Option<serde_json::Value>, StoreError>;
+    async fn save(&self, agent_id: &str, scope: &RunScope, key: &str, value: serde_json::Value) -> Result<(), StoreError>;
     async fn compare_and_swap(
         &self,
         agent_id: &str,
@@ -1153,7 +1153,7 @@ pub trait AgentLockStore: Send + Sync {
         ttl: Duration,
     ) -> Result<Option<RunLease>, StoreError>;
 
-    async fn renew(&self, lease: &RunLease, ttl: Duration) -> Result<(), StoreError>;
+    async fn renew(&self, lease: &RunLease, ttl: Duration) -> Result<bool, StoreError>;
     async fn release(&self, lease: RunLease) -> Result<(), StoreError>;
 }
 ```

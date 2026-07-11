@@ -691,6 +691,7 @@ export type ProposalStatus =
   | 'undoing'
 
 export interface ProposalEnvelope {
+  version: number
   agent_id: string
   approval_decisions?: ApprovalDecision[]
   approval_policy?: 'auto_approve' | 'manual'

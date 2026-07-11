@@ -2,17 +2,15 @@ use std::{collections::HashMap, sync::Arc};
 
 use agent_chat::{ChatEventStream, ChatResumeRequest, ChatTurnRequest, ChatTurnRunner};
 use agent_core::{
-    AgentCancellation, AgentError, AgentEvent, AgentEventEmitter, AgentProposalStore,
-    AgentRunEventStore, AgentRunRecord, AgentRunResult, AgentRunStatus, AgentRunStore,
-    AgentRuntimeCatalog, AgentServices, AgentSessionStore, AgentStateAccess, AgentTraceStore,
-    ApprovalLevel, ArtifactPublisher, ContextPolicy, PROTOCOL_VERSION, ProposalCreator,
+    AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunResult, AgentRunStatus,
+    AgentRunStore, AgentRuntimeCatalog, AgentServices, AgentServicesFactory, AgentSessionStore,
+    AgentTraceStore, ApprovalLevel, ContextPolicy, ExecutionContext, PROTOCOL_VERSION,
     ProposalDiff, ProposalEnvelope, ProposalId, ProposalWarning, RunEventCursor, RunEventRecord,
-    RunId, RunRequest, RunScope, RunWorkflow, SessionId, SessionRecord, SubagentRunner, ThreadId,
-    ThreadRecord, ToolCaller, ToolError, TraceEvent, TriggerEnvelope, TriggerKind, UserContext,
-    WorkflowRunRequest, WorkflowRunResult,
+    RunId, RunRequest, RunScope, RunWorkflow, SessionId, SessionRecord, ThreadId, ThreadRecord,
+    ToolSpec, TraceEvent, TriggerEnvelope, TriggerKind, UserContext, WorkflowRunRequest,
+    WorkflowRunResult,
 };
-use agent_runtime::{AgentRunner, HookManager, RunControl, TraceEventBuffer};
-use async_trait::async_trait;
+use agent_runtime::{AgentRunner, HookManager, RunControl, TraceEventBuffer, guarded_services};
 use camino::Utf8PathBuf;
 use futures::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
@@ -247,7 +245,7 @@ impl RuntimeServer {
             stores.proposal_store.clone(),
         ));
         let runner = Arc::new(
-            AgentRunner::new(
+            AgentRunner::new_with_factory(
                 composition.registry.clone(),
                 stores.run_store.clone(),
                 services.clone(),
@@ -281,9 +279,7 @@ impl RuntimeServer {
         if request.agent_id.is_none() {
             request.agent_id = self.default_agent.clone();
         }
-        if request.tools.is_empty() {
-            request.tools = self.catalog.tools.clone();
-        }
+        request.tools = validated_chat_tools(&self.catalog, request.tools)?;
         if let Some(agent_id) = request.agent_id.as_deref() {
             request.messages = self
                 .composition
@@ -306,7 +302,20 @@ impl RuntimeServer {
         let provider = provider_from_options(&chat)?;
         let thread_id =
             ensure_thread(self.session_store.as_ref(), request.thread_id.as_deref()).await?;
-        let services = self.chat_services(request.agent_id.clone());
+        let services = self.chat_services(ExecutionContext {
+            run_id: request
+                .turn_id
+                .as_ref()
+                .map(|id| RunId(format!("chat_{id}")))
+                .unwrap_or_else(RunId::new_v7),
+            agent_id: request
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| "chat".to_owned()),
+            scope: RunScope::Global,
+            user: None,
+            metadata: request.metadata.clone(),
+        });
         let stream = ChatTurnRunner::new(provider, services).stream(request);
         Ok(self.persist_chat_steps(stream, thread_id))
     }
@@ -318,9 +327,7 @@ impl RuntimeServer {
         if request.state.agent_id.is_none() {
             request.state.agent_id = self.default_agent.clone();
         }
-        if request.state.tools.is_empty() {
-            request.state.tools = self.catalog.tools.clone();
-        }
+        request.state.tools = validated_chat_tools(&self.catalog, request.state.tools)?;
         if let Some(agent_id) = request.state.agent_id.as_deref() {
             request.state.messages = self
                 .composition
@@ -346,16 +353,29 @@ impl RuntimeServer {
             request.state.thread_id.as_deref(),
         )
         .await?;
-        let services = self.chat_services(request.state.agent_id.clone());
+        let services = self.chat_services(ExecutionContext {
+            run_id: request
+                .state
+                .turn_id
+                .as_ref()
+                .map(|id| RunId(format!("chat_{id}")))
+                .unwrap_or_else(RunId::new_v7),
+            agent_id: request
+                .state
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| "chat".to_owned()),
+            scope: RunScope::Global,
+            user: None,
+            metadata: request.state.metadata.clone(),
+        });
         let stream = ChatTurnRunner::new(provider, services).resume(request);
         Ok(self.persist_chat_steps(stream, thread_id))
     }
 
-    fn chat_services(&self, parent_agent_id: Option<String>) -> Arc<dyn AgentServices> {
-        let _ = parent_agent_id;
-        Arc::new(RuntimeServerChatServices {
-            inner: self.services.clone(),
-        })
+    fn chat_services(&self, context: ExecutionContext) -> Arc<dyn AgentServices> {
+        let bound = self.services.bind(context.clone());
+        guarded_services(bound, context, self.hooks.clone(), CancellationToken::new())
     }
 
     pub(crate) async fn run_agent(
@@ -441,12 +461,14 @@ impl RuntimeServer {
                 return Err(error).into_diagnostic();
             }
         };
+        let should_persist_trace = outcome.should_persist_trace();
         let trace_events = outcome.trace.events.clone();
         stop_run_event_logger(event_log_task).await;
-        if let Err(err) = self
-            .event_store
-            .replace_run_events(&outcome.trace.run_id, trace_events)
-            .await
+        if should_persist_trace
+            && let Err(err) = self
+                .event_store
+                .replace_run_events(&outcome.trace.run_id, trace_events)
+                .await
         {
             warn!(
                 run_id = %outcome.trace.run_id.0,
@@ -457,10 +479,12 @@ impl RuntimeServer {
         let persist_result: Result<()> = async {
             record_session_step(self.session_store.as_ref(), thread_id.as_deref(), &outcome)
                 .await?;
-            self.trace_store
-                .write_trace(outcome.trace.clone())
-                .await
-                .into_diagnostic()?;
+            if should_persist_trace {
+                self.trace_store
+                    .write_trace(outcome.trace.clone())
+                    .await
+                    .into_diagnostic()?;
+            }
             Ok(())
         }
         .await;
@@ -620,8 +644,20 @@ impl RuntimeServer {
             warn!(tool_name = %name, error = %err, "server rejected unknown tool");
             return Err(err);
         }
-        let output = self
-            .services
+        let context = ExecutionContext {
+            run_id: RunId::new_v7(),
+            agent_id: "http.tool".to_owned(),
+            scope: RunScope::Global,
+            user: None,
+            metadata: json!({"surface": "http"}),
+        };
+        let services = guarded_services(
+            self.services.bind(context.clone()),
+            context,
+            self.hooks.clone(),
+            CancellationToken::new(),
+        );
+        let output = services
             .call_tool(&name, input)
             .await
             .map_err(|err| miette!(err.record.message))?;
@@ -964,61 +1000,6 @@ async fn stop_run_event_logger(task: JoinHandle<()>) {
     let _ = task.await;
 }
 
-struct RuntimeServerChatServices {
-    inner: Arc<CliServices>,
-}
-
-#[async_trait]
-impl ToolCaller for RuntimeServerChatServices {
-    async fn call_tool(&self, name: &str, input: Value) -> std::result::Result<Value, ToolError> {
-        ToolCaller::call_tool(self.inner.as_ref(), name, input).await
-    }
-
-    async fn call_tool_with_cancellation(
-        &self,
-        name: &str,
-        input: Value,
-        cancellation: AgentCancellation,
-    ) -> std::result::Result<Value, ToolError> {
-        ToolCaller::call_tool_with_cancellation(self.inner.as_ref(), name, input, cancellation)
-            .await
-    }
-}
-
-#[async_trait]
-impl AgentEventEmitter for RuntimeServerChatServices {
-    async fn emit_event(&self, event: AgentEvent) -> std::result::Result<(), AgentError> {
-        AgentEventEmitter::emit_event(self.inner.as_ref(), event).await
-    }
-}
-
-#[async_trait]
-impl AgentStateAccess for RuntimeServerChatServices {
-    async fn load_state(&self, key: &str) -> std::result::Result<Option<Value>, AgentError> {
-        AgentStateAccess::load_state(self.inner.as_ref(), key).await
-    }
-
-    async fn save_state(&self, key: &str, value: Value) -> std::result::Result<(), AgentError> {
-        AgentStateAccess::save_state(self.inner.as_ref(), key, value).await
-    }
-}
-
-#[async_trait]
-impl ProposalCreator for RuntimeServerChatServices {
-    async fn create_proposal(
-        &self,
-        proposal: ProposalEnvelope,
-    ) -> std::result::Result<(), AgentError> {
-        ProposalCreator::create_proposal(self.inner.as_ref(), proposal).await
-    }
-}
-
-#[async_trait]
-impl SubagentRunner for RuntimeServerChatServices {}
-
-#[async_trait]
-impl ArtifactPublisher for RuntimeServerChatServices {}
-
 fn serialized_value_len(value: &Value) -> usize {
     serde_json::to_vec(value)
         .map(|bytes| bytes.len())
@@ -1038,6 +1019,31 @@ fn ensure_catalog_has_tool(catalog: &AgentRuntimeCatalog, name: &str) -> Result<
     Err(miette!(
         "tool '{name}' is not present in the active catalog"
     ))
+}
+
+fn validated_chat_tools(
+    catalog: &AgentRuntimeCatalog,
+    requested: Vec<ToolSpec>,
+) -> Result<Vec<ToolSpec>> {
+    if requested.is_empty() {
+        return Ok(catalog.tools.clone());
+    }
+    requested
+        .into_iter()
+        .map(|requested| {
+            catalog
+                .tools
+                .iter()
+                .find(|tool| tool.name == requested.name)
+                .cloned()
+                .ok_or_else(|| {
+                    miette!(
+                        "chat tool '{}' is not in the active catalog",
+                        requested.name
+                    )
+                })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1109,6 +1115,53 @@ mod tests {
                 .tools
                 .iter()
                 .any(|tool| tool.name == "agent.run")
+        );
+    }
+
+    #[test]
+    fn chat_tools_are_resolved_from_catalog_authority() {
+        let catalog = AgentRuntimeCatalog {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            catalog_version: agent_core::CATALOG_VERSION.to_owned(),
+            generated_at: OffsetDateTime::now_utc(),
+            active_domains: Vec::new(),
+            agents: Vec::new(),
+            tools: vec![ToolSpec {
+                name: "write.data".to_owned(),
+                description: "authoritative".to_owned(),
+                input_schema: json!({"type": "object"}),
+                output_schema: None,
+                risk: agent_core::ToolRisk::High,
+                metadata: json!({}),
+            }],
+            proposal_kinds: Vec::new(),
+            prompt_blocks: Vec::new(),
+        };
+        let requested = ToolSpec {
+            name: "write.data".to_owned(),
+            description: "client override".to_owned(),
+            input_schema: json!({}),
+            output_schema: None,
+            risk: agent_core::ToolRisk::ReadOnly,
+            metadata: json!({}),
+        };
+
+        let resolved =
+            validated_chat_tools(&catalog, vec![requested]).expect("catalog tool resolves");
+        assert_eq!(resolved[0].risk, agent_core::ToolRisk::High);
+        assert!(
+            validated_chat_tools(
+                &catalog,
+                vec![ToolSpec {
+                    name: "hidden.tool".to_owned(),
+                    description: String::new(),
+                    input_schema: json!({}),
+                    output_schema: None,
+                    risk: agent_core::ToolRisk::ReadOnly,
+                    metadata: json!({}),
+                }],
+            )
+            .is_err()
         );
     }
 }

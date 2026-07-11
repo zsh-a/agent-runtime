@@ -36,14 +36,15 @@ impl AgentLockStore for InMemoryLockStore {
         Ok(Some(lease))
     }
 
-    async fn renew(&self, lease: &RunLease, ttl: Duration) -> Result<(), StoreError> {
+    async fn renew(&self, lease: &RunLease, ttl: Duration) -> Result<bool, StoreError> {
         let mut leases = self.leases.lock().await;
         if let Some(stored) = leases.get_mut(&lease.key)
             && stored.owner == lease.owner
         {
             stored.expires_at = OffsetDateTime::now_utc() + lease_duration(ttl);
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     async fn release(&self, lease: RunLease) -> Result<(), StoreError> {

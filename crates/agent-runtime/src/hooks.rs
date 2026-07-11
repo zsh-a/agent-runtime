@@ -184,6 +184,7 @@ impl HookManager {
         let result = hook.handler.handle(invocation).await;
         let finished_at = OffsetDateTime::now_utc();
         let duration_ms = u64::try_from(timer.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let trace_input = auditable_hook_input(event, &input);
         let event_record = match &result {
             Ok(output) => HookEvent {
                 protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -197,8 +198,8 @@ impl HookManager {
                 started_at,
                 finished_at,
                 duration_ms,
-                input,
-                output: Some(output.clone()),
+                input: trace_input.clone(),
+                output: Some(auditable_hook_output(event, output)),
                 error: None,
             },
             Err(error) => HookEvent {
@@ -213,7 +214,7 @@ impl HookManager {
                 started_at,
                 finished_at,
                 duration_ms,
-                input,
+                input: trace_input,
                 output: None,
                 error: Some(json!(error.record)),
             },
@@ -227,6 +228,45 @@ impl HookManager {
             .await?;
         result
     }
+}
+
+fn auditable_hook_input(event: HookEventName, input: &Value) -> Value {
+    let mut input = input.clone();
+    if matches!(
+        event,
+        HookEventName::BeforeToolCall
+            | HookEventName::AfterToolCall
+            | HookEventName::BeforeStateSave
+            | HookEventName::AfterStateSave
+    ) && let Some(object) = input.as_object_mut()
+    {
+        for field in ["input", "output", "value"] {
+            object.remove(field);
+        }
+    }
+    input
+}
+
+fn auditable_hook_output(event: HookEventName, output: &Value) -> Value {
+    if matches!(
+        event,
+        HookEventName::BeforeToolCall
+            | HookEventName::AfterToolCall
+            | HookEventName::BeforeStateSave
+            | HookEventName::AfterStateSave
+    ) {
+        return match output {
+            Value::Object(object) => Value::Object(
+                object
+                    .iter()
+                    .filter(|(key, _)| !matches!(key.as_str(), "input" | "output" | "value"))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            ),
+            _ => json!({"redacted": true}),
+        };
+    }
+    output.clone()
 }
 
 struct ProcessHook {

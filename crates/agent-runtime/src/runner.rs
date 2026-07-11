@@ -6,12 +6,12 @@ use std::{
 
 use agent_core::{
     Agent, AgentContext, AgentError, AgentRegistry, AgentRunRecord, AgentRunResult, AgentRunStatus,
-    AgentRunStore, AgentServices, AgentSpec, AgentTrace, ArtifactRef, HookEventName,
-    PROTOCOL_VERSION, RunCompensation, RunDependency, RunId, RunLease, RunRequest, RunScope,
-    RunWorkflow, TraceEvent, TraceSink, TraceSpan, TraceUsageProviderSummary, TraceUsageSummary,
-    WorkflowInputMapping, WorkflowInputTransform, WorkflowRunNode,
-    WorkflowRunNodeCompensationResult, WorkflowRunNodeResult, WorkflowRunRequest,
-    WorkflowRunResult,
+    AgentRunStore, AgentServices, AgentServicesFactory, AgentSpec, AgentTrace, ArtifactRef,
+    ExecutionContext, HookEventName, PROTOCOL_VERSION, RunCompensation, RunDependency, RunId,
+    RunLease, RunRequest, RunScope, RunWorkflow, StaticAgentServicesFactory, TraceEvent, TraceSink,
+    TraceSpan, TraceUsageProviderSummary, TraceUsageSummary, WorkflowInputMapping,
+    WorkflowInputTransform, WorkflowRunNode, WorkflowRunNodeCompensationResult,
+    WorkflowRunNodeResult, WorkflowRunRequest, WorkflowRunResult,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -36,6 +36,19 @@ use crate::{
 pub struct RunOutcome {
     pub result: AgentRunResult,
     pub trace: AgentTrace,
+    pub disposition: RunDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunDisposition {
+    Executed,
+    Deduplicated,
+}
+
+impl RunOutcome {
+    pub fn should_persist_trace(&self) -> bool {
+        self.disposition == RunDisposition::Executed
+    }
 }
 
 const STORE_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -60,10 +73,12 @@ impl Default for RunControl {
 pub struct AgentRunner {
     registry: Arc<dyn AgentRegistry>,
     run_store: Arc<dyn AgentRunStore>,
-    services: Arc<dyn AgentServices>,
+    services: Arc<dyn AgentServicesFactory>,
     scheduler: AgentScheduler,
     policy: ExecutionPolicy,
     concurrency: Arc<Semaphore>,
+    subagent_concurrency: Arc<Semaphore>,
+    is_nested: bool,
     lock_store: Arc<dyn agent_core::AgentLockStore>,
     hooks: HookManager,
 }
@@ -74,6 +89,18 @@ impl AgentRunner {
         run_store: Arc<dyn AgentRunStore>,
         services: Arc<dyn AgentServices>,
     ) -> Self {
+        Self::new_with_factory(
+            registry,
+            run_store,
+            Arc::new(StaticAgentServicesFactory::new(services)),
+        )
+    }
+
+    pub fn new_with_factory(
+        registry: Arc<dyn AgentRegistry>,
+        run_store: Arc<dyn AgentRunStore>,
+        services: Arc<dyn AgentServicesFactory>,
+    ) -> Self {
         Self {
             registry,
             run_store,
@@ -83,6 +110,10 @@ impl AgentRunner {
             concurrency: Arc::new(Semaphore::new(
                 ExecutionPolicy::default().max_concurrent_runs,
             )),
+            subagent_concurrency: Arc::new(Semaphore::new(
+                ExecutionPolicy::default().max_concurrent_runs,
+            )),
+            is_nested: false,
             lock_store: Arc::new(InMemoryLockStore::default()),
             hooks: HookManager::default(),
         }
@@ -90,6 +121,7 @@ impl AgentRunner {
 
     pub fn with_policy(mut self, policy: ExecutionPolicy) -> Self {
         self.concurrency = Arc::new(Semaphore::new(policy.max_concurrent_runs.max(1)));
+        self.subagent_concurrency = Arc::new(Semaphore::new(policy.max_concurrent_runs.max(1)));
         self.policy = policy;
         self
     }
@@ -112,6 +144,8 @@ impl AgentRunner {
             scheduler: self.scheduler,
             policy: self.policy.clone(),
             concurrency: Arc::new(Semaphore::new(self.policy.max_concurrent_runs.max(1))),
+            subagent_concurrency: self.subagent_concurrency.clone(),
+            is_nested: true,
             lock_store: self.lock_store.clone(),
             hooks: self.hooks.clone(),
         }
@@ -125,6 +159,8 @@ impl AgentRunner {
             scheduler: self.scheduler,
             policy: self.policy.clone(),
             concurrency: self.concurrency.clone(),
+            subagent_concurrency: self.subagent_concurrency.clone(),
+            is_nested: self.is_nested,
             lock_store: self.lock_store.clone(),
             hooks: self.hooks.clone(),
         }
@@ -183,14 +219,21 @@ impl AgentRunner {
             ));
         };
 
+        let lease_cancellation = CancellationToken::new();
         let lease_renewer = spawn_lease_renewer(
             self.lock_store.clone(),
             lease.clone(),
             self.policy.lease_ttl(),
             "workflow",
             workflow_id.clone(),
+            Some(lease_cancellation.clone()),
         );
-        let leased_workflow = self.run_workflow_locked(request, started_at, order).await;
+        let leased_workflow = tokio::select! {
+            result = self.run_workflow_locked(request, started_at, order) => result,
+            _ = lease_cancellation.cancelled() => {
+                Err(AgentError::cancelled("workflow lease ownership was lost"))
+            }
+        };
         stop_lease_renewer(lease_renewer).await;
         let release_result = self.lock_store.release(lease).await.map_err(|e| {
             error!(
@@ -547,12 +590,18 @@ impl AgentRunner {
         control: RunControl,
     ) -> Result<RunOutcome, AgentError> {
         let run_timer = std::time::Instant::now();
-        let _permit = self
-            .concurrency
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| AgentError::internal(format!("run concurrency limiter closed: {e}")))?;
+        let _permit = if self.is_nested {
+            self.subagent_concurrency
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| AgentError::validation("subagent concurrency limit reached"))?
+        } else {
+            self.concurrency
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|e| AgentError::internal(format!("run concurrency limiter closed: {e}")))?
+        };
         debug!(agent_id, "acquired run concurrency permit");
         let agent = self
             .registry
@@ -563,7 +612,7 @@ impl AgentRunner {
         let run_id = request.run_id.clone().unwrap_or_else(RunId::new_v7);
         let started_at = OffsetDateTime::now_utc();
         let scope = request_scope(&request)?;
-        let idempotency_key = run_idempotency_key(&spec.id, &scope, &request);
+        let idempotency_key = run_idempotency_key(&spec.id, &scope, &request, &run_id);
         let lock_key = lock_key(&spec.id, &scope);
         let trace = Arc::new(match (control.trace_events, control.trace_event_buffer) {
             (Some(sender), buffer) => MemoryTraceSink::with_event_sender(sender, buffer),
@@ -594,6 +643,14 @@ impl AgentRunner {
             .await
             .map_err(|e| AgentError::internal(e.to_string()))?;
         let Some(lease) = lease else {
+            if let Some(existing) = self
+                .run_store
+                .find_run_by_idempotency_key(&spec.id, &scope, &idempotency_key)
+                .await
+                .map_err(|e| AgentError::internal(e.to_string()))?
+            {
+                return Ok(deduplicated_outcome(existing, &spec));
+            }
             let reason = format!("run skipped because active lease exists for {lock_key}");
             warn!(
                 run_id = %run_id.0,
@@ -676,6 +733,7 @@ impl AgentRunner {
             return Ok(RunOutcome {
                 result,
                 trace: trace_doc,
+                disposition: RunDisposition::Executed,
             });
         };
         debug!(
@@ -692,8 +750,17 @@ impl AgentRunner {
             self.policy.lease_ttl(),
             "agent_run",
             run_id.0.clone(),
+            Some(control.cancellation.clone()),
         );
-        let leased_run = async {
+        let leased_run: Result<RunOutcome, AgentError> = async {
+            if let Some(existing) = self
+                .run_store
+                .find_run_by_idempotency_key(&spec.id, &scope, &idempotency_key)
+                .await
+                .map_err(|e| AgentError::internal(e.to_string()))?
+            {
+                return Ok(deduplicated_outcome(existing, &spec));
+            }
             self.run_store
                 .create_run(AgentRunRecord {
                     protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -877,9 +944,38 @@ impl AgentRunner {
             Ok(RunOutcome {
                 result,
                 trace: trace_doc,
+                disposition: RunDisposition::Executed,
             })
         }
         .await;
+        let leased_run = match leased_run {
+            Ok(outcome) => Ok(outcome),
+            Err(run_error) => {
+                match self.run_store.get_run(&run_id).await {
+                    Ok(Some(mut record)) if record.status == AgentRunStatus::Running => {
+                        record.status = AgentRunStatus::Failed;
+                        record.finished_at = Some(OffsetDateTime::now_utc());
+                        record.error = Some(run_error.record.clone());
+                        if let Err(store_error) = self.run_store.update_run(record).await {
+                            error!(
+                                run_id = %run_id.0,
+                                agent_id = %spec.id,
+                                error = %store_error,
+                                "failed to finalize run after infrastructure error",
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(store_error) => error!(
+                        run_id = %run_id.0,
+                        agent_id = %spec.id,
+                        error = %store_error,
+                        "failed to load run for infrastructure-error finalization",
+                    ),
+                }
+                Err(run_error)
+            }
+        };
 
         stop_lease_renewer(lease_renewer).await;
         let release_result = self.lock_store.release(lease).await.map_err(|e| {
@@ -1181,7 +1277,13 @@ impl AgentRunner {
             scope: scope.clone(),
             input: request.input.clone(),
             services: Arc::new(TracedAgentServices {
-                inner: self.services.clone(),
+                inner: self.services.bind(ExecutionContext {
+                    run_id: run_id.clone(),
+                    agent_id: spec.id.clone(),
+                    scope: scope.clone(),
+                    user: request.user.clone(),
+                    metadata: request.metadata.clone(),
+                }),
                 trace: trace.clone(),
                 run_id: run_id.clone(),
                 agent_id: spec.id.clone(),
@@ -1807,7 +1909,12 @@ fn workflow_node_failed(status: &AgentRunStatus) -> bool {
     )
 }
 
-pub fn run_idempotency_key(agent_id: &str, scope: &RunScope, request: &RunRequest) -> String {
+pub fn run_idempotency_key(
+    agent_id: &str,
+    scope: &RunScope,
+    request: &RunRequest,
+    run_id: &RunId,
+) -> String {
     let scheduled_for = request
         .metadata
         .get("scheduled_for")
@@ -1824,9 +1931,66 @@ pub fn run_idempotency_key(agent_id: &str, scope: &RunScope, request: &RunReques
         "trigger_kind": &request.trigger,
         "scheduled_for": scheduled_for,
         "trigger_envelope": trigger_envelope,
+        "request_identity": if scheduled_for.is_null() && trigger_envelope.is_null() {
+            Value::String(run_id.0.clone())
+        } else {
+            Value::Null
+        },
     });
     let bytes = serde_json::to_vec(&material).unwrap_or_else(|_| agent_id.as_bytes().to_vec());
     format!("idem_{}", blake3::hash(&bytes).to_hex())
+}
+
+fn deduplicated_outcome(record: AgentRunRecord, spec: &AgentSpec) -> RunOutcome {
+    let finished_at = record.finished_at.unwrap_or_else(OffsetDateTime::now_utc);
+    let result = AgentRunResult {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        run_id: record.run_id.clone(),
+        agent_id: record.agent_id.clone(),
+        status: record.status.clone(),
+        started_at: record.started_at,
+        finished_at,
+        summary: Some("deduplicated by idempotency key".to_owned()),
+        output: record.output.clone(),
+        error: record.error.clone(),
+        workflow: record.workflow.clone(),
+    };
+    let event = TraceEvent::new(
+        "run_deduplicated",
+        json!({
+            "run_id": record.run_id.0,
+            "idempotency_key": record.idempotency_key,
+            "status": record.status,
+        }),
+    );
+    RunOutcome {
+        result,
+        trace: AgentTrace {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            runtime_version: RUNTIME_VERSION.to_owned(),
+            run_id: record.run_id,
+            agent_id: record.agent_id,
+            agent_version: spec.version.clone(),
+            scope: record.scope,
+            started_at: record.started_at,
+            finished_at,
+            input: record.input,
+            output: record.output,
+            workflow: record.workflow,
+            usage_summary: Some(TraceUsageSummary {
+                llm_request_count: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                cost_micros_by_currency: BTreeMap::new(),
+                by_provider: Vec::new(),
+            }),
+            spans: Vec::new(),
+            events: vec![event],
+            artifact_refs: Vec::new(),
+        },
+        disposition: RunDisposition::Deduplicated,
+    }
 }
 
 fn spawn_lease_renewer(
@@ -1835,6 +1999,7 @@ fn spawn_lease_renewer(
     ttl: Duration,
     lease_kind: &'static str,
     subject_id: String,
+    cancellation: Option<CancellationToken>,
 ) -> JoinHandle<()> {
     let interval_duration = lease_renewal_interval(ttl);
     tokio::spawn(async move {
@@ -1844,7 +2009,7 @@ fn spawn_lease_renewer(
         loop {
             interval.tick().await;
             match lock_store.renew(&lease, ttl).await {
-                Ok(()) => {
+                Ok(true) => {
                     debug!(
                         lease_kind,
                         subject_id = %subject_id,
@@ -1854,6 +2019,18 @@ fn spawn_lease_renewer(
                         "lease renewed",
                     );
                 }
+                Ok(false) => {
+                    warn!(
+                        lease_kind,
+                        subject_id = %subject_id,
+                        lock_key = %lease.key,
+                        "lease ownership was lost",
+                    );
+                    if let Some(cancellation) = &cancellation {
+                        cancellation.cancel();
+                    }
+                    break;
+                }
                 Err(error) => {
                     warn!(
                         lease_kind,
@@ -1862,6 +2039,10 @@ fn spawn_lease_renewer(
                         error = %error,
                         "failed to renew lease",
                     );
+                    if let Some(cancellation) = &cancellation {
+                        cancellation.cancel();
+                    }
+                    break;
                 }
             }
         }

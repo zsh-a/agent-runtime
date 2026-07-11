@@ -74,14 +74,15 @@ pub(crate) async fn replay_trace(options: ReplayTraceOptions) -> Result<()> {
         stores.state_store.clone(),
         stores.proposal_store.clone(),
     ));
-    let runner = AgentRunner::new(composition.registry, stores.run_store.clone(), services)
-        .with_lock_store(stores.lock_store.clone())
-        .with_hooks(options.hooks)
-        .with_policy(execution_policy(
-            options.timeout_seconds,
-            options.max_retries,
-            options.retry_backoff_ms,
-        ));
+    let runner =
+        AgentRunner::new_with_factory(composition.registry, stores.run_store.clone(), services)
+            .with_lock_store(stores.lock_store.clone())
+            .with_hooks(options.hooks)
+            .with_policy(execution_policy(
+                options.timeout_seconds,
+                options.max_retries,
+                options.retry_backoff_ms,
+            ));
     let report = replay_source_trace(
         &runner,
         stores.trace_store.as_ref(),
@@ -109,10 +110,12 @@ pub(crate) async fn replay_source_trace(
         )
         .await
         .into_diagnostic()?;
-    trace_store
-        .write_trace(outcome.trace.clone())
-        .await
-        .into_diagnostic()?;
+    if outcome.should_persist_trace() {
+        trace_store
+            .write_trace(outcome.trace.clone())
+            .await
+            .into_diagnostic()?;
+    }
     Ok(ReplayExecutionReport {
         mode,
         source_run_id: source_trace.run_id,

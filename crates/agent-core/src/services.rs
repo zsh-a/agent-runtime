@@ -14,11 +14,16 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ToolContext {
+pub struct ExecutionContext {
     pub run_id: RunId,
     pub agent_id: String,
+    pub scope: RunScope,
     pub user: Option<UserContext>,
+    #[serde(default)]
+    pub metadata: Value,
 }
+
+pub type ToolContext = ExecutionContext;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ArtifactPublishRequest {
@@ -225,6 +230,26 @@ impl<T> AgentServices for T where
         + ProposalCreator
         + ArtifactPublisher
 {
+}
+
+pub trait AgentServicesFactory: Send + Sync {
+    fn bind(&self, context: ExecutionContext) -> Arc<dyn AgentServices>;
+}
+
+pub struct StaticAgentServicesFactory {
+    services: Arc<dyn AgentServices>,
+}
+
+impl StaticAgentServicesFactory {
+    pub fn new(services: Arc<dyn AgentServices>) -> Self {
+        Self { services }
+    }
+}
+
+impl AgentServicesFactory for StaticAgentServicesFactory {
+    fn bind(&self, _context: ExecutionContext) -> Arc<dyn AgentServices> {
+        self.services.clone()
+    }
 }
 
 #[async_trait]

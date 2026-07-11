@@ -24,17 +24,53 @@ impl InMemoryRunStore {
 #[async_trait]
 impl AgentRunStore for InMemoryRunStore {
     async fn create_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
-        self.runs.write().await.insert(run.run_id.0.clone(), run);
+        let mut runs = self.runs.write().await;
+        if runs.contains_key(&run.run_id.0) {
+            return Err(StoreError::new("run already exists"));
+        }
+        if let Some(key) = run.idempotency_key.as_deref()
+            && runs.values().any(|existing| {
+                existing.agent_id == run.agent_id
+                    && same_scope(&existing.scope, &run.scope)
+                    && existing.idempotency_key.as_deref() == Some(key)
+            })
+        {
+            return Err(StoreError::new("run idempotency key already exists"));
+        }
+        runs.insert(run.run_id.0.clone(), run);
         Ok(())
     }
 
     async fn update_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
-        self.runs.write().await.insert(run.run_id.0.clone(), run);
+        let mut runs = self.runs.write().await;
+        if !runs.contains_key(&run.run_id.0) {
+            return Err(StoreError::new("run does not exist"));
+        }
+        runs.insert(run.run_id.0.clone(), run);
         Ok(())
     }
 
     async fn get_run(&self, run_id: &RunId) -> Result<Option<AgentRunRecord>, StoreError> {
         Ok(self.runs.read().await.get(&run_id.0).cloned())
+    }
+
+    async fn find_run_by_idempotency_key(
+        &self,
+        agent_id: &str,
+        scope: &RunScope,
+        idempotency_key: &str,
+    ) -> Result<Option<AgentRunRecord>, StoreError> {
+        Ok(self
+            .runs
+            .read()
+            .await
+            .values()
+            .find(|run| {
+                run.agent_id == agent_id
+                    && same_scope(&run.scope, scope)
+                    && run.idempotency_key.as_deref() == Some(idempotency_key)
+            })
+            .cloned())
     }
 
     async fn list_runs(
@@ -74,7 +110,7 @@ impl AgentRunStore for InMemoryRunStore {
 
 #[derive(Default)]
 pub struct InMemoryStateStore {
-    values: RwLock<HashMap<(String, String), serde_json::Value>>,
+    values: RwLock<HashMap<(String, RunScope, String), serde_json::Value>>,
 }
 
 impl InMemoryStateStore {
@@ -88,26 +124,28 @@ impl AgentStateStore for InMemoryStateStore {
     async fn load(
         &self,
         agent_id: &str,
+        scope: &RunScope,
         key: &str,
     ) -> Result<Option<serde_json::Value>, StoreError> {
         Ok(self
             .values
             .read()
             .await
-            .get(&(agent_id.to_owned(), key.to_owned()))
+            .get(&(agent_id.to_owned(), scope.clone(), key.to_owned()))
             .cloned())
     }
 
     async fn save(
         &self,
         agent_id: &str,
+        scope: &RunScope,
         key: &str,
         value: serde_json::Value,
     ) -> Result<(), StoreError> {
         self.values
             .write()
             .await
-            .insert((agent_id.to_owned(), key.to_owned()), value);
+            .insert((agent_id.to_owned(), scope.clone(), key.to_owned()), value);
         Ok(())
     }
 }
@@ -126,19 +164,28 @@ impl InMemoryProposalStore {
 #[async_trait]
 impl AgentProposalStore for InMemoryProposalStore {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError> {
-        self.proposals
-            .write()
-            .await
-            .insert(proposal.proposal_id.0.clone(), proposal);
+        let mut proposals = self.proposals.write().await;
+        if proposals.contains_key(&proposal.proposal_id.0) {
+            return Err(StoreError::new("proposal already exists"));
+        }
+        proposals.insert(proposal.proposal_id.0.clone(), proposal);
         Ok(())
     }
 
-    async fn update_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError> {
-        self.proposals
-            .write()
-            .await
-            .insert(proposal.proposal_id.0.clone(), proposal);
-        Ok(())
+    async fn update_proposal(
+        &self,
+        proposal: ProposalEnvelope,
+        expected_version: u64,
+    ) -> Result<bool, StoreError> {
+        let mut proposals = self.proposals.write().await;
+        let Some(current) = proposals.get(&proposal.proposal_id.0) else {
+            return Ok(false);
+        };
+        if current.version != expected_version || proposal.version != expected_version + 1 {
+            return Ok(false);
+        }
+        proposals.insert(proposal.proposal_id.0.clone(), proposal);
+        Ok(true)
     }
 
     async fn get_proposal(

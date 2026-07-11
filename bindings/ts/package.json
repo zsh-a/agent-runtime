@@ -16,6 +16,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "bun test",
+    "check": "npm run build && npm run test:types && npm test",
     "test:types": "tsc --noEmit -p tsconfig.test.json"
   },
   "devDependencies": {

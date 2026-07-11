@@ -61,6 +61,11 @@ pub(crate) async fn serve_http(server: RuntimeServer, host: String, port: u16) -
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
         .map_err(|e| miette!("invalid listen address {host}:{port}: {e}"))?;
+    if !addr.ip().is_loopback() {
+        return Err(miette!(
+            "the embedded runtime server only binds loopback addresses; expose it through an authenticated host gateway"
+        ));
+    }
     let app = Router::new()
         .route("/healthz", get(http_healthz))
         .route("/catalog/summary", get(http_catalog_summary))

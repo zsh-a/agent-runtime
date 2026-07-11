@@ -88,11 +88,9 @@ pub(crate) async fn decide_proposal_with_store(
     input: ProposalDecisionInput,
 ) -> Result<ProposalDecisionResponse> {
     let now = time::OffsetDateTime::now_utc();
+    let expected_version = proposal.version;
     if proposal.mark_expired_if_needed(now) {
-        store
-            .update_proposal(proposal.clone())
-            .await
-            .into_diagnostic()?;
+        persist_proposal_update(store, proposal, expected_version).await?;
         return Err(miette!(
             "proposal '{}' expired before decision and was marked expired",
             proposal.proposal_id.0
@@ -131,10 +129,7 @@ pub(crate) async fn decide_proposal_with_store(
         comment: input.comment,
     };
     apply_approval_decision(proposal, decision.clone())?;
-    store
-        .update_proposal(proposal.clone())
-        .await
-        .into_diagnostic()?;
+    persist_proposal_update(store, proposal, expected_version).await?;
 
     Ok(ProposalDecisionResponse {
         decision,
@@ -368,13 +363,11 @@ pub(crate) async fn execute_proposal_action_with_store(
     tool: String,
     action: ProposalAction,
 ) -> Result<ProposalActionResponse> {
+    let expected_version = proposal.version;
     if matches!(action, ProposalAction::Apply)
         && proposal.mark_expired_if_needed(time::OffsetDateTime::now_utc())
     {
-        store
-            .update_proposal(proposal.clone())
-            .await
-            .into_diagnostic()?;
+        persist_proposal_update(store, proposal, expected_version).await?;
         return Err(miette!(
             "proposal '{}' expired before apply and was marked expired",
             proposal.proposal_id.0
@@ -393,10 +386,7 @@ pub(crate) async fn execute_proposal_action_with_store(
     }
 
     proposal.status = action.in_progress_status();
-    store
-        .update_proposal(proposal.clone())
-        .await
-        .into_diagnostic()?;
+    persist_proposal_update(store, proposal, expected_version).await?;
 
     let tool_input = json!({
         "action": action.as_str(),
@@ -405,26 +395,44 @@ pub(crate) async fn execute_proposal_action_with_store(
     let tool_output = match services.call_tool(&tool, tool_input).await {
         Ok(output) => output,
         Err(err) => {
+            let expected_version = proposal.version;
             proposal.status = action.failure_status();
-            store
-                .update_proposal(proposal.clone())
-                .await
-                .into_diagnostic()?;
+            persist_proposal_update(store, proposal, expected_version).await?;
             return Err(miette!(err.record.message));
         }
     };
 
+    let expected_version = proposal.version;
     proposal.status = action.success_status();
-    store
-        .update_proposal(proposal.clone())
-        .await
-        .into_diagnostic()?;
+    persist_proposal_update(store, proposal, expected_version).await?;
     Ok(ProposalActionResponse {
         action: action.as_str().to_owned(),
         tool,
         tool_output,
         proposal: proposal.clone(),
     })
+}
+
+async fn persist_proposal_update(
+    store: &dyn AgentProposalStore,
+    proposal: &mut ProposalEnvelope,
+    expected_version: u64,
+) -> Result<()> {
+    proposal.version = expected_version
+        .checked_add(1)
+        .ok_or_else(|| miette!("proposal version overflow"))?;
+    if store
+        .update_proposal(proposal.clone(), expected_version)
+        .await
+        .into_diagnostic()?
+    {
+        return Ok(());
+    }
+    proposal.version = expected_version;
+    Err(miette!(
+        "proposal '{}' changed concurrently",
+        proposal.proposal_id.0
+    ))
 }
 
 struct StoreTraceSink<'a> {

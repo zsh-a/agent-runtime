@@ -271,7 +271,7 @@ pub struct WorkflowRunNodeCompensationResult {
     pub metadata: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {
     Running,
@@ -430,7 +430,7 @@ pub struct RunLease {
     pub expires_at: OffsetDateTime,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
 pub enum RunScope {
     Global,

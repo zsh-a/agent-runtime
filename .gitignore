@@ -5,4 +5,6 @@
 /.agent-runtime/commands/generated/
 *.log
 *.tmp
+/bindings/ts/dist/
+/bindings/ts/node_modules/
 .DS_Store

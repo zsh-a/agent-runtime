@@ -13,10 +13,31 @@ use tracing::{debug, info, warn};
 
 use crate::{SubagentRunContext, hooks::HookManager, run_subagent, runner::AgentRunner};
 
+pub fn guarded_services(
+    inner: Arc<dyn AgentServices>,
+    context: agent_core::ExecutionContext,
+    hooks: HookManager,
+    cancellation: CancellationToken,
+) -> Arc<dyn AgentServices> {
+    Arc::new(TracedAgentServices {
+        inner,
+        trace: Arc::new(crate::MemoryTraceSink::default()),
+        run_id: context.run_id,
+        agent_id: context.agent_id,
+        user: context.user,
+        scope: context.scope,
+        hooks,
+        subagent_runner: None,
+        cancellation,
+        workflow: None,
+    })
+}
+
 pub struct BasicAgentServices {
     agent_id: String,
     run_id: RunId,
     user: Option<UserContext>,
+    scope: RunScope,
     tools: Arc<dyn ToolRegistry>,
     state_store: Arc<dyn AgentStateStore>,
 }
@@ -39,6 +60,7 @@ impl BasicAgentServices {
         agent_id: impl Into<String>,
         run_id: RunId,
         user: Option<UserContext>,
+        scope: RunScope,
         tools: Arc<dyn ToolRegistry>,
         state_store: Arc<dyn AgentStateStore>,
     ) -> Self {
@@ -46,6 +68,7 @@ impl BasicAgentServices {
             agent_id: agent_id.into(),
             run_id,
             user,
+            scope,
             tools,
             state_store,
         }
@@ -62,7 +85,9 @@ impl ToolCaller for BasicAgentServices {
                 ToolContext {
                     run_id: self.run_id.clone(),
                     agent_id: self.agent_id.clone(),
+                    scope: self.scope.clone(),
                     user: self.user.clone(),
+                    metadata: json!({}),
                 },
             )
             .await
@@ -80,14 +105,14 @@ impl AgentEventEmitter for BasicAgentServices {
 impl AgentStateAccess for BasicAgentServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         self.state_store
-            .load(&self.agent_id, key)
+            .load(&self.agent_id, &self.scope, key)
             .await
             .map_err(|e| AgentError::internal(e.to_string()))
     }
 
     async fn save_state(&self, key: &str, value: Value) -> Result<(), AgentError> {
         self.state_store
-            .save(&self.agent_id, key, value)
+            .save(&self.agent_id, &self.scope, key, value)
             .await
             .map_err(|e| AgentError::internal(e.to_string()))
     }
@@ -199,7 +224,8 @@ impl ToolCaller for TracedAgentServices {
                             "agent_id": self.agent_id.clone(),
                             "tool_name": name,
                             "status": "completed",
-                            "output": output.clone(),
+                            "output_hash": output_hash,
+                            "output_bytes": output_bytes,
                             "duration_ms": duration_ms,
                         }),
                         self.trace.as_ref(),
@@ -355,7 +381,6 @@ impl AgentStateAccess for TracedAgentServices {
                 });
                 if let Some(value) = &value {
                     payload["value_hash"] = json!(state_value_hash(value));
-                    payload["value"] = value.clone();
                 }
                 self.trace
                     .emit(TraceEvent::new("state_read", payload))
@@ -435,7 +460,6 @@ impl AgentStateAccess for TracedAgentServices {
                             "duration_ms": started_at.elapsed().as_millis(),
                             "status": "completed",
                             "value_hash": value_hash,
-                            "value": value,
                         }),
                     ))
                     .await?;

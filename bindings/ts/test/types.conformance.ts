@@ -650,6 +650,7 @@ const proposalWarnings = [
 const proposalEnvelope = {
   protocol_version: 'agent.v1',
   proposal_id: 'proposal_01975d8c-72f5-7f1e-9b7e-c7ef3e0a1000',
+  version: 0,
   run_id: 'run_01975d8c-72f5-7f1e-9b7e-c7ef3e0a1000',
   agent_id: 'execution_review',
   kind: 'fake',

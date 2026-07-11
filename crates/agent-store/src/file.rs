@@ -12,6 +12,7 @@ use std::{
 };
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 use crate::util::{same_scope, sort_and_limit_runs};
 
@@ -19,10 +20,12 @@ static TEMP_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct FileRunStore {
     root: Utf8PathBuf,
+    updates: Mutex<()>,
 }
 
 pub struct FileProposalStore {
     root: Utf8PathBuf,
+    updates: Mutex<()>,
 }
 
 pub struct FileSessionStore {
@@ -156,16 +159,17 @@ impl AgentLockStore for FileLockStore {
         Ok(None)
     }
 
-    async fn renew(&self, lease: &RunLease, ttl: Duration) -> Result<(), StoreError> {
+    async fn renew(&self, lease: &RunLease, ttl: Duration) -> Result<bool, StoreError> {
         let path = self.path_for(&lease.key);
         let Some(mut stored) = read_optional_json::<RunLease>(&path).await? else {
-            return Ok(());
+            return Ok(false);
         };
         if stored.owner == lease.owner {
             stored.expires_at = OffsetDateTime::now_utc() + lease_duration(ttl);
             write_json(&path, &stored).await?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     async fn release(&self, lease: RunLease) -> Result<(), StoreError> {
@@ -188,7 +192,10 @@ impl FileRunStore {
         fs_err::tokio::create_dir_all(run_dir(&root))
             .await
             .map_err(map_store_err)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            updates: Mutex::new(()),
+        })
     }
 
     fn path_for(&self, run_id: &RunId) -> Utf8PathBuf {
@@ -199,15 +206,51 @@ impl FileRunStore {
 #[async_trait]
 impl AgentRunStore for FileRunStore {
     async fn create_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
-        write_json(&self.path_for(&run.run_id), &run).await
+        let _guard = self.updates.lock().await;
+        if self
+            .find_run_by_idempotency_key(
+                &run.agent_id,
+                &run.scope,
+                run.idempotency_key.as_deref().unwrap_or(""),
+            )
+            .await?
+            .is_some()
+        {
+            return Err(StoreError::new("run idempotency key already exists"));
+        }
+        create_json(&self.path_for(&run.run_id), &run).await
     }
 
     async fn update_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
-        write_json(&self.path_for(&run.run_id), &run).await
+        let _guard = self.updates.lock().await;
+        let path = self.path_for(&run.run_id);
+        if !path.exists() {
+            return Err(StoreError::new("run does not exist"));
+        }
+        write_json(&path, &run).await
     }
 
     async fn get_run(&self, run_id: &RunId) -> Result<Option<AgentRunRecord>, StoreError> {
         read_optional_json(&self.path_for(run_id)).await
+    }
+
+    async fn find_run_by_idempotency_key(
+        &self,
+        agent_id: &str,
+        scope: &RunScope,
+        idempotency_key: &str,
+    ) -> Result<Option<AgentRunRecord>, StoreError> {
+        if idempotency_key.is_empty() {
+            return Ok(None);
+        }
+        Ok(read_json_records::<AgentRunRecord>(&run_dir(&self.root))
+            .await?
+            .into_iter()
+            .find(|run| {
+                run.agent_id == agent_id
+                    && same_scope(&run.scope, scope)
+                    && run.idempotency_key.as_deref() == Some(idempotency_key)
+            }))
     }
 
     async fn list_runs(
@@ -255,7 +298,10 @@ impl FileProposalStore {
         fs_err::tokio::create_dir_all(proposal_dir(&root))
             .await
             .map_err(map_store_err)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            updates: Mutex::new(()),
+        })
     }
 
     fn path_for(&self, proposal_id: &ProposalId) -> Utf8PathBuf {
@@ -266,11 +312,24 @@ impl FileProposalStore {
 #[async_trait]
 impl AgentProposalStore for FileProposalStore {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError> {
-        write_json(&self.path_for(&proposal.proposal_id), &proposal).await
+        create_json(&self.path_for(&proposal.proposal_id), &proposal).await
     }
 
-    async fn update_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError> {
-        write_json(&self.path_for(&proposal.proposal_id), &proposal).await
+    async fn update_proposal(
+        &self,
+        proposal: ProposalEnvelope,
+        expected_version: u64,
+    ) -> Result<bool, StoreError> {
+        let _guard = self.updates.lock().await;
+        let path = self.path_for(&proposal.proposal_id);
+        let Some(current) = read_optional_json::<ProposalEnvelope>(&path).await? else {
+            return Ok(false);
+        };
+        if current.version != expected_version || proposal.version != expected_version + 1 {
+            return Ok(false);
+        }
+        write_json(&path, &proposal).await?;
+        Ok(true)
     }
 
     async fn get_proposal(

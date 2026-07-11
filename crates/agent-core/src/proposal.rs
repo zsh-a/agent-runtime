@@ -85,6 +85,8 @@ pub struct ProposalEnvelope {
     #[serde(default = "protocol_version")]
     pub protocol_version: String,
     pub proposal_id: ProposalId,
+    #[serde(default)]
+    pub version: u64,
     pub run_id: RunId,
     pub agent_id: String,
     pub kind: String,
@@ -131,6 +133,7 @@ impl ProposalEnvelope {
         Self {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             proposal_id: ProposalId::new_v7(),
+            version: 0,
             run_id,
             agent_id: agent_id.into(),
             kind: kind.into(),

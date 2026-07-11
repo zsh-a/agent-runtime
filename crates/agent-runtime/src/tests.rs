@@ -1039,7 +1039,7 @@ async fn runner_traces_state_reads_and_writes() {
     assert_eq!(write.payload["agent_id"], "stateful");
     assert_eq!(write.payload["key"], "last_input");
     assert_eq!(write.payload["status"], "completed");
-    assert_eq!(write.payload["value"]["counter"], 7);
+    assert!(write.payload.get("value").is_none());
     assert!(
         write.payload["value_hash"]
             .as_str()
@@ -1055,7 +1055,7 @@ async fn runner_traces_state_reads_and_writes() {
     assert_eq!(read.payload["agent_id"], "stateful");
     assert_eq!(read.payload["key"], "last_input");
     assert_eq!(read.payload["found"], true);
-    assert_eq!(read.payload["value"]["counter"], 7);
+    assert!(read.payload.get("value").is_none());
     assert_eq!(outcome.result.output["loaded"]["counter"], 7);
 
     let run_span_id = outcome.trace.spans[0].span_id.clone();
@@ -1326,9 +1326,10 @@ fn run_idempotency_key_is_stable_for_retry_material() {
         ..request.clone()
     };
 
-    let first = run_idempotency_key("echo", &scope, &request);
-    let second = run_idempotency_key("echo", &scope, &same_retry);
-    let third = run_idempotency_key("echo", &scope, &different_schedule);
+    let run_id = RunId("run_test".to_owned());
+    let first = run_idempotency_key("echo", &scope, &request, &run_id);
+    let second = run_idempotency_key("echo", &scope, &same_retry, &run_id);
+    let third = run_idempotency_key("echo", &scope, &different_schedule, &run_id);
 
     assert_eq!(first, second);
     assert_ne!(first, third);
@@ -1381,10 +1382,11 @@ fn run_idempotency_key_uses_external_trigger_identity() {
         ..request.clone()
     };
 
-    let first = run_idempotency_key("echo", &scope, &request);
-    let second = run_idempotency_key("echo", &scope, &same_retry);
-    let third = run_idempotency_key("echo", &scope, &different_event);
-    let fourth = run_idempotency_key("echo", &scope, &payload_without_id);
+    let run_id = RunId("run_test".to_owned());
+    let first = run_idempotency_key("echo", &scope, &request, &run_id);
+    let second = run_idempotency_key("echo", &scope, &same_retry, &run_id);
+    let third = run_idempotency_key("echo", &scope, &different_event, &run_id);
+    let fourth = run_idempotency_key("echo", &scope, &payload_without_id, &run_id);
 
     assert_eq!(first, second);
     assert_ne!(first, third);
@@ -1905,6 +1907,120 @@ async fn runner_can_cancel_active_run_and_broadcast_events() {
 }
 
 #[tokio::test]
+async fn runner_cancels_run_when_lease_ownership_is_lost() {
+    let registry = InMemoryAgentRegistry::shared(vec![Arc::new(BlockingAgent)]);
+    let run_store = agent_store::InMemoryRunStore::shared();
+    let services = Arc::new(NoopServices {
+        state_store: agent_store::InMemoryStateStore::shared(),
+    });
+    let runner = AgentRunner::new(registry, run_store.clone(), services)
+        .with_lock_store(Arc::new(LosingLockStore))
+        .with_policy(ExecutionPolicy {
+            timeout: Duration::from_millis(300),
+            max_retries: 0,
+            retry_backoff: Duration::ZERO,
+            max_concurrent_runs: 1,
+        });
+
+    let outcome = timeout(
+        Duration::from_secs(2),
+        runner.run_once("blocking", run_request()),
+    )
+    .await
+    .expect("lease loss cancels promptly")
+    .expect("cancelled run returns an outcome");
+
+    assert_eq!(outcome.result.status, AgentRunStatus::Cancelled);
+    let stored = run_store
+        .get_run(&outcome.result.run_id)
+        .await
+        .expect("run reads")
+        .expect("run exists");
+    assert_eq!(stored.status, AgentRunStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn runner_deduplicates_external_trigger_identity() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let registry = InMemoryAgentRegistry::shared(vec![Arc::new(CountingAgent {
+        executions: executions.clone(),
+    })]);
+    let runner = AgentRunner::new(
+        registry,
+        agent_store::InMemoryRunStore::shared(),
+        Arc::new(NoopServices {
+            state_store: agent_store::InMemoryStateStore::shared(),
+        }),
+    );
+    let request = RunRequest {
+        trigger: agent_core::TriggerKind::Queue,
+        trigger_envelope: Some(agent_core::TriggerEnvelope {
+            source: "orders".to_owned(),
+            id: Some("message-1".to_owned()),
+            received_at: None,
+            payload: json!({}),
+            metadata: json!({}),
+        }),
+        ..run_request()
+    };
+
+    let first = runner
+        .run_once("counting", request.clone())
+        .await
+        .expect("first delivery runs");
+    let second = runner
+        .run_once("counting", request)
+        .await
+        .expect("duplicate delivery resolves");
+
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(first.result.run_id, second.result.run_id);
+    assert!(first.should_persist_trace());
+    assert!(!second.should_persist_trace());
+    assert_eq!(second.trace.events[0].kind, "run_deduplicated");
+}
+
+#[tokio::test]
+async fn runner_finalizes_running_record_when_policy_hook_errors() {
+    let run_id = RunId("run_hook_failure".to_owned());
+    let run_store = agent_store::InMemoryRunStore::shared();
+    let runner = AgentRunner::new(
+        InMemoryAgentRegistry::shared(vec![Arc::new(EchoAgent)]),
+        run_store.clone(),
+        Arc::new(NoopServices {
+            state_store: agent_store::InMemoryStateStore::shared(),
+        }),
+    )
+    .with_hooks(HookManager::new(vec![HookRegistration::native(
+        hook_spec(
+            "failing_policy",
+            HookEventName::BeforeAgentStep,
+            HookEffect::Policy,
+        ),
+        Arc::new(FailingHook),
+    )]));
+
+    let result = runner
+        .run_once(
+            "echo",
+            RunRequest {
+                run_id: Some(run_id.clone()),
+                ..run_request()
+            },
+        )
+        .await;
+    assert!(result.is_err(), "policy infrastructure failure propagates");
+
+    let stored = run_store
+        .get_run(&run_id)
+        .await
+        .expect("run reads")
+        .expect("run exists");
+    assert_eq!(stored.status, AgentRunStatus::Failed);
+    assert!(stored.finished_at.is_some());
+}
+
+#[tokio::test]
 async fn runner_observes_persisted_cancellation_request() {
     let registry = InMemoryAgentRegistry::shared(vec![Arc::new(BlockingAgent)]);
     let run_store = agent_store::InMemoryRunStore::shared();
@@ -2185,6 +2301,37 @@ impl Agent for BlockingAgent {
     }
 }
 
+struct CountingAgent {
+    executions: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Agent for CountingAgent {
+    fn spec(&self) -> AgentSpec {
+        AgentSpec {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            id: "counting".to_owned(),
+            name: "Counting".to_owned(),
+            description: None,
+            version: "0.1.0".to_owned(),
+            schedule: ScheduleSpec::Manual,
+            capabilities: Vec::new(),
+            metadata: json!({}),
+        }
+    }
+
+    async fn run(&self, ctx: AgentContext) -> Result<AgentRunResult, AgentError> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(AgentRunResult::completed(
+            ctx.run_id,
+            "counting",
+            ctx.now,
+            json!({}),
+            None,
+        ))
+    }
+}
+
 #[derive(Default)]
 struct ConcurrencyCounters {
     current: AtomicUsize,
@@ -2399,6 +2546,34 @@ struct CountingLockStore {
     renewed_keys: Mutex<Vec<String>>,
 }
 
+struct LosingLockStore;
+
+#[async_trait]
+impl AgentLockStore for LosingLockStore {
+    async fn acquire(
+        &self,
+        key: &str,
+        owner: &str,
+        ttl: Duration,
+    ) -> Result<Option<RunLease>, StoreError> {
+        let now = OffsetDateTime::now_utc();
+        Ok(Some(RunLease {
+            key: key.to_owned(),
+            owner: owner.to_owned(),
+            acquired_at: now,
+            expires_at: now + time::Duration::try_from(ttl).unwrap_or(time::Duration::MAX),
+        }))
+    }
+
+    async fn renew(&self, _lease: &RunLease, _ttl: Duration) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    async fn release(&self, _lease: RunLease) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+
 impl CountingLockStore {
     fn renewed_keys(&self) -> Vec<String> {
         self.renewed_keys
@@ -2425,13 +2600,13 @@ impl AgentLockStore for CountingLockStore {
         }))
     }
 
-    async fn renew(&self, lease: &RunLease, _ttl: Duration) -> Result<(), StoreError> {
+    async fn renew(&self, lease: &RunLease, _ttl: Duration) -> Result<bool, StoreError> {
         self.renew_count.fetch_add(1, Ordering::SeqCst);
         self.renewed_keys
             .lock()
             .expect("renewed keys lock is not poisoned")
             .push(lease.key.clone());
-        Ok(())
+        Ok(true)
     }
 
     async fn release(&self, _lease: RunLease) -> Result<(), StoreError> {
@@ -2456,6 +2631,15 @@ impl AgentRunStore for FailingUpdateRunStore {
         Ok(None)
     }
 
+    async fn find_run_by_idempotency_key(
+        &self,
+        _agent_id: &str,
+        _scope: &RunScope,
+        _idempotency_key: &str,
+    ) -> Result<Option<AgentRunRecord>, StoreError> {
+        Ok(None)
+    }
+
     async fn list_runs(
         &self,
         _agent_id: Option<&str>,
@@ -2474,6 +2658,15 @@ impl AgentRunStore for FailingUpdateRunStore {
 }
 
 struct AllowHook;
+
+struct FailingHook;
+
+#[async_trait]
+impl crate::hooks::HookHandler for FailingHook {
+    async fn handle(&self, _invocation: crate::hooks::HookInvocation) -> Result<Value, AgentError> {
+        Err(AgentError::internal("policy backend unavailable"))
+    }
+}
 
 #[async_trait]
 impl crate::hooks::HookHandler for AllowHook {
@@ -2517,14 +2710,14 @@ impl AgentEventEmitter for NoopServices {
 impl AgentStateAccess for NoopServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         self.state_store
-            .load("echo", key)
+            .load("echo", &RunScope::Global, key)
             .await
             .map_err(|e| AgentError::internal(e.to_string()))
     }
 
     async fn save_state(&self, key: &str, value: Value) -> Result<(), AgentError> {
         self.state_store
-            .save("echo", key, value)
+            .save("echo", &RunScope::Global, key, value)
             .await
             .map_err(|e| AgentError::internal(e.to_string()))
     }

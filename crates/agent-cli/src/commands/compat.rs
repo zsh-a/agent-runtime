@@ -375,7 +375,7 @@ async fn execute_compat_run(
         stores.state_store.clone(),
         stores.proposal_store.clone(),
     ));
-    let runner = AgentRunner::new(registry, stores.run_store.clone(), services)
+    let runner = AgentRunner::new_with_factory(registry, stores.run_store.clone(), services)
         .with_lock_store(stores.lock_store.clone())
         .with_hooks(HookManager::default())
         .with_policy(execution_policy(
@@ -400,11 +400,13 @@ async fn execute_compat_run(
         )
         .await
         .into_diagnostic()?;
-    stores
-        .trace_store
-        .write_trace(outcome.trace.clone())
-        .await
-        .into_diagnostic()?;
+    if outcome.should_persist_trace() {
+        stores
+            .trace_store
+            .write_trace(outcome.trace.clone())
+            .await
+            .into_diagnostic()?;
+    }
     Ok(outcome)
 }
 

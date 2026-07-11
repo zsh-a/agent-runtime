@@ -104,14 +104,15 @@ pub(crate) async fn run_workflow_request(
         stores.state_store.clone(),
         stores.proposal_store.clone(),
     ));
-    let runner = AgentRunner::new(composition.registry, stores.run_store.clone(), services)
-        .with_lock_store(stores.lock_store.clone())
-        .with_hooks(options.hooks)
-        .with_policy(execution_policy(
-            options.timeout_seconds,
-            options.max_retries,
-            options.retry_backoff_ms,
-        ));
+    let runner =
+        AgentRunner::new_with_factory(composition.registry, stores.run_store.clone(), services)
+            .with_lock_store(stores.lock_store.clone())
+            .with_hooks(options.hooks)
+            .with_policy(execution_policy(
+                options.timeout_seconds,
+                options.max_retries,
+                options.retry_backoff_ms,
+            ));
     let result = runner.run_workflow(request).await.into_diagnostic()?;
     stores
         .trace_store
@@ -211,14 +212,15 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
         stores.state_store.clone(),
         stores.proposal_store.clone(),
     ));
-    let runner = AgentRunner::new(composition.registry, stores.run_store.clone(), services)
-        .with_lock_store(stores.lock_store.clone())
-        .with_hooks(options.hooks)
-        .with_policy(execution_policy(
-            options.timeout_seconds,
-            options.max_retries,
-            options.retry_backoff_ms,
-        ));
+    let runner =
+        AgentRunner::new_with_factory(composition.registry, stores.run_store.clone(), services)
+            .with_lock_store(stores.lock_store.clone())
+            .with_hooks(options.hooks)
+            .with_policy(execution_policy(
+                options.timeout_seconds,
+                options.max_retries,
+                options.retry_backoff_ms,
+            ));
     let outcome = runner
         .run_once(
             &template.frontmatter.agent,
@@ -240,11 +242,13 @@ pub(crate) async fn run_command_template(options: CommandRunOptions) -> Result<C
         )
         .await
         .into_diagnostic()?;
-    stores
-        .trace_store
-        .write_trace(outcome.trace.clone())
-        .await
-        .into_diagnostic()?;
+    if outcome.should_persist_trace() {
+        stores
+            .trace_store
+            .write_trace(outcome.trace.clone())
+            .await
+            .into_diagnostic()?;
+    }
     if let Some(path) = options.trace_out {
         write_json(path, &outcome.trace).await?;
     }

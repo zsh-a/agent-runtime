@@ -19,9 +19,9 @@ pub use loop_core::{EffectStepLoop, RunEffectKind};
 pub use policy::ExecutionPolicy;
 pub use recovery::{RecoveredRun, RecoveryReport, recover_stale_runs};
 pub use registry::InMemoryAgentRegistry;
-pub use runner::{AgentRunner, RunControl, RunOutcome, run_idempotency_key};
+pub use runner::{AgentRunner, RunControl, RunDisposition, RunOutcome, run_idempotency_key};
 pub use scheduler::AgentScheduler;
-pub use services::BasicAgentServices;
+pub use services::{BasicAgentServices, guarded_services};
 pub use subagent::{SubagentRunContext, run_subagent};
 pub use trace::{MemoryTraceSink, TraceEventBuffer};
 

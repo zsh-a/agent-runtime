@@ -171,6 +171,29 @@ const SQLITE_MIGRATIONS: &[SqliteMigration] = &[
         )
         "#],
     },
+    SqliteMigration {
+        version: 6,
+        name: "scoped_state",
+        statements: &[r#"
+            CREATE TABLE IF NOT EXISTS agent_state_scoped (
+                agent_id TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                state_key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                PRIMARY KEY(agent_id, scope_type, scope_id, state_key)
+            )
+            "#],
+    },
+    SqliteMigration {
+        version: 7,
+        name: "run_idempotency",
+        statements: &[r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_idempotency
+            ON agent_runs(agent_id, scope_type, scope_id, json_extract(record_json, '$.idempotency_key'))
+            WHERE json_extract(record_json, '$.idempotency_key') IS NOT NULL
+        "#],
+    },
 ];
 
 const SCHEMA_VERSION: i64 = SQLITE_MIGRATIONS[SQLITE_MIGRATIONS.len() - 1].version;
@@ -288,11 +311,16 @@ impl AgentStateStore for SqliteStore {
     async fn load(
         &self,
         agent_id: &str,
+        scope: &RunScope,
         key: &str,
     ) -> Result<Option<serde_json::Value>, StoreError> {
-        let row =
-            sqlx::query("SELECT value_json FROM agent_state WHERE agent_id = ? AND state_key = ?")
+        let (scope_type, scope_id) = encode_scope(scope);
+        let row = sqlx::query(
+            "SELECT value_json FROM agent_state_scoped WHERE agent_id = ? AND scope_type = ? AND scope_id = ? AND state_key = ?",
+        )
                 .bind(agent_id)
+                .bind(scope_type)
+                .bind(scope_id)
                 .bind(key)
                 .fetch_optional(&self.pool)
                 .await
@@ -304,19 +332,23 @@ impl AgentStateStore for SqliteStore {
     async fn save(
         &self,
         agent_id: &str,
+        scope: &RunScope,
         key: &str,
         value: serde_json::Value,
     ) -> Result<(), StoreError> {
+        let (scope_type, scope_id) = encode_scope(scope);
         let value_json = encode_record(&value)?;
         sqlx::query(
             r#"
-            INSERT INTO agent_state(agent_id, state_key, value_json)
-            VALUES (?, ?, ?)
-            ON CONFLICT(agent_id, state_key) DO UPDATE SET
+            INSERT INTO agent_state_scoped(agent_id, scope_type, scope_id, state_key, value_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(agent_id, scope_type, scope_id, state_key) DO UPDATE SET
                 value_json = excluded.value_json
             "#,
         )
         .bind(agent_id)
+        .bind(scope_type)
+        .bind(scope_id)
         .bind(key)
         .bind(value_json)
         .execute(&self.pool)
@@ -505,11 +537,11 @@ impl AgentLockStore for SqliteStore {
             .transpose()
     }
 
-    async fn renew(&self, lease: &RunLease, ttl: Duration) -> Result<(), StoreError> {
+    async fn renew(&self, lease: &RunLease, ttl: Duration) -> Result<bool, StoreError> {
         let mut renewed = lease.clone();
         renewed.expires_at = OffsetDateTime::now_utc() + lease_duration(ttl);
         let record_json = encode_record(&renewed)?;
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE agent_locks
             SET expires_at_sort = ?, record_json = ?
@@ -523,7 +555,7 @@ impl AgentLockStore for SqliteStore {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_err)?;
-        Ok(())
+        Ok(result.rows_affected() == 1)
     }
 
     async fn release(&self, lease: RunLease) -> Result<(), StoreError> {
@@ -540,11 +572,11 @@ impl AgentLockStore for SqliteStore {
 #[async_trait]
 impl AgentRunStore for SqliteStore {
     async fn create_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
-        upsert_run(&self.pool, run).await
+        insert_run(&self.pool, run).await
     }
 
     async fn update_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
-        upsert_run(&self.pool, run).await
+        update_run_record(&self.pool, run).await
     }
 
     async fn get_run(&self, run_id: &RunId) -> Result<Option<AgentRunRecord>, StoreError> {
@@ -553,6 +585,32 @@ impl AgentRunStore for SqliteStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(map_sqlx_err)?;
+        row.map(|row| decode_record(row.get::<String, _>("record_json")))
+            .transpose()
+    }
+
+    async fn find_run_by_idempotency_key(
+        &self,
+        agent_id: &str,
+        scope: &RunScope,
+        idempotency_key: &str,
+    ) -> Result<Option<AgentRunRecord>, StoreError> {
+        let (scope_type, scope_id) = encode_scope(scope);
+        let row = sqlx::query(
+            r#"
+            SELECT record_json FROM agent_runs
+            WHERE agent_id = ? AND scope_type = ? AND scope_id = ?
+              AND json_extract(record_json, '$.idempotency_key') = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(agent_id)
+        .bind(scope_type)
+        .bind(scope_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
         row.map(|row| decode_record(row.get::<String, _>("record_json")))
             .transpose()
     }
@@ -644,11 +702,15 @@ impl AgentRunStore for SqliteStore {
 #[async_trait]
 impl AgentProposalStore for SqliteStore {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError> {
-        upsert_proposal(&self.pool, proposal).await
+        insert_proposal(&self.pool, proposal).await
     }
 
-    async fn update_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError> {
-        upsert_proposal(&self.pool, proposal).await
+    async fn update_proposal(
+        &self,
+        proposal: ProposalEnvelope,
+        expected_version: u64,
+    ) -> Result<bool, StoreError> {
+        update_proposal_cas(&self.pool, proposal, expected_version).await
     }
 
     async fn get_proposal(
@@ -830,7 +892,7 @@ impl AgentSessionStore for SqliteStore {
     }
 }
 
-async fn upsert_run(pool: &SqlitePool, run: AgentRunRecord) -> Result<(), StoreError> {
+async fn insert_run(pool: &SqlitePool, run: AgentRunRecord) -> Result<(), StoreError> {
     let (scope_type, scope_id) = encode_scope(&run.scope);
     let status = encode_run_status(&run.status);
     let record_json = encode_record(&run)?;
@@ -846,13 +908,6 @@ async fn upsert_run(pool: &SqlitePool, run: AgentRunRecord) -> Result<(), StoreE
             record_json
         )
         VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(run_id) DO UPDATE SET
-            agent_id = excluded.agent_id,
-            scope_type = excluded.scope_type,
-            scope_id = excluded.scope_id,
-            started_at_sort = excluded.started_at_sort,
-            status = excluded.status,
-            record_json = excluded.record_json
         "#,
     )
     .bind(&run.run_id.0)
@@ -868,16 +923,38 @@ async fn upsert_run(pool: &SqlitePool, run: AgentRunRecord) -> Result<(), StoreE
     Ok(())
 }
 
-async fn upsert_proposal(pool: &SqlitePool, proposal: ProposalEnvelope) -> Result<(), StoreError> {
+async fn update_run_record(pool: &SqlitePool, run: AgentRunRecord) -> Result<(), StoreError> {
+    let (scope_type, scope_id) = encode_scope(&run.scope);
+    let record_json = encode_record(&run)?;
+    let result = sqlx::query(
+        r#"
+        UPDATE agent_runs
+        SET agent_id = ?, scope_type = ?, scope_id = ?, started_at_sort = ?, status = ?, record_json = ?
+        WHERE run_id = ?
+        "#,
+    )
+    .bind(&run.agent_id)
+    .bind(scope_type)
+    .bind(scope_id)
+    .bind(sort_key(run.started_at)?)
+    .bind(encode_run_status(&run.status))
+    .bind(record_json)
+    .bind(&run.run_id.0)
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_err)?;
+    if result.rows_affected() != 1 {
+        return Err(StoreError::new("run does not exist"));
+    }
+    Ok(())
+}
+
+async fn insert_proposal(pool: &SqlitePool, proposal: ProposalEnvelope) -> Result<(), StoreError> {
     let record_json = encode_record(&proposal)?;
     sqlx::query(
         r#"
         INSERT INTO agent_proposals(proposal_id, run_id, created_at_sort, record_json)
         VALUES (?, ?, ?, ?)
-        ON CONFLICT(proposal_id) DO UPDATE SET
-            run_id = excluded.run_id,
-            created_at_sort = excluded.created_at_sort,
-            record_json = excluded.record_json
         "#,
     )
     .bind(&proposal.proposal_id.0)
@@ -888,6 +965,37 @@ async fn upsert_proposal(pool: &SqlitePool, proposal: ProposalEnvelope) -> Resul
     .await
     .map_err(map_sqlx_err)?;
     Ok(())
+}
+
+async fn update_proposal_cas(
+    pool: &SqlitePool,
+    proposal: ProposalEnvelope,
+    expected_version: u64,
+) -> Result<bool, StoreError> {
+    if proposal.version != expected_version + 1 {
+        return Ok(false);
+    }
+    let record_json = encode_record(&proposal)?;
+    let result = sqlx::query(
+        r#"
+        UPDATE agent_proposals
+        SET run_id = ?, created_at_sort = ?, record_json = ?
+        WHERE proposal_id = ?
+          AND CAST(json_extract(record_json, '$.version') AS INTEGER) = ?
+        "#,
+    )
+    .bind(&proposal.run_id.0)
+    .bind(sort_key(proposal.created_at)?)
+    .bind(record_json)
+    .bind(&proposal.proposal_id.0)
+    .bind(
+        i64::try_from(expected_version)
+            .map_err(|_| StoreError::new("proposal version overflow"))?,
+    )
+    .execute(pool)
+    .await
+    .map_err(map_sqlx_err)?;
+    Ok(result.rows_affected() == 1)
 }
 
 async fn touch_run_event_log(

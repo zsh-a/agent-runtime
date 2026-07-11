@@ -178,12 +178,13 @@ stores or external-only scheduling.
   remain future work.
 - Add durable lock-store coordination tests for DB-backed semantics. The SQLite
   reference backend is covered for distinct runner handles sharing the same DB
-  file; multi-process deployment validation remains future work.
+  file. Lease renewal reports ownership loss and active runs cancel on loss;
+  cross-process fencing at the business write boundary remains host-owned.
 - Add tenant/user scope guidance for locks, stores, metrics, and traces
   (implemented as first-class `RunRequest.scope` /
   `WorkflowRunRequest.scope`, persisted `AgentRunRecord.scope`, scope-aware
-  lease keys and idempotency material, and inherited `agent.run` subagent
-  scope).
+  lease keys, scoped state keys, enforced idempotency identities, and inherited
+  `agent.run` subagent scope).
 
 ### Acceptance Criteria
 

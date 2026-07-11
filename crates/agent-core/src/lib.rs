@@ -32,10 +32,10 @@ pub use run::{
     WorkflowRunRequest, WorkflowRunResult,
 };
 pub use services::{
-    Agent, AgentCancellation, AgentContext, AgentEventEmitter, AgentServices, AgentStateAccess,
-    ArtifactPublishRequest, ArtifactPublisher, CancellationFuture, CancellationSignal,
-    ProposalCreator, SubagentRequest, SubagentRunner, ToolCaller, ToolContext, ToolRegistry,
-    TraceSink,
+    Agent, AgentCancellation, AgentContext, AgentEventEmitter, AgentServices, AgentServicesFactory,
+    AgentStateAccess, ArtifactPublishRequest, ArtifactPublisher, CancellationFuture,
+    CancellationSignal, ExecutionContext, ProposalCreator, StaticAgentServicesFactory,
+    SubagentRequest, SubagentRunner, ToolCaller, ToolContext, ToolRegistry, TraceSink,
 };
 pub use session::{SessionRecord, StepKind, StepRecord, ThreadRecord};
 pub use stores::{

@@ -158,11 +158,13 @@ docs/architecture/roadmap.md
 5. `agent-runtime` executes scheduled or explicit `Agent` instances through
    `AgentRunner`.
 6. `agent-store` persists run/state/proposal/session records.
-7. Host adapters implement `AgentServices` and tool/proposal/state behavior.
+7. Host adapters implement `AgentServicesFactory`; each run binds an immutable
+   `ExecutionContext` before exposing `AgentServices` to agent code.
 8. CLI, HTTP, stdio, and TUI are surfaces over these contracts.
 
 `AgentRunner` returns `RunOutcome`, not only `AgentRunResult`, because callers
-need both the final result and the captured `AgentTrace`.
+need both the final result and the captured `AgentTrace`. Its disposition marks
+idempotent duplicate deliveries so adapters do not overwrite the original trace.
 
 ## Interaction Entrypoints
 
@@ -176,6 +178,9 @@ rtk cargo run -p agent-cli -- serve --catalog fixtures/contracts/catalog.valid.j
 curl -N -X POST http://127.0.0.1:8765/chat/turn -H 'content-type: application/json' -d '{"provider":"mock","model":"mock-model","messages":[{"role":"user","content":"ping"}]}'
 rtk cargo run -p agent-cli -- validate schemas/run-request.schema.json fixtures/contracts/run-request.valid.json
 ```
+
+The embedded HTTP server only accepts loopback bind addresses. Remote exposure
+must go through a host-owned authenticated gateway.
 
 TUI uses persistent natural input by default. Plain text runs the shared
 `agent-chat` ChatTurn path; slash commands perform explicit runtime debugging:
@@ -237,18 +242,18 @@ These are intentional or pending differences from the long-term design:
   bearer tokens directly. Its public facade is still oriented around local
   CLI/server tool overrides rather than a fully stabilized reusable ToolHost API
   with a host secret manager and sandbox policy.
-- `agent-store` has shared conformance coverage for current file-backed and
-  in-memory run, proposal, and session stores. The suite checks create/update,
-  get/list, scope-aware last-run lookup, proposal filtering, and session
-  thread/step round-trips. Concrete DB store implementations remain future
-  work and should be added to that same behavior suite.
+- `agent-store` has shared conformance coverage for file, in-memory, and SQLite
+  run, proposal, session, state, lock, trace, and event stores. Run creation is
+  insert-only, proposal updates use optimistic versions, and SQLite enforces a
+  unique run idempotency identity.
 - `RunRequest.scope` and `WorkflowRunRequest.scope` are first-class run-scope
   overrides with `global`, `user`, and `tenant` variants. The resolved scope is
   stored on every `AgentRunRecord`, participates in idempotency material and
   per-agent lease keys, is exposed to `AgentContext`, and is inherited by
   `agent.run` subagent calls unless the tool input supplies its own `scope`.
-  Agent and workflow leases are renewed while work is active, then released on
-  success or error.
+  State storage is keyed by agent and resolved scope. Agent and workflow leases
+  are renewed while work is active; loss of lease ownership cancels active agent
+  work instead of allowing an unfenced execution to continue.
   When `scope` is omitted, the runtime preserves the older behavior: `user`
   creates a user scope, and no user creates a global scope.
 - There is no standalone `bindings/dart` SDK package.
@@ -270,7 +275,8 @@ These are intentional or pending differences from the long-term design:
   offline pipeline ingestion, and can POST the same payload to an OTLP HTTP
   traces endpoint with `--endpoint` or standard OTEL exporter environment
   variables.
-- `ProposalEnvelope` carries `risk`, `approval_policy`, `approval_required`,
+- `ProposalEnvelope` carries an optimistic `version`, `risk`, `approval_policy`,
+  `approval_required`,
   `required_approval_level`, `required_approver_count`, `approval_decisions`,
   structured `diffs`, structured `warnings`, `policy_id`, `policy_version`,
   and `expires_at`. `ApprovalDecision` records the deciding actor when supplied

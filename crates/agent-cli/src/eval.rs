@@ -278,7 +278,7 @@ async fn run_eval(
         stores.state_store.clone(),
         stores.proposal_store.clone(),
     ));
-    let runner = AgentRunner::new(registry, stores.run_store.clone(), services)
+    let runner = AgentRunner::new_with_factory(registry, stores.run_store.clone(), services)
         .with_lock_store(stores.lock_store.clone());
     let outcome = runner
         .run_once(
@@ -297,11 +297,13 @@ async fn run_eval(
         )
         .await
         .into_diagnostic()?;
-    stores
-        .trace_store
-        .write_trace(outcome.trace.clone())
-        .await
-        .into_diagnostic()?;
+    if outcome.should_persist_trace() {
+        stores
+            .trace_store
+            .write_trace(outcome.trace.clone())
+            .await
+            .into_diagnostic()?;
+    }
 
     let mut checked = Vec::new();
     if outcome.result.status != case.expect.status {
