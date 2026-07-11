@@ -251,10 +251,37 @@ pub(super) enum TuiFocusPanel {
     Activity,
 }
 
+impl TuiFocusPanel {
+    pub(super) fn next(self) -> Self {
+        match self {
+            Self::Chat => Self::Context,
+            Self::Context => Self::Activity,
+            Self::Activity => Self::Chat,
+        }
+    }
+
+    pub(super) fn previous(self) -> Self {
+        match self {
+            Self::Chat => Self::Activity,
+            Self::Context => Self::Chat,
+            Self::Activity => Self::Context,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum TuiDetailKind {
+    #[default]
+    Overview,
+    Run,
+    Workflow,
+    Proposals,
+    Events,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct TuiPaneSizing {
     pub(super) side_width: Option<u16>,
-    pub(super) context_height: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,7 +339,7 @@ pub(super) enum TuiPendingApprovalAction {
     },
     ChatTools {
         agent_id: String,
-        state: ChatTurnState,
+        state: Box<ChatTurnState>,
         tool_calls: Vec<ChatToolCall>,
         surface_messages: Vec<LlmMessage>,
     },
@@ -340,7 +367,7 @@ impl TuiPendingApproval {
             risk,
             action: TuiPendingApprovalAction::ChatTools {
                 agent_id: agent_id.into(),
-                state,
+                state: Box::new(state),
                 tool_calls,
                 surface_messages,
             },
@@ -423,12 +450,14 @@ pub(super) struct TuiState {
     pub(super) latest_proposals: Option<TuiProposalListSummary>,
     pub(super) latest_events: Option<TuiTraceEventSummary>,
     pub(super) pending_approval: Option<TuiPendingApproval>,
-    pub(super) approval_selection: TuiApprovalSelection,
+    pub(super) approval_selection: Option<TuiApprovalSelection>,
     pub(super) chat_messages: Vec<LlmMessage>,
     pub(super) chat_scroll: u16,
     pub(super) context_scroll: u16,
     pub(super) event_scroll: u16,
     pub(super) focused_panel: TuiFocusPanel,
+    pub(super) sidebar_panel: TuiFocusPanel,
+    pub(super) detail_kind: TuiDetailKind,
     pub(super) pane_sizing: TuiPaneSizing,
     pub(super) text_selection: Option<TuiTextSelection>,
     pub(super) input_history: VecDeque<String>,
@@ -475,12 +504,14 @@ impl TuiState {
             latest_proposals: None,
             latest_events: None,
             pending_approval: None,
-            approval_selection: TuiApprovalSelection::Approve,
+            approval_selection: None,
             chat_messages: Vec::new(),
             chat_scroll: 0,
             context_scroll: 0,
             event_scroll: 0,
             focused_panel: TuiFocusPanel::Chat,
+            sidebar_panel: TuiFocusPanel::Context,
+            detail_kind: TuiDetailKind::Overview,
             pane_sizing: TuiPaneSizing::default(),
             text_selection: None,
             input_history: VecDeque::new(),
@@ -488,7 +519,6 @@ impl TuiState {
             history_draft: None,
             busy: false,
         };
-        state.push_system_message(startup_message(&state));
         state.push_event("ready");
         Ok(state)
     }
@@ -531,18 +561,26 @@ impl TuiState {
 
     pub(super) fn set_latest_workflow(&mut self, summary: TuiWorkflowSummary) {
         self.latest_workflow = Some(summary);
+        self.detail_kind = TuiDetailKind::Workflow;
+        self.focus_panel(TuiFocusPanel::Context);
     }
 
     pub(super) fn set_latest_run(&mut self, summary: TuiRunSummary) {
         self.latest_run = Some(summary);
+        self.detail_kind = TuiDetailKind::Run;
+        self.focus_panel(TuiFocusPanel::Context);
     }
 
     pub(super) fn set_latest_proposals(&mut self, summary: TuiProposalListSummary) {
         self.latest_proposals = Some(summary);
+        self.detail_kind = TuiDetailKind::Proposals;
+        self.focus_panel(TuiFocusPanel::Context);
     }
 
     pub(super) fn set_latest_events(&mut self, summary: TuiTraceEventSummary) {
         self.latest_events = Some(summary);
+        self.detail_kind = TuiDetailKind::Events;
+        self.focus_panel(TuiFocusPanel::Context);
     }
 
     pub(super) fn active_agent_label(&self) -> &str {
@@ -593,7 +631,7 @@ impl TuiState {
         self.latest_proposals = None;
         self.latest_events = None;
         self.pending_approval = None;
-        self.approval_selection = TuiApprovalSelection::Approve;
+        self.approval_selection = None;
         self.chat_scroll = 0;
         self.context_scroll = 0;
         self.event_scroll = 0;
@@ -676,37 +714,41 @@ impl TuiState {
 
     pub(super) fn set_pending_approval(&mut self, approval: TuiPendingApproval) {
         self.pending_approval = Some(approval);
-        self.approval_selection = TuiApprovalSelection::Approve;
+        self.approval_selection = None;
     }
 
     pub(super) fn take_pending_approval(&mut self) -> Option<TuiPendingApproval> {
         let approval = self.pending_approval.take();
         if approval.is_some() {
-            self.approval_selection = TuiApprovalSelection::Approve;
+            self.approval_selection = None;
         }
         approval
     }
 
     pub(super) fn toggle_approval_selection(&mut self) {
         if self.pending_approval.is_some() {
-            self.approval_selection = self.approval_selection.toggled();
+            self.approval_selection = Some(
+                self.approval_selection
+                    .map(TuiApprovalSelection::toggled)
+                    .unwrap_or(TuiApprovalSelection::Deny),
+            );
         }
     }
 
     pub(super) fn select_approval(&mut self) {
         if self.pending_approval.is_some() {
-            self.approval_selection = TuiApprovalSelection::Approve;
+            self.approval_selection = Some(TuiApprovalSelection::Approve);
         }
     }
 
     pub(super) fn select_denial(&mut self) {
         if self.pending_approval.is_some() {
-            self.approval_selection = TuiApprovalSelection::Deny;
+            self.approval_selection = Some(TuiApprovalSelection::Deny);
         }
     }
 
     pub(super) fn approval_picker_active(&self) -> bool {
-        self.pending_approval.is_some() && self.command_input.trim().is_empty()
+        self.pending_approval.is_some()
     }
 
     pub(super) fn apply_update(&mut self, update: TuiUpdate) {
@@ -716,7 +758,7 @@ impl TuiState {
                 self.context_status = Some(status);
             }
             TuiUpdate::PendingApproval(approval) => {
-                self.approval_selection = TuiApprovalSelection::Approve;
+                self.approval_selection = None;
                 self.pending_approval = approval;
             }
             TuiUpdate::SystemMessage(content) => self.push_system_message(content),
@@ -947,6 +989,27 @@ impl TuiState {
 
     pub(super) fn focus_panel(&mut self, panel: TuiFocusPanel) {
         self.focused_panel = panel;
+        if panel != TuiFocusPanel::Chat {
+            self.sidebar_panel = panel;
+        }
+    }
+
+    pub(super) fn focus_next_panel(&mut self) {
+        self.input_mode = false;
+        self.focus_panel(self.focused_panel.next());
+    }
+
+    pub(super) fn focus_previous_panel(&mut self) {
+        self.input_mode = false;
+        self.focus_panel(self.focused_panel.previous());
+    }
+
+    pub(super) fn enter_input_mode(&mut self) {
+        self.input_mode = true;
+    }
+
+    pub(super) fn leave_input_mode(&mut self) {
+        self.input_mode = false;
     }
 
     pub(super) fn begin_text_selection(&mut self, panel: TuiFocusPanel, point: TuiSelectionPoint) {
@@ -1191,26 +1254,6 @@ fn status_line(
     )
 }
 
-fn startup_message(state: &TuiState) -> String {
-    let tool_count = state
-        .tool_inventory
-        .as_ref()
-        .map(TuiToolInventory::total_count)
-        .unwrap_or(0);
-    format!(
-        "Ready. Chatting with agent '{}'.\n\n\
-        Type a message and press Enter, or use slash commands.\n\
-        Quick commands: /status, /runs, /tools, /help <command>.\n\
-        Tab completes commands, agents, tools, runs, proposals, and help topics.\n\
-        Model: {} / {}. Tools: {}. Recent runs: {}.",
-        state.active_agent_label(),
-        state.options.chat.provider,
-        state.options.chat.model,
-        tool_count,
-        state.recent_runs.len()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1275,12 +1318,14 @@ mod tests {
             latest_proposals: None,
             latest_events: None,
             pending_approval: None,
-            approval_selection: TuiApprovalSelection::Approve,
+            approval_selection: None,
             chat_messages: Vec::new(),
             chat_scroll: 0,
             context_scroll: 0,
             event_scroll: 0,
             focused_panel: TuiFocusPanel::Chat,
+            sidebar_panel: TuiFocusPanel::Context,
+            detail_kind: TuiDetailKind::Overview,
             pane_sizing: TuiPaneSizing::default(),
             text_selection: None,
             input_history: VecDeque::new(),
@@ -1350,22 +1395,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_message_summarizes_next_steps() {
-        let state = test_state();
-
-        let message = startup_message(&state);
-
-        assert!(message.contains("Ready. Chatting with agent 'echo_agent'."));
-        assert!(message.contains("Quick commands: /status, /runs, /tools, /help <command>."));
-        assert!(
-            message.contains(
-                "Tab completes commands, agents, tools, runs, proposals, and help topics."
-            )
-        );
-        assert!(message.contains("Model: mock / mock-model."));
-    }
-
-    #[test]
     fn command_input_edits_at_cursor() {
         let mut state = test_state();
         state.replace_command_input("hello");
@@ -1382,6 +1411,27 @@ mod tests {
         state.delete();
         assert_eq!(state.command_input, "ello");
         assert_eq!(state.input_cursor, 0);
+    }
+
+    #[test]
+    fn panel_focus_cycles_and_remembers_sidebar() {
+        let mut state = test_state();
+
+        state.focus_next_panel();
+        assert_eq!(state.focused_panel, TuiFocusPanel::Context);
+        assert_eq!(state.sidebar_panel, TuiFocusPanel::Context);
+        assert!(!state.input_mode);
+
+        state.focus_next_panel();
+        assert_eq!(state.focused_panel, TuiFocusPanel::Activity);
+        assert_eq!(state.sidebar_panel, TuiFocusPanel::Activity);
+
+        state.focus_next_panel();
+        assert_eq!(state.focused_panel, TuiFocusPanel::Chat);
+        assert_eq!(state.sidebar_panel, TuiFocusPanel::Activity);
+
+        state.focus_previous_panel();
+        assert_eq!(state.focused_panel, TuiFocusPanel::Activity);
     }
 
     #[test]

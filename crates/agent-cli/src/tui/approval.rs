@@ -162,9 +162,7 @@ fn request_slash_tool_approval(
     input: Value,
 ) -> Result<()> {
     if state.pending_approval.is_some() {
-        return Err(miette!(
-            "a high-risk tool call is already pending approval; use the approval card or type yes/no"
-        ));
+        return Err(miette!("a high-risk tool call is already pending approval"));
     }
     let input_preview = compact_json(&input);
     state.set_pending_approval(TuiPendingApproval::tool_call(
@@ -178,7 +176,7 @@ fn request_slash_tool_approval(
         format!("{} ({})", tool_name, risk.label()),
     ));
     state.push_system_message(format!(
-        "Approval required for high-risk tool '{tool_name}'. Use the approval card: Tab selects, Enter confirms. You can also type yes/no.\nInput: {input_preview}"
+        "Approval required for high-risk tool '{tool_name}'.\nInput: {input_preview}"
     ));
     Ok(())
 }
@@ -187,7 +185,7 @@ async fn approve_pending_approval(
     state: &mut TuiState,
     approval: TuiPendingApproval,
 ) -> Result<()> {
-    let risk = approval.risk.clone();
+    let risk = approval.risk;
     match approval.action {
         TuiPendingApprovalAction::SlashTool { tool_name, input } => {
             approve_slash_tool(state, tool_name, input).await?;
@@ -202,7 +200,7 @@ async fn approve_pending_approval(
                 state,
                 ChatApprovalDecision::Approve,
                 agent_id,
-                chat_state,
+                *chat_state,
                 tool_calls,
                 surface_messages,
             )
@@ -232,7 +230,7 @@ async fn deny_pending_approval(state: &mut TuiState, approval: TuiPendingApprova
                 state,
                 ChatApprovalDecision::Deny,
                 agent_id,
-                chat_state,
+                *chat_state,
                 tool_calls,
                 surface_messages,
             )
@@ -249,7 +247,7 @@ async fn run_pending_approval_task(
     sender: UnboundedSender<TuiUpdate>,
     cancellation: CancellationToken,
 ) -> Result<()> {
-    let risk = approval.risk.clone();
+    let risk = approval.risk;
     match (selection, approval.action) {
         (
             TuiApprovalSelection::Approve,
@@ -280,7 +278,7 @@ async fn run_pending_approval_task(
                 options,
                 ChatApprovalDecision::Approve,
                 agent_id,
-                chat_state,
+                *chat_state,
                 tool_calls,
                 surface_messages,
                 cancellation,
@@ -310,7 +308,7 @@ async fn run_pending_approval_task(
                 options,
                 ChatApprovalDecision::Deny,
                 agent_id,
-                chat_state,
+                *chat_state,
                 tool_calls,
                 surface_messages,
                 cancellation,

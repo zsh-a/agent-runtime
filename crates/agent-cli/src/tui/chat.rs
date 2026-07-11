@@ -291,7 +291,7 @@ where
                 approval.summary(),
             )));
             emit(TuiUpdate::SystemMessage(format!(
-                "Approval required for high-risk chat tool '{}'. Use the approval card: Tab selects, Enter confirms. You can also type yes/no.",
+                "Approval required for high-risk chat tool '{}'.",
                 approval.subject()
             )));
             return Ok(());

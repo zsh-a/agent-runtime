@@ -2589,13 +2589,10 @@ fn tui_once_renders_catalog_and_trace_snapshot() {
     let output = String::from_utf8(output).expect("stdout is utf8");
     assert!(output.contains("Agent Runtime"));
     assert!(output.contains("Chat"));
-    assert!(output.contains("Context"));
-    assert!(output.contains("Activity"));
-    assert!(output.contains("Input"));
-    assert!(output.contains("Enter sends"));
-    assert!(output.contains("agent echo_agent@0.1.0"));
-    assert!(output.contains("Ready. Chatting with agent 'ai_chat'."));
-    assert!(output.contains("Quick commands: /status, /runs, /tools, /help <command>."));
+    assert!(output.contains("[Details]  Timeline"));
+    assert!(output.contains("Message"));
+    assert!(output.contains("agent  echo_agent@0.1.0"));
+    assert!(output.contains("ai_chat"));
 }
 
 #[test]
@@ -2659,10 +2656,9 @@ max_tool_rounds = 2
         .clone();
     let output = String::from_utf8(output).expect("stdout is utf8");
     assert!(output.contains("mock / configured-model"));
-    assert!(output.contains("Ready. Chatting with agent 'ai_chat'."));
-    assert!(output.contains("Model: mock / configured-model."));
-    assert!(output.contains("catalog 1 agents / 1 tools"));
-    assert!(output.contains("tools 3 high 0 blocked 0"));
+    assert!(output.contains("ai_chat"));
+    assert!(output.contains("catalog  1 agents / 1 tools"));
+    assert!(output.contains("tools  3 | high 0 | blocked 0"));
 }
 
 #[test]

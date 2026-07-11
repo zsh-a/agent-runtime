@@ -390,8 +390,8 @@ mod tests {
             activity.kind == TuiActivityKind::Context && activity.title == "context: 123/200 tokens"
         }));
         let rendered = crate::tui::render::render_tui_once(&state).expect("tui renders");
-        assert!(rendered.contains("chat context"));
-        assert!(rendered.contains("tokens 123/200"));
+        assert!(rendered.contains("Chat context"));
+        assert!(rendered.contains("tokens  123/200"));
     }
 
     #[tokio::test]

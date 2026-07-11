@@ -3,20 +3,21 @@ use ratatui::{
     Frame, Terminal,
     backend::TestBackend,
     buffer::Buffer,
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{
     data::{
         TranscriptItem, TranscriptRole, TuiActivityItem, TuiActivityKind, TuiApprovalSelection,
-        TuiFocusPanel, TuiProposalListSummary, TuiRunSummary, TuiState, TuiTextSelection,
-        TuiTraceEventSummary, TuiWorkflowSummary,
+        TuiDetailKind, TuiFocusPanel, TuiPendingApprovalAction, TuiProposalListSummary,
+        TuiRunSummary, TuiState, TuiTextSelection, TuiTraceEventSummary, TuiWorkflowSummary,
     },
     layout::TuiLayout,
+    theme,
 };
 
 const MAX_INPUT_HEIGHT: u16 = 8;
@@ -47,7 +48,11 @@ impl ContextPanelItem {
 }
 
 pub(super) fn render_tui_once(state: &TuiState) -> Result<String> {
-    let backend = TestBackend::new(110, 34);
+    render_tui_at_size(state, 110, 34)
+}
+
+fn render_tui_at_size(state: &TuiState, width: u16, height: u16) -> Result<String> {
+    let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).into_diagnostic()?;
     terminal
         .draw(|frame| render_tui_frame(frame, state))
@@ -58,43 +63,65 @@ pub(super) fn render_tui_once(state: &TuiState) -> Result<String> {
 pub(super) fn render_tui_frame(frame: &mut Frame<'_>, state: &TuiState) {
     let area = frame.area();
     let input_height = input_panel_height(state, area);
-    let layout = TuiLayout::new(area, state.pane_sizing, input_height);
+    let layout = TuiLayout::new(
+        area,
+        state.pane_sizing,
+        input_height,
+        state.focused_panel,
+        state.sidebar_panel,
+    );
 
     frame.render_widget(status_line(state), layout.status);
-    frame.render_widget(chat_panel(state, layout.chat), layout.chat);
-    frame.render_widget(context_panel(state, layout.context), layout.context);
-    frame.render_widget(activity_panel(state, layout.activity), layout.activity);
+    if layout.chat.width > 0 {
+        frame.render_widget(chat_panel(state, layout.chat), layout.chat);
+    }
+    if layout.context.width > 0 {
+        frame.render_widget(context_panel(state, layout.context), layout.context);
+    }
+    if layout.activity.width > 0 {
+        frame.render_widget(activity_panel(state, layout.activity), layout.activity);
+    }
 
     let input = command_panel(state, layout.input);
     frame.render_widget(input.paragraph, layout.input);
-    if state.input_mode && layout.input.width > 2 && layout.input.height > 2 {
+    if state.input_mode
+        && state.pending_approval.is_none()
+        && layout.input.width > 2
+        && layout.input.height > 2
+    {
         frame.set_cursor_position((
             layout.input.x + 1 + input.cursor_x,
             layout.input.y + 1 + input.cursor_y,
         ));
     }
+    if state.pending_approval.is_some() {
+        render_approval_overlay(frame, state, area);
+    }
 }
 
 fn status_line(state: &TuiState) -> Paragraph<'static> {
-    let status = if state.busy { "running" } else { "ready" };
+    let status = if state.pending_approval.is_some() {
+        "approval required"
+    } else if state.busy {
+        "running"
+    } else {
+        "ready"
+    };
     Paragraph::new(Line::from(vec![
+        Span::styled("Agent Runtime", theme::strong(theme::ACCENT)),
         Span::styled(
-            "Agent Runtime",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            format!("  {}", state.active_agent_label()),
+            Style::default().fg(theme::TEXT),
         ),
         Span::styled(
             format!(
                 "  {} / {}",
                 state.options.chat.provider, state.options.chat.model
             ),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(theme::MUTED),
         ),
         Span::raw("  |  "),
-        Span::styled(status, busy_style(state.busy)),
-        Span::raw("  |  "),
-        Span::styled(state.status.clone(), Style::default().fg(Color::DarkGray)),
+        Span::styled(status, status_style(state)),
     ]))
 }
 
@@ -155,91 +182,98 @@ fn visible_context_items(state: &TuiState, area: Rect) -> Vec<ContextPanelItem> 
 }
 
 fn context_panel_items(state: &TuiState) -> Vec<ContextPanelItem> {
-    let mut items = Vec::new();
-    if let Some(summary) = &state.catalog_summary {
-        items.extend([
-            context_item(format!(
-                "catalog {} agents / {} tools",
-                summary.agent_count, summary.tool_count
-            )),
-            context_item(format!("domains {}", summary.active_domains.join(", "))),
-        ]);
-    } else {
-        items.push(context_item("catalog: not loaded"));
-    }
+    let mut items = vec![context_section("Session")];
     items.push(context_item(format!(
-        "agent: {}",
+        "agent  {}",
         state.active_agent_label()
     )));
     items.push(context_item(format!(
-        "trace: {}",
-        state
-            .trace_label
-            .clone()
-            .unwrap_or_else(|| "not loaded".to_owned())
+        "model  {} / {}",
+        state.options.chat.provider, state.options.chat.model
     )));
-    if let Some(trace) = &state.trace {
-        items.extend([
-            context_item(format!("run {}", trace.run_id.0)),
-            context_item(format!("agent {}@{}", trace.agent_id, trace.agent_version)),
-            context_item(format!("events: {}", trace.events.len())),
-        ]);
+    if let Some(summary) = &state.catalog_summary {
+        items.push(context_item(format!(
+            "catalog  {} agents / {} tools",
+            summary.agent_count, summary.tool_count
+        )));
+    } else {
+        items.push(context_item("catalog  not loaded"));
     }
     if let Some(inventory) = &state.tool_inventory {
         items.push(context_item(format!(
-            "tools {} high {} blocked {}",
+            "tools  {} | high {} | blocked {}",
             inventory.total_count(),
             inventory.high_risk_count(),
             inventory.blocked_count()
         )));
     }
-    if let Some(run) = &state.latest_run {
-        items.extend(run_context_items(run));
+
+    match state.detail_kind {
+        TuiDetailKind::Overview => append_overview_items(state, &mut items),
+        TuiDetailKind::Run => match &state.latest_run {
+            Some(run) => items.extend(run_context_items(run)),
+            None => items.extend(empty_detail_items("Run", "No run selected")),
+        },
+        TuiDetailKind::Workflow => match &state.latest_workflow {
+            Some(workflow) => items.extend(workflow_context_items(workflow)),
+            None => items.extend(empty_detail_items("Workflow", "No workflow selected")),
+        },
+        TuiDetailKind::Proposals => match &state.latest_proposals {
+            Some(proposals) => items.extend(proposal_context_items(proposals)),
+            None => items.extend(empty_detail_items("Proposals", "No proposals loaded")),
+        },
+        TuiDetailKind::Events => match &state.latest_events {
+            Some(events) => items.extend(trace_event_context_items(events)),
+            None => items.extend(empty_detail_items("Events", "No events loaded")),
+        },
     }
-    if let Some(workflow) = &state.latest_workflow {
-        items.extend(workflow_context_items(workflow));
-    }
-    if let Some(proposals) = &state.latest_proposals {
-        items.extend(proposal_context_items(proposals));
-    }
-    if let Some(events) = &state.latest_events {
-        items.extend(trace_event_context_items(events));
+    items
+}
+
+fn append_overview_items(state: &TuiState, items: &mut Vec<ContextPanelItem>) {
+    if let Some(trace) = &state.trace {
+        items.push(context_item(""));
+        items.push(context_section("Current trace"));
+        items.push(context_item(format!("run  {}", trace.run_id.0)));
+        items.push(context_item(format!(
+            "agent  {}@{}",
+            trace.agent_id, trace.agent_version
+        )));
+        items.push(context_item(format!("events  {}", trace.events.len())));
     }
     if let Some(context) = &state.context_status {
         items.push(context_item(""));
-        items.push(context_item(Line::styled(
-            "chat context",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
+        items.push(context_section("Chat context"));
         items.push(context_item(format!(
-            "tokens {}/{}",
+            "tokens  {}/{}",
             context.token_estimate, context.max_input_tokens
         )));
-        items.push(context_item(format!("blocks {}", context.block_count)));
+        items.push(context_item(format!("blocks  {}", context.block_count)));
         if context.compacted {
             let strategy = context.compaction_strategy.as_deref().unwrap_or("unknown");
             items.push(context_item(format!(
-                "compacted: {} omitted ({strategy})",
+                "compacted  {} omitted ({strategy})",
                 context.omitted_block_count
             )));
         } else {
-            items.push(context_item("compacted: no"));
+            items.push(context_item("compacted  no"));
         }
     }
-    if let Some(approval) = &state.pending_approval {
-        items.push(context_item(""));
-        items.push(context_item(Line::styled(
-            "pending approval",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )));
-        items.push(context_item(approval.summary()));
-        items.push(context_item("Tab selects, Enter confirms"));
+    if state.trace.is_none() && state.context_status.is_none() {
+        items.extend(empty_detail_items("Overview", "No active run"));
     }
-    items
+}
+
+fn empty_detail_items(title: &'static str, message: &'static str) -> Vec<ContextPanelItem> {
+    vec![
+        context_item(""),
+        context_section(title),
+        context_item(Line::styled(message, Style::default().fg(theme::MUTED))),
+    ]
+}
+
+fn context_section(title: impl Into<String>) -> ContextPanelItem {
+    context_item(Line::styled(title.into(), theme::strong(theme::ACCENT)))
 }
 
 fn context_item(content: impl Into<Line<'static>>) -> ContextPanelItem {
@@ -248,11 +282,11 @@ fn context_item(content: impl Into<Line<'static>>) -> ContextPanelItem {
 
 fn context_panel_title(scroll: usize, max_scroll: usize) -> String {
     if max_scroll == 0 {
-        "Context".to_owned()
+        "[Details]  Timeline".to_owned()
     } else if scroll == 0 {
-        format!("Context  {} more below", max_scroll)
+        format!("[Details]  Timeline  +{max_scroll}")
     } else {
-        format!("Context  {scroll}/{max_scroll}")
+        format!("[Details]  Timeline  {scroll}/{max_scroll}")
     }
 }
 
@@ -326,7 +360,7 @@ fn workflow_context_items(workflow: &TuiWorkflowSummary) -> Vec<ContextPanelItem
     items.extend(workflow.nodes.iter().take(5).map(|node| {
         let mut detail = format!("{} {}", node.node_id, node.status);
         if let Some(reason) = &node.reason {
-            detail.push_str(" ");
+            detail.push(' ');
             detail.push_str(reason);
         }
         if !node.blocked_dependencies.is_empty() {
@@ -444,9 +478,9 @@ fn activity_panel(state: &TuiState, area: Rect) -> List<'static> {
         })
         .collect::<Vec<_>>();
     let title = if state.event_scroll == 0 {
-        "Activity".to_owned()
+        "Details  [Timeline]".to_owned()
     } else {
-        format!("Activity +{} lines", state.event_scroll)
+        format!("Details  [Timeline]  +{}", state.event_scroll)
     };
     List::new(visible).block(focused_panel_block(state, TuiFocusPanel::Activity, title))
 }
@@ -455,8 +489,8 @@ fn visible_activity_lines(state: &TuiState, area: Rect) -> Vec<Line<'static>> {
     let mut items = Vec::new();
     if state.activity.is_empty() {
         items.push(Line::styled(
-            "no activity",
-            Style::default().fg(Color::DarkGray),
+            "No activity yet",
+            Style::default().fg(theme::MUTED),
         ));
     } else {
         items.extend(state.activity.iter().map(activity_item_line));
@@ -638,16 +672,21 @@ fn command_panel(state: &TuiState, area: Rect) -> InputPanel {
         .skip(start)
         .take(max_visible)
         .collect::<Vec<_>>();
-    let title = if state.busy {
-        "Input  Esc/Ctrl-C cancels"
-    } else if state.pending_approval.is_some() {
-        "Input  pending approval: Tab selects  Enter confirms"
+    let title = if state.pending_approval.is_some() {
+        "Approval pending"
+    } else if state.command_input.starts_with('/') {
+        "Command"
+    } else if state.busy {
+        "Running"
     } else {
-        "Input  Enter sends  Shift+Enter newline  Tab completes"
+        "Message"
     };
 
     InputPanel {
-        paragraph: Paragraph::new(Text::from(lines)).block(panel_block(title)),
+        paragraph: Paragraph::new(Text::from(lines)).block(panel_block_with_focus(
+            title,
+            state.input_mode && state.pending_approval.is_none(),
+        )),
         cursor_x: built.cursor_x.min(inner_width.saturating_sub(1)),
         cursor_y: cursor_y.min(area.height.saturating_sub(3)),
     }
@@ -720,13 +759,12 @@ fn input_lines(state: &TuiState, width: u16) -> BuiltInput {
     };
 
     if body.is_empty() {
-        if state.pending_approval.is_some() && !slash {
-            return approval_picker_lines(state, width);
-        }
         let placeholder = if slash {
-            "command, Tab completes"
+            "command"
+        } else if state.pending_approval.is_some() {
+            "resolve the pending request"
         } else {
-            "message, /status, or /help"
+            "message or /command"
         };
         return BuiltInput {
             lines: vec![Line::from(vec![
@@ -1023,30 +1061,6 @@ fn compact_render_text(text: &str, max_chars: usize) -> String {
     truncated
 }
 
-fn approval_picker_lines(state: &TuiState, width: u16) -> BuiltInput {
-    let approve_selected = state.approval_selection == TuiApprovalSelection::Approve;
-    let deny_selected = state.approval_selection == TuiApprovalSelection::Deny;
-    let approve = approval_option_span("Approve", approve_selected, Color::Green);
-    let deny = approval_option_span("Deny", deny_selected, Color::Red);
-    let cursor_x = if approve_selected { 2 } else { 14 }.min(width.saturating_sub(1));
-    BuiltInput {
-        lines: vec![
-            Line::from(vec![
-                Span::styled("> ", Style::default().fg(Color::Yellow)),
-                approve,
-                Span::raw("  "),
-                deny,
-            ]),
-            Line::from(vec![Span::styled(
-                "  Tab/Left/Right selects, Enter confirms. You can still type a message or slash command.",
-                Style::default().fg(Color::DarkGray),
-            )]),
-        ],
-        cursor_x,
-        cursor_y: 0,
-    }
-}
-
 fn approval_option_span(label: &'static str, selected: bool, color: Color) -> Span<'static> {
     let text = if selected {
         format!("[{label}]")
@@ -1061,6 +1075,93 @@ fn approval_option_span(label: &'static str, selected: bool, color: Color) -> Sp
         Style::default().fg(Color::Gray)
     };
     Span::styled(text, style)
+}
+
+fn render_approval_overlay(frame: &mut Frame<'_>, state: &TuiState, area: Rect) {
+    let Some(approval) = &state.pending_approval else {
+        return;
+    };
+    let modal = approval_modal_area(area);
+    frame.render_widget(Clear, modal);
+
+    let approve_selected = state.approval_selection == Some(TuiApprovalSelection::Approve);
+    let deny_selected = state.approval_selection == Some(TuiApprovalSelection::Deny);
+    let input = match &approval.action {
+        TuiPendingApprovalAction::SlashTool { input, .. } => {
+            serde_json::to_string(input).unwrap_or_else(|_| "<unavailable>".to_owned())
+        }
+        TuiPendingApprovalAction::ChatTools { tool_calls, .. } => tool_calls
+            .iter()
+            .map(|call| call.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let text = Text::from(vec![
+        Line::from(vec![
+            Span::styled("Tool  ", Style::default().fg(theme::MUTED)),
+            Span::styled(approval.subject(), theme::strong(theme::TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled("Risk  ", Style::default().fg(theme::MUTED)),
+            Span::styled(approval.risk.label(), theme::strong(theme::WARNING)),
+        ]),
+        Line::from(""),
+        Line::styled(
+            compact_render_text(&input, 180),
+            Style::default().fg(theme::TEXT),
+        ),
+        Line::from(""),
+        Line::from(vec![
+            approval_option_span("Approve", approve_selected, theme::SUCCESS),
+            Span::raw("    "),
+            approval_option_span("Deny", deny_selected, theme::DANGER),
+        ])
+        .alignment(Alignment::Center),
+    ]);
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(
+                Block::default()
+                    .title(" Approval required ")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(theme::strong(theme::WARNING)),
+            )
+            .wrap(Wrap { trim: true }),
+        modal,
+    );
+}
+
+pub(super) fn approval_modal_area(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).clamp(1, 64);
+    let height = area.height.saturating_sub(2).clamp(1, 11);
+    Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    )
+}
+
+pub(super) fn approval_selection_at_position(
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<TuiApprovalSelection> {
+    let modal = approval_modal_area(area);
+    let button_row = modal.y.saturating_add(modal.height).saturating_sub(3);
+    if row != button_row {
+        return None;
+    }
+    let center = modal.x.saturating_add(modal.width / 2);
+    if column >= center.saturating_sub(14) && column < center.saturating_sub(3) {
+        Some(TuiApprovalSelection::Approve)
+    } else if column >= center.saturating_add(2) && column < center.saturating_add(11) {
+        Some(TuiApprovalSelection::Deny)
+    } else {
+        None
+    }
 }
 
 fn bottom_window<T>(items: Vec<T>, height: usize, scroll_from_bottom: u16) -> Vec<T> {
@@ -1094,40 +1195,30 @@ pub(super) fn input_panel_height(state: &TuiState, area: Rect) -> u16 {
     wanted.min(available.max(MIN_INPUT_HEIGHT))
 }
 
-fn panel_block(title: impl Into<String>) -> Block<'static> {
-    panel_block_with_focus(title, false)
-}
-
 fn focused_panel_block(
     state: &TuiState,
     panel: TuiFocusPanel,
     title: impl Into<String>,
 ) -> Block<'static> {
-    let focused = state.focused_panel == panel;
+    let focused = !state.input_mode && state.focused_panel == panel;
     let title = title.into();
     let title = if focused { format!("> {title}") } else { title };
     panel_block_with_focus(title, focused)
 }
 
 fn panel_block_with_focus(title: impl Into<String>, focused: bool) -> Block<'static> {
-    let style = if focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
     Block::default()
         .title(title.into())
         .borders(Borders::ALL)
-        .border_style(style)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::panel(focused))
 }
 
-fn busy_style(busy: bool) -> Style {
-    if busy {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+fn status_style(state: &TuiState) -> Style {
+    if state.pending_approval.is_some() || state.busy {
+        theme::strong(theme::WARNING)
     } else {
-        Style::default().fg(Color::Green)
+        Style::default().fg(theme::SUCCESS)
     }
 }
 
@@ -1253,12 +1344,14 @@ mod tests {
             latest_proposals: None,
             latest_events: None,
             pending_approval: None,
-            approval_selection: TuiApprovalSelection::Approve,
+            approval_selection: None,
             chat_messages: Vec::new(),
             chat_scroll: 0,
             context_scroll: 0,
             event_scroll: 0,
             focused_panel: TuiFocusPanel::Chat,
+            sidebar_panel: TuiFocusPanel::Context,
+            detail_kind: TuiDetailKind::Overview,
             pane_sizing: Default::default(),
             text_selection: None,
             input_history: VecDeque::new(),
@@ -1284,12 +1377,12 @@ mod tests {
         let mut state = test_state();
         let input = input_lines(&state, 40);
 
-        assert_eq!(input.lines[0].to_string(), "> message, /status, or /help");
+        assert_eq!(input.lines[0].to_string(), "> message or /command");
 
         state.replace_command_input("/");
         let slash_input = input_lines(&state, 40);
 
-        assert_eq!(slash_input.lines[0].to_string(), "/ command, Tab completes");
+        assert_eq!(slash_input.lines[0].to_string(), "/ command");
     }
 
     #[test]
@@ -1315,24 +1408,25 @@ mod tests {
     }
 
     #[test]
-    fn command_panel_title_mentions_tab_completion() {
+    fn command_panel_uses_message_title() {
         let state = test_state();
         let rendered = render_tui_once(&state).expect("tui renders");
 
-        assert!(rendered.contains("Tab completes"));
+        assert!(rendered.contains("Message"));
     }
 
     #[test]
     fn focused_panel_title_is_marked() {
         let mut state = test_state();
+        state.leave_input_mode();
         let rendered = render_tui_once(&state).expect("tui renders");
 
         assert!(rendered.contains("> Chat"));
 
-        state.focused_panel = TuiFocusPanel::Activity;
+        state.focus_panel(TuiFocusPanel::Activity);
         let rendered = render_tui_once(&state).expect("tui renders");
 
-        assert!(rendered.contains("> Activity"));
+        assert!(rendered.contains("> Details  [Timeline]"));
     }
 
     #[test]
@@ -1342,7 +1436,13 @@ mod tests {
         state.begin_text_selection(TuiFocusPanel::Chat, TuiSelectionPoint::new(2, 1));
         state.update_text_selection(TuiFocusPanel::Chat, TuiSelectionPoint::new(7, 1));
         let area = Rect::new(0, 0, 80, 24);
-        let layout = TuiLayout::new(area, state.pane_sizing, input_panel_height(&state, area));
+        let layout = TuiLayout::new(
+            area,
+            state.pane_sizing,
+            input_panel_height(&state, area),
+            state.focused_panel,
+            state.sidebar_panel,
+        );
 
         let selected = selected_text_for_layout(&state, layout).expect("selection has text");
 
@@ -1358,12 +1458,12 @@ mod tests {
             serde_json::json!({}),
         ));
 
-        let input = input_lines(&state, 40);
         let rendered = render_tui_once(&state).expect("tui renders");
 
-        assert_eq!(input.lines[0].to_string(), "> [Approve]   Deny ");
-        assert!(rendered.contains("pending approval: Tab selects  Enter confirms"));
-        assert!(rendered.contains("Tab/Left/Right selects, Enter confirms"));
+        assert!(rendered.contains("Approval required"));
+        assert!(rendered.contains("shell.exec"));
+        assert!(rendered.contains(" Approve "));
+        assert!(rendered.contains(" Deny "));
     }
 
     #[test]
@@ -1374,11 +1474,41 @@ mod tests {
             TuiToolRisk::High,
             serde_json::json!({}),
         ));
-        state.approval_selection = TuiApprovalSelection::Deny;
+        state.approval_selection = Some(TuiApprovalSelection::Deny);
 
-        let input = input_lines(&state, 40);
+        let rendered = render_tui_once(&state).expect("tui renders");
 
-        assert_eq!(input.lines[0].to_string(), ">  Approve   [Deny]");
+        assert!(rendered.contains("[Deny]"));
+    }
+
+    #[test]
+    fn approval_starts_without_a_selected_action() {
+        let mut state = test_state();
+        state.set_pending_approval(TuiPendingApproval::tool_call(
+            "shell.exec",
+            TuiToolRisk::High,
+            serde_json::json!({"command": "rm -rf build"}),
+        ));
+
+        let rendered = render_tui_once(&state).expect("tui renders");
+
+        assert!(rendered.contains("Approval required"));
+        assert!(!rendered.contains("[Approve]"));
+        assert!(!rendered.contains("[Deny]"));
+    }
+
+    #[test]
+    fn compact_layout_renders_one_workspace_panel() {
+        let mut state = test_state();
+        let chat = render_tui_at_size(&state, 72, 24).expect("compact chat renders");
+        assert!(chat.contains("Chat"));
+        assert!(!chat.contains("[Details]"));
+
+        state.leave_input_mode();
+        state.focus_panel(TuiFocusPanel::Context);
+        let details = render_tui_at_size(&state, 72, 24).expect("compact details render");
+        assert!(details.contains("[Details]"));
+        assert!(!details.contains("No messages yet"));
     }
 
     #[test]

@@ -21,8 +21,8 @@ use super::{
     },
     layout::{TuiLayout, TuiResizeHandle, contains},
     render::{
-        TuiContextClickAction, context_action_for_click, input_cursor_for_click,
-        input_panel_height, render_tui_frame, selected_text_for_layout,
+        TuiContextClickAction, approval_selection_at_position, context_action_for_click,
+        input_cursor_for_click, input_panel_height, render_tui_frame, selected_text_for_layout,
     },
 };
 
@@ -80,6 +80,11 @@ async fn run_tui_event_loop(
                     }
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                        KeyCode::Enter => state.enter_input_mode(),
+                        KeyCode::Tab | KeyCode::Right => state.focus_next_panel(),
+                        KeyCode::BackTab | KeyCode::Left => state.focus_previous_panel(),
+                        KeyCode::PageUp | KeyCode::Char('k') => state.scroll_focused_panel_up(),
+                        KeyCode::PageDown | KeyCode::Char('j') => state.scroll_focused_panel_down(),
                         KeyCode::Char(':') | KeyCode::Char('/') => state.enter_command("/"),
                         KeyCode::Char('r') => state.enter_command("/run "),
                         KeyCode::Char('t') => state.enter_command("/tool "),
@@ -133,12 +138,46 @@ async fn handle_input_key(
 ) -> Result<bool> {
     let code = key.code;
     let modifiers = key.modifiers;
+    if state.approval_picker_active() {
+        match code {
+            KeyCode::Left => state.select_approval(),
+            KeyCode::Right => state.select_denial(),
+            KeyCode::Tab | KeyCode::BackTab => state.toggle_approval_selection(),
+            KeyCode::Esc => {
+                let task = start_pending_approval_task(
+                    state,
+                    TuiApprovalSelection::Deny,
+                    "no".to_owned(),
+                    sender.clone(),
+                )?;
+                *active_task = Some(task);
+            }
+            KeyCode::Enter => {
+                let Some(selection) = state.approval_selection else {
+                    state.push_activity(TuiActivityItem::new(
+                        TuiActivityKind::Approval,
+                        "select approve or deny",
+                    ));
+                    return Ok(false);
+                };
+                let task = start_pending_approval_task(
+                    state,
+                    selection,
+                    selection.command().to_owned(),
+                    sender.clone(),
+                )?;
+                *active_task = Some(task);
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
     match code {
         KeyCode::Esc => {
             if state.busy {
                 cancel_active_task(state, active_task);
             } else if state.command_input.is_empty() {
-                return Ok(true);
+                state.leave_input_mode();
             } else {
                 state.clear_command_input();
             }
@@ -157,19 +196,6 @@ async fn handle_input_key(
                     TuiActivityKind::System,
                     "still running; press Esc or Ctrl-C to cancel before sending",
                 ));
-                return Ok(false);
-            }
-            if state.approval_picker_active() {
-                let selection = state.approval_selection;
-                match start_pending_approval_task(
-                    state,
-                    selection,
-                    selection.command(),
-                    sender.clone(),
-                ) {
-                    Ok(task) => *active_task = Some(task),
-                    Err(error) => push_command_error(state, error.to_string()),
-                }
                 return Ok(false);
             }
             let command = state.command_input.trim().to_owned();
@@ -233,12 +259,6 @@ async fn handle_input_key(
         KeyCode::Delete => {
             state.delete();
         }
-        KeyCode::Left if state.approval_picker_active() => {
-            state.select_approval();
-        }
-        KeyCode::Right if state.approval_picker_active() => {
-            state.select_denial();
-        }
         KeyCode::Left if modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
             state.move_cursor_word_left();
         }
@@ -267,13 +287,7 @@ async fn handle_input_key(
         KeyCode::Down => state.history_next(),
         KeyCode::PageUp => state.scroll_focused_panel_up(),
         KeyCode::PageDown => state.scroll_focused_panel_down(),
-        KeyCode::Tab if state.approval_picker_active() => {
-            state.toggle_approval_selection();
-        }
         KeyCode::Tab => complete_slash_command(state),
-        KeyCode::BackTab if state.approval_picker_active() => {
-            state.toggle_approval_selection();
-        }
         KeyCode::BackTab => {
             state.scroll_chat_up();
         }
@@ -367,6 +381,29 @@ fn handle_mouse_event_with_drag(
             scroll_at_position(state, &layout, mouse.column, mouse.row, false)
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            if state.pending_approval.is_some() {
+                let area = Rect::new(0, 0, terminal_width, terminal_height);
+                if let Some(selection) =
+                    approval_selection_at_position(area, mouse.column, mouse.row)
+                {
+                    match start_pending_approval_task(
+                        state,
+                        selection,
+                        selection.command(),
+                        sender.clone(),
+                    ) {
+                        Ok(task) => *active_task = Some(task),
+                        Err(error) => push_command_error(state, error.to_string()),
+                    }
+                }
+                return;
+            }
+            if let Some(panel) = sidebar_tab_at_position(&layout, mouse.column, mouse.row) {
+                state.focus_panel(panel);
+                state.clear_text_selection();
+                *mouse_drag = None;
+                return;
+            }
             if let Some(handle) = layout.resize_handle_at(mouse.column, mouse.row) {
                 *mouse_drag = Some(TuiMouseDrag::Resize(handle));
                 resize_panes(state, layout, handle, mouse.column, mouse.row);
@@ -383,7 +420,7 @@ fn handle_mouse_event_with_drag(
                 *mouse_drag = None;
                 state.clear_text_selection();
             }
-            handle_mouse_click(state, &layout, mouse.column, mouse.row, sender, active_task)
+            handle_mouse_click(state, &layout, mouse.column, mouse.row)
         }
         MouseEventKind::Drag(MouseButton::Left) => match *mouse_drag {
             Some(TuiMouseDrag::Resize(handle)) => {
@@ -411,7 +448,13 @@ fn handle_mouse_event_with_drag(
 
 fn mouse_layout(state: &TuiState, terminal_width: u16, terminal_height: u16) -> TuiLayout {
     let area = Rect::new(0, 0, terminal_width, terminal_height);
-    TuiLayout::new(area, state.pane_sizing, input_panel_height(state, area))
+    TuiLayout::new(
+        area,
+        state.pane_sizing,
+        input_panel_height(state, area),
+        state.focused_panel,
+        state.sidebar_panel,
+    )
 }
 
 fn resize_panes(
@@ -422,12 +465,7 @@ fn resize_panes(
     row: u16,
 ) {
     let sizing = layout.resize(handle, column, row);
-    match handle {
-        TuiResizeHandle::Side => state.pane_sizing.side_width = sizing.side_width,
-        TuiResizeHandle::ContextActivity => {
-            state.pane_sizing.context_height = sizing.context_height;
-        }
-    }
+    state.pane_sizing.side_width = sizing.side_width;
 }
 
 fn selection_point_for_panel(
@@ -529,14 +567,7 @@ fn scroll_at_position(state: &mut TuiState, layout: &TuiLayout, column: u16, row
     }
 }
 
-fn handle_mouse_click(
-    state: &mut TuiState,
-    layout: &TuiLayout,
-    column: u16,
-    row: u16,
-    sender: &UnboundedSender<TuiUpdate>,
-    active_task: &mut Option<TuiTaskHandle>,
-) {
+fn handle_mouse_click(state: &mut TuiState, layout: &TuiLayout, column: u16, row: u16) {
     if contains(layout.input, column, row) {
         state.input_mode = true;
         if let Some(cursor) = input_cursor_for_click(state, layout.input, column, row) {
@@ -551,26 +582,35 @@ fn handle_mouse_click(
     {
         handle_context_click_action(state, action);
     }
-    if contains(layout.activity, column, row) {
-        if let Some(run_id) = activity_recent_run_id_at_position(state, layout.activity, row) {
-            state.input_mode = true;
-            state.replace_command_input(format!("/inspect {run_id}"));
-            state.push_activity(TuiActivityItem::with_detail(
-                TuiActivityKind::System,
-                "run selected",
-                run_id,
-            ));
-        }
+    if contains(layout.activity, column, row)
+        && let Some(run_id) = activity_recent_run_id_at_position(state, layout.activity, row)
+    {
+        state.input_mode = true;
+        state.replace_command_input(format!("/inspect {run_id}"));
+        state.push_activity(TuiActivityItem::with_detail(
+            TuiActivityKind::System,
+            "run selected",
+            run_id,
+        ));
     }
-    if state.busy || !state.approval_picker_active() || !contains(layout.input, column, row) {
-        return;
-    }
-    let Some(selection) = approval_selection_at_input_position(layout.input, column, row) else {
-        return;
+}
+
+fn sidebar_tab_at_position(layout: &TuiLayout, column: u16, row: u16) -> Option<TuiFocusPanel> {
+    let side = if layout.context.width > 0 {
+        layout.context
+    } else {
+        layout.activity
     };
-    match start_pending_approval_task(state, selection, selection.command(), sender.clone()) {
-        Ok(task) => *active_task = Some(task),
-        Err(error) => push_command_error(state, error.to_string()),
+    if side.width == 0 || row != side.y || column <= side.x {
+        return None;
+    }
+    let x = column.saturating_sub(side.x + 1);
+    if x < 9 {
+        Some(TuiFocusPanel::Context)
+    } else if x < 21 {
+        Some(TuiFocusPanel::Activity)
+    } else {
+        None
     }
 }
 
@@ -622,26 +662,6 @@ fn activity_recent_run_id_at_position(
         .get(run_index)
         .filter(|_| run_index < shown_runs)
         .map(|run| run.run_id.0.clone())
-}
-
-fn approval_selection_at_input_position(
-    input: Rect,
-    column: u16,
-    row: u16,
-) -> Option<TuiApprovalSelection> {
-    let content_y = input.y.saturating_add(1);
-    let content_x = input.x.saturating_add(1);
-    if row != content_y || column < content_x {
-        return None;
-    }
-    let x = column - content_x;
-    if (2..=10).contains(&x) {
-        Some(TuiApprovalSelection::Approve)
-    } else if (13..=18).contains(&x) {
-        Some(TuiApprovalSelection::Deny)
-    } else {
-        None
-    }
 }
 
 fn cancel_active_task(state: &mut TuiState, active_task: &mut Option<TuiTaskHandle>) {
@@ -1084,7 +1104,7 @@ mod tests {
         let (sender, _receiver) = unbounded_channel();
         let mut active_task = None;
 
-        assert_eq!(state.approval_selection, TuiApprovalSelection::Approve);
+        assert_eq!(state.approval_selection, None);
 
         handle_input_key(
             &mut state,
@@ -1094,7 +1114,7 @@ mod tests {
         )
         .await
         .expect("tab handled");
-        assert_eq!(state.approval_selection, TuiApprovalSelection::Deny);
+        assert_eq!(state.approval_selection, Some(TuiApprovalSelection::Deny));
 
         handle_input_key(
             &mut state,
@@ -1104,7 +1124,10 @@ mod tests {
         )
         .await
         .expect("left handled");
-        assert_eq!(state.approval_selection, TuiApprovalSelection::Approve);
+        assert_eq!(
+            state.approval_selection,
+            Some(TuiApprovalSelection::Approve)
+        );
 
         handle_input_key(
             &mut state,
@@ -1114,7 +1137,7 @@ mod tests {
         )
         .await
         .expect("right handled");
-        assert_eq!(state.approval_selection, TuiApprovalSelection::Deny);
+        assert_eq!(state.approval_selection, Some(TuiApprovalSelection::Deny));
     }
 
     #[tokio::test]
@@ -1142,7 +1165,7 @@ mod tests {
         assert!(state.pending_approval.is_none());
         assert!(state.busy);
         assert!(active_task.is_some());
-        assert_eq!(state.approval_selection, TuiApprovalSelection::Approve);
+        assert_eq!(state.approval_selection, None);
         assert!(state.activity.iter().any(|activity| {
             activity.kind == TuiActivityKind::Approval && activity.title == "approval denied"
         }));
@@ -1216,6 +1239,7 @@ mod tests {
         );
         assert_eq!(state.context_scroll, 0);
 
+        state.focus_panel(TuiFocusPanel::Activity);
         handle_mouse_event(
             &mut state,
             mouse_event(MouseEventKind::ScrollUp, 80, 20),
@@ -1258,9 +1282,14 @@ mod tests {
         assert_eq!(state.chat_scroll, 0);
         assert_eq!(state.event_scroll, 0);
 
+        let layout = mouse_layout(&state, 100, 30);
         handle_mouse_event(
             &mut state,
-            mouse_event(MouseEventKind::Down(MouseButton::Left), 80, 20),
+            mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                layout.context.x + 13,
+                layout.context.y,
+            ),
             100,
             30,
             &sender,
@@ -1319,37 +1348,6 @@ mod tests {
         let resized = mouse_layout(&state, 100, 30);
         assert_eq!(resized.context.x, 62);
         assert_eq!(state.pane_sizing.side_width, Some(38));
-
-        handle_mouse_event_with_drag(
-            &mut state,
-            mouse_event(
-                MouseEventKind::Down(MouseButton::Left),
-                resized.context.x + 4,
-                resized.activity.y,
-            ),
-            100,
-            30,
-            &sender,
-            &mut active_task,
-            &mut mouse_drag,
-        );
-        handle_mouse_event_with_drag(
-            &mut state,
-            mouse_event(
-                MouseEventKind::Drag(MouseButton::Left),
-                resized.context.x + 4,
-                resized.context.y + 10,
-            ),
-            100,
-            30,
-            &sender,
-            &mut active_task,
-            &mut mouse_drag,
-        );
-
-        let resized = mouse_layout(&state, 100, 30);
-        assert_eq!(resized.context.height, 10);
-        assert_eq!(state.pane_sizing.context_height, Some(10));
     }
 
     #[tokio::test]
@@ -1360,6 +1358,7 @@ mod tests {
             test_run("run_alpha", AgentRunStatus::Completed),
             test_run("run_beta", AgentRunStatus::Running),
         ];
+        state.focus_panel(TuiFocusPanel::Activity);
         let layout = mouse_layout(&state, 100, 30);
         let activity_count = 1usize;
         let full_len = activity_count + 2 + state.recent_runs.len();
@@ -1393,7 +1392,7 @@ mod tests {
     async fn mouse_clicking_context_proposal_prefills_proposal_command() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(&dir, "mock response").await;
-        state.latest_proposals = Some(TuiProposalListSummary {
+        state.set_latest_proposals(TuiProposalListSummary {
             total_count: 2,
             pending_count: 1,
             approved_count: 1,
@@ -1543,9 +1542,10 @@ mod tests {
             TuiToolRisk::High,
             json!({"value": "mouse"}),
         ));
-        let layout = mouse_layout(&state, 100, 30);
-        let deny_column = layout.input.x + 1 + 13;
-        let option_row = layout.input.y + 1;
+        let area = Rect::new(0, 0, 100, 30);
+        let modal = crate::tui::render::approval_modal_area(area);
+        let deny_column = modal.x + modal.width / 2 + 4;
+        let option_row = modal.y + modal.height - 3;
         let (sender, mut receiver) = unbounded_channel();
         let mut active_task = None;
 
@@ -1581,7 +1581,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_approval_reply_starts_background_task() {
+    async fn approval_requires_an_explicit_selection() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(&dir, "mock response").await;
         state.set_pending_approval(TuiPendingApproval::tool_call(
@@ -1589,8 +1589,7 @@ mod tests {
             TuiToolRisk::High,
             json!({"value": "typed"}),
         ));
-        state.replace_command_input("no");
-        let (sender, mut receiver) = unbounded_channel();
+        let (sender, _receiver) = unbounded_channel();
         let mut active_task = None;
 
         handle_input_key(
@@ -1602,22 +1601,10 @@ mod tests {
         .await
         .expect("enter handled");
 
-        assert!(state.busy);
-        assert!(active_task.is_some());
-        assert!(state.transcript.iter().any(|item| item.content == "no"));
-
-        apply_updates_until_idle(&mut state, &mut receiver).await;
-        if let Some(task) = active_task.take() {
-            task.join.await.expect("approval task joins");
-        }
-
-        assert!(state.pending_approval.is_none());
-        assert!(
-            state
-                .transcript
-                .iter()
-                .any(|item| { item.content.contains("Denied high-risk tool 'echo'.") })
-        );
+        assert!(!state.busy);
+        assert!(active_task.is_none());
+        assert!(state.pending_approval.is_some());
+        assert_eq!(state.approval_selection, None);
     }
 
     async fn apply_updates_until_idle(

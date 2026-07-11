@@ -21,8 +21,8 @@ use super::{
     },
     chat::run_natural_language_command,
     data::{
-        TuiActivityItem, TuiActivityKind, TuiProposalListSummary, TuiProposalSummary,
-        TuiRunSummary, TuiState, TuiTraceEventItem, TuiTraceEventSummary,
+        TuiActivityItem, TuiActivityKind, TuiDetailKind, TuiFocusPanel, TuiProposalListSummary,
+        TuiProposalSummary, TuiRunSummary, TuiState, TuiTraceEventItem, TuiTraceEventSummary,
         TuiWorkflowCompensationSummary, TuiWorkflowNodeSummary, TuiWorkflowSummary, read_trace,
     },
     format::{compact_json, pretty_json},
@@ -294,8 +294,7 @@ fn command_help(topic: &str) -> String {
             /tool <name> [json]\n\
             /call <name> [json]\n\
             Call a tool through active CLI services. High-risk tools pause for approval.\n\n\
-            When an approval card is shown, use Tab/Left/Right to select Approve or Deny, then press Enter.\n\
-            You can also type yes/no or use /approve, /yes, /deny, /no.\n\n\
+            When the approval dialog is shown, select Approve or Deny, then confirm.\n\n\
             Press Tab after /tool to complete a tool name."
             .to_owned(),
         "cancel" => "Cancellation\n\n\
@@ -338,6 +337,8 @@ async fn show_agents_command(state: &mut TuiState) -> Result<()> {
         format!("{} available", runtime.agent_specs().len()),
     ));
     state.push_system_message(format_agent_list(runtime.agent_specs(), &active_agent_id));
+    state.detail_kind = TuiDetailKind::Overview;
+    state.focus_panel(TuiFocusPanel::Context);
     Ok(())
 }
 
@@ -376,6 +377,8 @@ async fn show_tools_command(state: &mut TuiState) -> Result<()> {
         ),
     ));
     state.push_system_message(format_tool_inventory(&inventory));
+    state.detail_kind = TuiDetailKind::Overview;
+    state.focus_panel(TuiFocusPanel::Context);
     Ok(())
 }
 
@@ -406,6 +409,7 @@ async fn list_runs_command(state: &mut TuiState, rest: &str) -> Result<()> {
         format!("{} shown", runs.len()),
     ));
     state.push_system_message(format_run_list(&runs));
+    state.focus_panel(TuiFocusPanel::Activity);
     Ok(())
 }
 
@@ -1770,7 +1774,7 @@ mod tests {
                 .contains("- echo [read_only / allowed / agent_cli_builtin]")
         }));
         let rendered = crate::tui::render::render_tui_once(&state).expect("tui renders");
-        assert!(rendered.contains("tools 1 high 0 blocked 0"));
+        assert!(rendered.contains("tools  1 | high 0 | blocked 0"));
     }
 
     #[tokio::test]
@@ -2596,7 +2600,7 @@ mod tests {
         assert!(
             crate::tui::render::render_tui_once(&state)
                 .expect("tui renders")
-                .contains("agent: review_agent")
+                .contains("agent  review_agent")
         );
     }
 
@@ -2666,8 +2670,9 @@ mod tests {
         }));
         assert!(state.recent_runs.is_empty());
         let rendered = crate::tui::render::render_tui_once(&state).expect("tui renders");
-        assert!(rendered.contains("pending approval"));
-        assert!(rendered.contains("echo (high)"));
+        assert!(rendered.contains("Approval required"));
+        assert!(rendered.contains("Tool  echo"));
+        assert!(rendered.contains("Risk  high"));
 
         execute_command(&mut state, "/approve")
             .await
