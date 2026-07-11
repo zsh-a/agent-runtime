@@ -282,6 +282,7 @@ pub(super) enum TuiDetailKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TuiCompletionItem {
     pub(super) label: String,
+    pub(super) description: Option<String>,
     pub(super) replacement: String,
 }
 
@@ -1016,8 +1017,9 @@ impl TuiState {
         let Some(item) = menu.items.get(menu.selected) else {
             return false;
         };
+        let changed = self.command_input != item.replacement;
         self.replace_command_input(item.replacement.clone());
-        true
+        changed
     }
 
     pub(super) fn move_cursor_to_line_start(&mut self) {
@@ -1553,6 +1555,7 @@ mod tests {
             "Commands",
             vec![TuiCompletionItem {
                 label: "/status".to_owned(),
+                description: None,
                 replacement: "/status".to_owned(),
             }],
         );

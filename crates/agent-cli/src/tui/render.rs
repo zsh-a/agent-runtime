@@ -6,7 +6,10 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -74,12 +77,15 @@ pub(super) fn render_tui_frame(frame: &mut Frame<'_>, state: &TuiState) {
     frame.render_widget(status_line(state), layout.status);
     if layout.chat.width > 0 {
         frame.render_widget(chat_panel(state, layout.chat), layout.chat);
+        render_chat_scrollbar(frame, state, layout.chat);
     }
     if layout.context.width > 0 {
         frame.render_widget(context_panel(state, layout.context), layout.context);
+        render_context_scrollbar(frame, state, layout.context);
     }
     if layout.activity.width > 0 {
         frame.render_widget(activity_panel(state, layout.activity), layout.activity);
+        render_activity_scrollbar(frame, state, layout.activity);
     }
 
     let input = command_panel(state, layout.input);
@@ -489,6 +495,12 @@ fn activity_panel(state: &TuiState, area: Rect) -> List<'static> {
 }
 
 fn visible_activity_lines(state: &TuiState, area: Rect) -> Vec<Line<'static>> {
+    let items = activity_lines(state);
+    let height = area.height.saturating_sub(2) as usize;
+    bottom_window(items, height, state.event_scroll)
+}
+
+fn activity_lines(state: &TuiState) -> Vec<Line<'static>> {
     let mut items = Vec::new();
     if state.activity.is_empty() {
         items.push(Line::styled(
@@ -519,8 +531,7 @@ fn visible_activity_lines(state: &TuiState, area: Rect) -> Vec<Line<'static>> {
         }));
     }
 
-    let height = area.height.saturating_sub(2) as usize;
-    bottom_window(items, height, state.event_scroll)
+    items
 }
 
 fn activity_item_line(activity: &TuiActivityItem) -> Line<'static> {
@@ -539,6 +550,55 @@ fn activity_item_line(activity: &TuiActivityItem) -> Line<'static> {
         ]);
     }
     Line::from(spans)
+}
+
+fn render_chat_scrollbar(frame: &mut Frame<'_>, state: &TuiState, area: Rect) {
+    let total = chat_lines(state, area.width.saturating_sub(2).max(1)).len();
+    render_bottom_scrollbar(frame, area, total, state.chat_scroll);
+}
+
+fn render_context_scrollbar(frame: &mut Frame<'_>, state: &TuiState, area: Rect) {
+    let total = context_panel_items(state).len();
+    render_top_scrollbar(frame, area, total, state.context_scroll);
+}
+
+fn render_activity_scrollbar(frame: &mut Frame<'_>, state: &TuiState, area: Rect) {
+    let total = activity_lines(state).len();
+    render_bottom_scrollbar(frame, area, total, state.event_scroll);
+}
+
+fn render_bottom_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, offset: u16) {
+    let visible = area.height.saturating_sub(2) as usize;
+    let max_position = total.saturating_sub(visible);
+    let position = max_position.saturating_sub(usize::from(offset).min(max_position));
+    render_scrollbar(frame, area, total, visible, position);
+}
+
+fn render_top_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, offset: u16) {
+    let visible = area.height.saturating_sub(2) as usize;
+    let position = usize::from(offset).min(total.saturating_sub(visible));
+    render_scrollbar(frame, area, total, visible, position);
+}
+
+fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    total: usize,
+    visible: usize,
+    position: usize,
+) {
+    if total <= visible || visible == 0 {
+        return;
+    }
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(Some("│"))
+        .thumb_symbol("┃");
+    let mut scrollbar_state = ScrollbarState::new(total)
+        .position(position)
+        .viewport_content_length(visible);
+    frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
 }
 
 pub(super) fn selected_text_for_layout(state: &TuiState, layout: TuiLayout) -> Option<String> {
@@ -721,7 +781,21 @@ fn render_completion_menu(frame: &mut Frame<'_>, state: &TuiState, area: Rect, i
             } else {
                 Style::default().fg(theme::TEXT)
             };
-            ListItem::new(item.label.clone()).style(style)
+            let line = Line::from(vec![
+                Span::styled(item.label.clone(), style),
+                Span::styled(
+                    item.description
+                        .as_ref()
+                        .map(|description| format!("  {description}"))
+                        .unwrap_or_default(),
+                    if index == menu.selected {
+                        style
+                    } else {
+                        Style::default().fg(theme::MUTED)
+                    },
+                ),
+            ]);
+            ListItem::new(line)
         })
         .collect::<Vec<_>>();
     frame.render_widget(Clear, menu_area);
@@ -747,7 +821,14 @@ pub(super) fn completion_menu_area(state: &TuiState, area: Rect, input: Rect) ->
     let content_width = menu
         .items
         .iter()
-        .map(|item| item.label.width() as u16)
+        .map(|item| {
+            (item.label.width()
+                + item
+                    .description
+                    .as_ref()
+                    .map(|description| description.width() + 2)
+                    .unwrap_or_default()) as u16
+        })
         .max()
         .unwrap_or(12)
         .saturating_add(4);
@@ -1626,10 +1707,12 @@ mod tests {
             vec![
                 crate::tui::data::TuiCompletionItem {
                     label: "proposals".to_owned(),
+                    description: Some("Review proposals".to_owned()),
                     replacement: "/help proposals".to_owned(),
                 },
                 crate::tui::data::TuiCompletionItem {
                     label: "proposal".to_owned(),
+                    description: None,
                     replacement: "/help proposal".to_owned(),
                 },
             ],
@@ -1640,6 +1723,7 @@ mod tests {
         assert!(rendered.contains("Help topics"));
         assert!(rendered.contains("proposals"));
         assert!(rendered.contains("proposal"));
+        assert!(rendered.contains("Review proposals"));
     }
 
     #[test]
@@ -1650,6 +1734,18 @@ mod tests {
         let rendered = render_tui_once(&state).expect("tui renders");
 
         assert!(rendered.contains("thinking "));
+    }
+
+    #[test]
+    fn long_chat_renders_scrollbar() {
+        let mut state = test_state();
+        for index in 0..16 {
+            state.push_user_message(format!("message {index}"));
+        }
+
+        let rendered = render_tui_at_size(&state, 72, 18).expect("compact chat renders");
+
+        assert!(rendered.contains('┃'));
     }
 
     #[test]

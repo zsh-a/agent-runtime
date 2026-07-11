@@ -2,6 +2,7 @@ mod approval;
 mod chat;
 mod chat_events;
 mod commands;
+mod completion;
 mod data;
 mod format;
 mod layout;

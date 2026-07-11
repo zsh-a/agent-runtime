@@ -15,9 +15,10 @@ use super::{
     approval::start_pending_approval_task,
     chat::{TuiTaskHandle, start_natural_language_task},
     commands::execute_command,
+    completion::{complete_slash_command, open_command_palette, refresh_command_palette},
     data::{
-        TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiCompletionItem, TuiFocusPanel,
-        TuiSelectionPoint, TuiState, TuiUpdate,
+        TuiActivityItem, TuiActivityKind, TuiApprovalSelection, TuiFocusPanel, TuiSelectionPoint,
+        TuiState, TuiUpdate,
     },
     layout::{TuiLayout, TuiResizeHandle, contains},
     render::{
@@ -81,12 +82,15 @@ async fn run_tui_event_loop(
                     }
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            open_command_palette(state)
+                        }
                         KeyCode::Enter => state.enter_input_mode(),
                         KeyCode::Tab | KeyCode::Right => state.focus_next_panel(),
                         KeyCode::BackTab | KeyCode::Left => state.focus_previous_panel(),
                         KeyCode::PageUp | KeyCode::Char('k') => state.scroll_focused_panel_up(),
                         KeyCode::PageDown | KeyCode::Char('j') => state.scroll_focused_panel_down(),
-                        KeyCode::Char(':') | KeyCode::Char('/') => state.enter_command("/"),
+                        KeyCode::Char(':') | KeyCode::Char('/') => open_command_palette(state),
                         KeyCode::Char('r') => state.enter_command("/run "),
                         KeyCode::Char('t') => state.enter_command("/tool "),
                         KeyCode::Char('p') => state.enter_command("/replay "),
@@ -245,7 +249,7 @@ async fn handle_input_key(
             state.delete_previous_word();
         }
         KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
-            state.history_previous();
+            open_command_palette(state);
         }
         KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => {
             state.history_next();
@@ -258,12 +262,15 @@ async fn handle_input_key(
         }
         KeyCode::Backspace if modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
             state.delete_previous_word();
+            refresh_command_palette(state);
         }
         KeyCode::Backspace => {
             state.backspace();
+            refresh_command_palette(state);
         }
         KeyCode::Delete => {
             state.delete();
+            refresh_command_palette(state);
         }
         KeyCode::Left if modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
             state.move_cursor_word_left();
@@ -310,8 +317,12 @@ async fn handle_input_key(
         KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
             state.scroll_chat_bottom();
         }
+        KeyCode::Char('/') if state.command_input.is_empty() && text_modifier(modifiers) => {
+            open_command_palette(state);
+        }
         KeyCode::Char(ch) if text_modifier(modifiers) => {
             state.insert_char(ch);
+            refresh_command_palette(state);
         }
         _ => {}
     }
@@ -710,248 +721,6 @@ fn text_modifier(modifiers: KeyModifiers) -> bool {
     !modifiers.intersects(command_modifiers)
 }
 
-fn complete_slash_command(state: &mut TuiState) {
-    if state.select_next_completion() {
-        return;
-    }
-    if state.input_cursor != state.command_input.len() {
-        return;
-    }
-    let input = state.command_input.clone();
-    if !input.starts_with('/') {
-        return;
-    }
-    let body = &input[1..];
-    if !body.contains(char::is_whitespace) {
-        complete_slash_command_name(state, body);
-        return;
-    }
-
-    let (verb, rest) = body
-        .split_once(char::is_whitespace)
-        .map(|(verb, rest)| (verb.trim(), rest.trim_start()))
-        .unwrap_or((body.trim(), ""));
-    if rest.contains(char::is_whitespace) {
-        return;
-    }
-    match verb {
-        "help" | "?" => {
-            let candidates = help_topics();
-            complete_slash_argument(
-                state,
-                verb,
-                rest,
-                candidates,
-                "",
-                "help topic",
-                "help topics",
-            );
-        }
-        "use" => {
-            let candidates = agent_ids(state);
-            complete_slash_argument(state, verb, rest, candidates, "", "agent id", "agent ids");
-        }
-        "run" => {
-            let candidates = agent_ids(state);
-            complete_slash_argument(state, verb, rest, candidates, " ", "agent id", "agent ids");
-        }
-        "tool" | "call" => {
-            let candidates = tool_names(state);
-            complete_slash_argument(
-                state,
-                verb,
-                rest,
-                candidates,
-                " ",
-                "tool name",
-                "tool names",
-            );
-        }
-        "inspect" | "events" | "cancel" | "proposals" => {
-            let candidates = recent_run_ids(state);
-            complete_slash_argument(state, verb, rest, candidates, "", "run id", "run ids");
-        }
-        "proposal" | "approve-proposal" | "deny-proposal" => {
-            let candidates = proposal_ids(state);
-            complete_slash_argument(
-                state,
-                verb,
-                rest,
-                candidates,
-                "",
-                "proposal id",
-                "proposal ids",
-            );
-        }
-        _ => {}
-    }
-}
-
-fn complete_slash_command_name(state: &mut TuiState, typed: &str) {
-    const COMMANDS: &[&str] = &[
-        "help",
-        "status",
-        "agents",
-        "use ",
-        "tools",
-        "clear",
-        "refresh",
-        "run ",
-        "runs",
-        "cancel ",
-        "events ",
-        "workflow ",
-        "wf ",
-        "proposals",
-        "proposal ",
-        "approve-proposal ",
-        "deny-proposal ",
-        "tool ",
-        "approve",
-        "yes",
-        "deny",
-        "no",
-        "replay ",
-        "inspect ",
-    ];
-    let matches = COMMANDS
-        .iter()
-        .copied()
-        .filter(|command| command.starts_with(typed))
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [command] => state.replace_command_input(format!("/{command}")),
-        [] => state.push_event("no slash command matches"),
-        commands => state.show_completions(
-            "Commands",
-            commands
-                .iter()
-                .map(|command| TuiCompletionItem {
-                    label: format!("/{}", command.trim_end()),
-                    replacement: format!("/{command}"),
-                })
-                .collect(),
-        ),
-    }
-}
-
-fn complete_slash_argument(
-    state: &mut TuiState,
-    verb: &str,
-    typed: &str,
-    candidates: Vec<String>,
-    suffix: &str,
-    singular: &str,
-    plural: &str,
-) {
-    let matches = candidates
-        .into_iter()
-        .filter(|candidate| candidate.starts_with(typed))
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [candidate] => state.replace_command_input(format!("/{verb} {candidate}{suffix}")),
-        [] => state.push_event(format!("no {singular} matches")),
-        candidates => state.show_completions(
-            title_case(plural),
-            candidates
-                .iter()
-                .map(|candidate| TuiCompletionItem {
-                    label: candidate.clone(),
-                    replacement: format!("/{verb} {candidate}{suffix}"),
-                })
-                .collect(),
-        ),
-    }
-}
-
-fn title_case(value: &str) -> String {
-    let mut chars = value.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_default()
-}
-
-fn help_topics() -> Vec<String> {
-    [
-        "agents",
-        "status",
-        "use",
-        "run",
-        "runs",
-        "inspect",
-        "events",
-        "workflow",
-        "wf",
-        "proposals",
-        "proposal",
-        "approve-proposal",
-        "deny-proposal",
-        "tool",
-        "call",
-        "approve",
-        "yes",
-        "y",
-        "deny",
-        "no",
-        "n",
-        "cancel",
-        "trace",
-        "replay",
-        "refresh",
-        "clear",
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect()
-}
-
-fn agent_ids(state: &TuiState) -> Vec<String> {
-    let mut ids = Vec::new();
-    for agent in &state.agents {
-        if !ids.contains(&agent.id) {
-            ids.push(agent.id.clone());
-        }
-    }
-    ids
-}
-
-fn tool_names(state: &TuiState) -> Vec<String> {
-    let mut names = Vec::new();
-    let Some(inventory) = &state.tool_inventory else {
-        return names;
-    };
-    for tool in &inventory.items {
-        if !names.contains(&tool.name) {
-            names.push(tool.name.clone());
-        }
-    }
-    names
-}
-
-fn recent_run_ids(state: &TuiState) -> Vec<String> {
-    let mut ids = Vec::new();
-    for run in &state.recent_runs {
-        if !ids.contains(&run.run_id.0) {
-            ids.push(run.run_id.0.clone());
-        }
-    }
-    ids
-}
-
-fn proposal_ids(state: &TuiState) -> Vec<String> {
-    let mut ids = Vec::new();
-    let Some(proposals) = &state.latest_proposals else {
-        return ids;
-    };
-    for proposal in &proposals.proposals {
-        if !ids.contains(&proposal.proposal_id) {
-            ids.push(proposal.proposal_id.clone());
-        }
-    }
-    ids
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1139,19 +908,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tab_completes_approval_alias_command_names() {
+    async fn ctrl_p_opens_global_command_palette() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut state = test_state(&dir, "mock response").await;
-        state.replace_command_input("/ye");
+        state.replace_command_input("draft");
+        let (sender, _receiver) = unbounded_channel();
+        let mut active_task = None;
 
-        complete_slash_command(&mut state);
+        handle_input_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &sender,
+            &mut active_task,
+        )
+        .await
+        .expect("ctrl-p handled");
 
-        assert_eq!(state.command_input, "/yes");
+        assert_eq!(state.command_input, "/");
+        let menu = state.completion.as_ref().expect("command palette opens");
+        assert_eq!(menu.title, "Commands");
+        assert!(menu.items.iter().any(|item| item.label == "/run"));
+        assert!(menu.items.iter().any(|item| item.label == "/tools"));
 
-        state.replace_command_input("/no");
-        complete_slash_command(&mut state);
+        handle_input_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &sender,
+            &mut active_task,
+        )
+        .await
+        .expect("filter handled");
 
-        assert_eq!(state.command_input, "/no");
+        assert_eq!(state.command_input, "/r");
+        let menu = state
+            .completion
+            .as_ref()
+            .expect("filtered palette stays open");
+        assert!(menu.items.iter().all(|item| item.label.starts_with("/r")));
+        assert!(!menu.items.iter().any(|item| item.label == "/tools"));
     }
 
     #[tokio::test]
