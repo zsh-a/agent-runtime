@@ -1120,15 +1120,9 @@ fn catalog_agent<'a>(
 
 fn catalog_tool<'a>(
     catalog: &'a AgentRuntimeCatalog,
-    agent_id: &str,
+    _agent_id: &str,
     tool_name: &str,
 ) -> Result<&'a ToolSpec, AgentError> {
-    let agent = catalog_agent(catalog, agent_id)?;
-    if !agent.capabilities.iter().any(|name| name == tool_name) {
-        return Err(validation(format!(
-            "tool '{tool_name}' is not declared by agent '{agent_id}'"
-        )));
-    }
     catalog
         .tools
         .iter()
