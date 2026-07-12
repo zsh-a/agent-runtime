@@ -127,12 +127,8 @@ fn validate_workflow_request(value: &Value) -> Result<()> {
         "../../../../schemas/workflow-run-request.schema.json"
     ))
     .into_diagnostic()?;
-    let validator = jsonschema::validator_for(&schema)
-        .map_err(|e| miette!("failed to compile workflow-run-request schema: {e}"))?;
-    let errors = validator
-        .iter_errors(value)
-        .map(|error| format!("{}: {}", error.instance_path(), error))
-        .collect::<Vec<_>>();
+    let errors = crate::schema_validation::validation_errors(&schema, value)
+        .map_err(|error| miette!("failed to compile workflow-run-request schema: {error}"))?;
     if errors.is_empty() {
         Ok(())
     } else {

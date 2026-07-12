@@ -308,14 +308,10 @@ async fn validate_json_file(
         Ok(value) => value,
         Err(error) => return failed_step(name, error),
     };
-    let validator = match jsonschema::validator_for(&schema) {
-        Ok(validator) => validator,
+    let errors = match crate::schema_validation::validation_errors(&schema, &instance) {
+        Ok(errors) => errors,
         Err(error) => return failed_step(name, miette!("failed to compile JSON schema: {error}")),
     };
-    let errors = validator
-        .iter_errors(&instance)
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
     if errors.is_empty() {
         passed_step(
             name,

@@ -1,7 +1,9 @@
 mod cancellation;
+mod execution_support;
 mod hooks;
 mod lock;
 mod loop_core;
+mod observability;
 mod policy;
 mod recovery;
 mod registry;
@@ -10,6 +12,7 @@ mod scheduler;
 mod services;
 mod subagent;
 mod trace;
+mod workflow;
 
 pub use hooks::{FnHook, HookInvocation, HookManager, HookRegistration};
 pub use lock::InMemoryLockStore;

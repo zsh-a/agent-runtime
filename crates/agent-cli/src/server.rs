@@ -665,7 +665,7 @@ fn decode_schema_json<T: DeserializeOwned>(
             )));
         }
     };
-    let schema = match serde_json::from_str::<Value>(schema_json) {
+    let schema = match crate::schema_validation::parse_schema(schema_json) {
         Ok(schema) => schema,
         Err(err) => {
             return Err(Box::new(http_error(
@@ -675,8 +675,8 @@ fn decode_schema_json<T: DeserializeOwned>(
             )));
         }
     };
-    let validator = match jsonschema::validator_for(&schema) {
-        Ok(validator) => validator,
+    let errors = match crate::schema_validation::validation_errors(&schema, &value) {
+        Ok(errors) => errors,
         Err(err) => {
             return Err(Box::new(http_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -685,10 +685,6 @@ fn decode_schema_json<T: DeserializeOwned>(
             )));
         }
     };
-    let errors = validator
-        .iter_errors(&value)
-        .map(|error| format!("{}: {}", error.instance_path(), error))
-        .collect::<Vec<_>>();
     if !errors.is_empty() {
         return Err(Box::new(http_error(
             StatusCode::BAD_REQUEST,
