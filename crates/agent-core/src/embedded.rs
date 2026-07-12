@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{RunId, RunScope, RunWorkflow, protocol_version};
+use crate::{RunId, RunScope, RunWorkflow, ToolRisk, protocol_version};
 
 pub const EMBEDDED_SNAPSHOT_VERSION: u32 = 1;
 
@@ -152,7 +152,7 @@ pub enum EmbeddedTerminalReason {
     ClosedEarly,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EmbeddedRunState {
     pub status: EmbeddedRunStepStatus,
     pub step_index: u64,
@@ -170,6 +170,9 @@ pub enum EmbeddedHostEffect {
         name: String,
         #[serde(default = "empty_json_object")]
         input: Value,
+        risk: ToolRisk,
+        #[serde(default = "empty_json_object")]
+        metadata: Value,
     },
     Subagent {
         effect_id: String,
@@ -269,7 +272,7 @@ pub struct EmbeddedRunContinuation {
     pub next_step_index: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EmbeddedStepTraceEvent {
     pub kind: String,
     pub run_id: RunId,

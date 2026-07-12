@@ -9,7 +9,9 @@
     "kind": "tool",
     "effect_id": "effect_fixture_1",
     "name": "read_fixture",
-    "input": { "id": "first" }
+    "input": { "id": "first" },
+    "risk": "read_only",
+    "metadata": {}
   },
   "run_state": {
     "status": "effect_requested",

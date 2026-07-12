@@ -1,15 +1,19 @@
+use std::collections::{BTreeMap, HashSet};
+
 use agent_core::{
-    AgentError, AgentRuntimeCatalog, EMBEDDED_SNAPSHOT_VERSION, EffectId, EmbeddedEffectResponse,
-    EmbeddedHostEffect, EmbeddedRunLimits, EmbeddedRunProgress, EmbeddedRunSnapshot,
-    EmbeddedRunStep, RunId, RunRequest, ToolSpec, protocol_version,
+    AgentError, AgentRuntimeCatalog, EMBEDDED_SNAPSHOT_VERSION, EffectId, EmbeddedEffectKind,
+    EmbeddedEffectResponse, EmbeddedEffectResult, EmbeddedHostEffect, EmbeddedPendingHostEffect,
+    EmbeddedRunContinuation, EmbeddedRunLimits, EmbeddedRunProgress, EmbeddedRunSnapshot,
+    EmbeddedRunState, EmbeddedRunStep, EmbeddedRunStepStatus, EmbeddedStepTraceEvent,
+    EmbeddedTerminalReason, RunId, RunRequest, ToolSpec, catalog_version, protocol_version,
 };
 use serde_json::{Map, Value, json};
 
+/// Typed embedded execution state machine for hosts that persist and resume
+/// runtime-owned snapshots.
 pub struct EffectStepLoop;
 
 impl EffectStepLoop {
-    /// Start a versioned embedded snapshot with runtime-owned effect and
-    /// subagent limits.
     pub fn start_snapshot(
         catalog: &AgentRuntimeCatalog,
         request: RunRequest,
@@ -19,8 +23,6 @@ impl EffectStepLoop {
         Self::start_snapshot_at_depth(catalog, request, agent_id, limits, 0, 0)
     }
 
-    /// Continue a host-persisted snapshot. The runtime validates limits and
-    /// checkpoint identity before consuming the host response.
     pub fn continue_snapshot(
         catalog: &AgentRuntimeCatalog,
         snapshot: EmbeddedRunSnapshot,
@@ -34,16 +36,13 @@ impl EffectStepLoop {
         advance_snapshot(catalog, snapshot, effect_response, agent_id, true)
     }
 
-    /// Cancel a non-terminal embedded snapshot without dispatching its pending
-    /// host effect. Cancellation is recorded as a runtime-owned terminal step
-    /// and does not consume the shared effect budget.
     pub fn cancel_snapshot(
         catalog: &AgentRuntimeCatalog,
         snapshot: EmbeddedRunSnapshot,
         agent_id: &str,
         reason: &str,
     ) -> Result<EmbeddedRunSnapshot, AgentError> {
-        validate_snapshot(&snapshot, agent_id)?;
+        validate_snapshot(catalog, &snapshot, agent_id)?;
         if snapshot.is_terminal() {
             return Ok(snapshot);
         }
@@ -57,27 +56,30 @@ impl EffectStepLoop {
         } else {
             reason.trim()
         };
-        let response = EmbeddedEffectResponse {
-            jsonrpc: "2.0".to_owned(),
-            id: effect_id,
-            result: Some(json!({
-                "error": {
-                    "code": "user_cancel",
-                    "message": message,
-                }
-            })),
-            error: None,
-        };
-        advance_snapshot(catalog, snapshot, response, agent_id, false)
+        advance_snapshot(
+            catalog,
+            snapshot,
+            EmbeddedEffectResponse {
+                jsonrpc: "2.0".to_owned(),
+                id: effect_id,
+                result: Some(json!({
+                    "error": {
+                        "code": "user_cancel",
+                        "message": message,
+                    }
+                })),
+                error: None,
+            },
+            agent_id,
+            false,
+        )
     }
 
-    /// Start the subagent currently requested by `parent`. The child inherits
-    /// the parent's shared effect budget and advances subagent depth in Rust.
     pub fn start_requested_subagent(
         catalog: &AgentRuntimeCatalog,
         parent: &EmbeddedRunSnapshot,
     ) -> Result<EmbeddedRunSnapshot, AgentError> {
-        validate_snapshot(parent, &parent.step.agent_id)?;
+        validate_snapshot(catalog, parent, &parent.step.agent_id)?;
         let Some(EmbeddedHostEffect::Subagent {
             agent_id,
             input,
@@ -124,15 +126,13 @@ impl EffectStepLoop {
         )
     }
 
-    /// Resume a parent from a terminal child snapshot without asking the host
-    /// to synthesize subagent bookkeeping or shared-budget counters.
     pub fn resume_parent_from_subagent(
         catalog: &AgentRuntimeCatalog,
         mut parent: EmbeddedRunSnapshot,
         child: EmbeddedRunSnapshot,
     ) -> Result<EmbeddedRunSnapshot, AgentError> {
-        validate_snapshot(&parent, &parent.step.agent_id)?;
-        validate_snapshot(&child, &child.step.agent_id)?;
+        validate_snapshot(catalog, &parent, &parent.step.agent_id)?;
+        validate_snapshot(catalog, &child, &child.step.agent_id)?;
         let Some(EmbeddedHostEffect::Subagent {
             effect_id,
             agent_id,
@@ -162,21 +162,151 @@ impl EffectStepLoop {
                 "embedded child did not consume the parent subagent effect budget",
             ));
         }
+        let child_agent_id = child.step.agent_id.clone();
+        let child_progress = child.progress;
+        let child_step = serde_json::to_value(&child.step).map_err(|error| {
+            validation(format!("failed to encode terminal subagent step: {error}"))
+        })?;
+        let child_snapshot = serde_json::to_value(&child).map_err(|error| {
+            validation(format!(
+                "failed to encode terminal subagent snapshot: {error}"
+            ))
+        })?;
         let response = EmbeddedEffectResponse {
             jsonrpc: "2.0".to_owned(),
             id: effect_id.clone(),
             result: Some(json!({
-                "agent_id": child.step.agent_id,
-                "terminal_step": child.step,
-                "snapshot": child,
+                "agent_id": child_agent_id,
+                "terminal_step": child_step,
+                "snapshot": child_snapshot,
             })),
             error: None,
         };
-        parent.progress.dispatched_effect_count = child.progress.dispatched_effect_count;
-        parent.progress.effect_budget_exhausted |= child.progress.effect_budget_exhausted;
-        parent.progress.subagent_depth_exceeded |= child.progress.subagent_depth_exceeded;
+        parent.progress.dispatched_effect_count = child_progress.dispatched_effect_count;
+        parent.progress.effect_budget_exhausted |= child_progress.effect_budget_exhausted;
+        parent.progress.subagent_depth_exceeded |= child_progress.subagent_depth_exceeded;
         let parent_agent_id = parent.step.agent_id.clone();
         advance_snapshot(catalog, parent, response, &parent_agent_id, false)
+    }
+
+    pub fn start_typed(
+        catalog: &AgentRuntimeCatalog,
+        mut request: RunRequest,
+        agent_id: &str,
+    ) -> Result<EmbeddedRunStep, AgentError> {
+        validate_catalog(catalog)?;
+        normalize_run_request(&mut request)?;
+        let agent = catalog_agent(catalog, agent_id)?;
+        let run_id = request.run_id.clone().unwrap_or_else(RunId::new_v7);
+        let (effects, llm_response) = parse_effect_plan(&request.input)?;
+        if effects.is_empty() {
+            return Ok(completed_passthrough_step(
+                run_id,
+                &agent.id,
+                &agent.version,
+                request.input,
+            ));
+        }
+        let mut effects = effects.into_iter();
+        let first = effects.next().expect("non-empty effect plan");
+        let remaining = effects.collect::<Vec<_>>();
+        let continuation = continuation_for(remaining, Vec::new(), llm_response, 1);
+        effect_requested_step(
+            catalog,
+            run_id,
+            &agent.id,
+            &agent.version,
+            0,
+            first,
+            continuation,
+        )
+    }
+
+    pub fn continue_typed(
+        catalog: &AgentRuntimeCatalog,
+        previous_step: EmbeddedRunStep,
+        effect_response: EmbeddedEffectResponse,
+        agent_id: &str,
+    ) -> Result<EmbeddedRunStep, AgentError> {
+        validate_catalog(catalog)?;
+        let agent = catalog_agent(catalog, agent_id)?;
+        validate_step(catalog, &previous_step, &agent.id, &agent.version)?;
+        if previous_step.status != EmbeddedRunStepStatus::EffectRequested {
+            return Err(validation(
+                "previous step status must be 'effect_requested'",
+            ));
+        }
+        let effect = previous_step
+            .effect
+            .clone()
+            .ok_or_else(|| validation("previous step is missing effect"))?;
+        validate_effect_response(&effect, &effect_response)?;
+
+        let terminal_status = effect_response_terminal_status(&effect_response);
+        let mut effect_results = previous_step
+            .continuation
+            .as_ref()
+            .map(|continuation| continuation.effect_results.clone())
+            .unwrap_or_default();
+        if terminal_status != Some(EmbeddedRunStepStatus::ClosedEarly) {
+            effect_results.push(EmbeddedEffectResult {
+                kind: effect_kind(&effect),
+                effect: effect.clone(),
+                effect_response: effect_response.clone(),
+            });
+        }
+        let next_step_index = previous_step.step_index.saturating_add(1);
+
+        if let Some(status) = terminal_status {
+            return Ok(terminal_effect_step(
+                previous_step.run_id,
+                &agent.id,
+                &agent.version,
+                next_step_index,
+                status,
+                effect,
+                effect_response.clone(),
+                effect_results,
+                effect_response_error_payload(&effect_response),
+            ));
+        }
+
+        let mut continuation = previous_step
+            .continuation
+            .unwrap_or(EmbeddedRunContinuation {
+                effects: Vec::new(),
+                effect_results: Vec::new(),
+                llm_response: None,
+                next_step_index,
+            });
+        if continuation.effects.is_empty() {
+            return Ok(completed_effect_step(
+                previous_step.run_id,
+                &agent.id,
+                &agent.version,
+                next_step_index,
+                effect,
+                effect_response,
+                effect_results,
+            ));
+        }
+
+        let first = continuation.effects.remove(0);
+        let next_continuation = continuation_for(
+            continuation.effects,
+            effect_results,
+            continuation.llm_response,
+            next_step_index.saturating_add(1),
+        );
+        effect_requested_step(
+            catalog,
+            previous_step.run_id,
+            &agent.id,
+            &agent.version,
+            next_step_index,
+            first,
+            next_continuation,
+        )
     }
 
     fn start_snapshot_at_depth(
@@ -202,204 +332,6 @@ impl EffectStepLoop {
         };
         close_snapshot_at_limits(catalog, snapshot, agent_id)
     }
-
-    /// Start an embedded run and return its typed, serializable checkpoint.
-    ///
-    /// Hosts should prefer this method. `start_step` remains available for
-    /// agent.v1 consumers that still exchange untyped JSON values.
-    pub fn start_typed(
-        catalog: &AgentRuntimeCatalog,
-        request: RunRequest,
-        agent_id: &str,
-    ) -> Result<EmbeddedRunStep, AgentError> {
-        let value = Self::start_step(catalog, request, agent_id)?;
-        serde_json::from_value(value).map_err(|error| {
-            AgentError::internal(format!(
-                "runtime produced an invalid embedded run step: {error}"
-            ))
-        })
-    }
-
-    /// Continue a typed embedded checkpoint with a typed host response.
-    pub fn continue_typed(
-        catalog: &AgentRuntimeCatalog,
-        previous_step: EmbeddedRunStep,
-        effect_response: EmbeddedEffectResponse,
-        agent_id: &str,
-    ) -> Result<EmbeddedRunStep, AgentError> {
-        let previous_step = serde_json::to_value(previous_step).map_err(|error| {
-            AgentError::internal(format!("failed to encode embedded run checkpoint: {error}"))
-        })?;
-        let effect_response = serde_json::to_value(effect_response).map_err(|error| {
-            AgentError::internal(format!(
-                "failed to encode embedded effect response: {error}"
-            ))
-        })?;
-        let value = Self::continue_step(catalog, previous_step, effect_response, agent_id)?;
-        serde_json::from_value(value).map_err(|error| {
-            AgentError::internal(format!(
-                "runtime produced an invalid embedded run step: {error}"
-            ))
-        })
-    }
-
-    pub fn start_step(
-        catalog: &AgentRuntimeCatalog,
-        mut request: RunRequest,
-        agent_id: &str,
-    ) -> Result<Value, AgentError> {
-        require_catalog_contract(catalog)?;
-        normalize_run_request_contract(&mut request)?;
-        let agent = catalog_agent(catalog, agent_id)?;
-        let run_id = request.run_id.clone().unwrap_or_else(RunId::new_v7);
-
-        let mut response = match parse_initial_effect_request(&request.input)? {
-            Some(effect_request) => {
-                let continuation = effect_request.continuation();
-                build_effect_requested_step(
-                    catalog,
-                    &agent.id,
-                    &agent.version,
-                    serde_json::to_value(&run_id)
-                        .map_err(|error| AgentError::internal(error.to_string()))?,
-                    effect_request.first,
-                    continuation,
-                )?
-            }
-            None => json!({
-                "protocol_version": protocol_version(),
-                "run_id": run_id,
-                "agent_id": agent.id,
-                "agent_version": agent.version,
-                "step_index": 0,
-                "status": "completed",
-                "output": request.input,
-            }),
-        };
-        attach_runtime_metadata(&mut response);
-        Ok(response)
-    }
-
-    pub fn continue_step(
-        catalog: &AgentRuntimeCatalog,
-        previous_step: Value,
-        effect_response: Value,
-        agent_id: &str,
-    ) -> Result<Value, AgentError> {
-        require_catalog_contract(catalog)?;
-        let agent = catalog_agent(catalog, agent_id)?;
-        let previous_kind = previous_effect_kind(&previous_step)?;
-        require_previous_step_protocol_version(&previous_step)?;
-        require_previous_step_agent(&previous_step, &agent.id, &agent.version)?;
-        let run_id = require_previous_step_run_id(&previous_step)?;
-        let previous_step_index = require_previous_step_index(&previous_step)?;
-        let effect_call = previous_effect_call(&previous_step, previous_kind)?.clone();
-        require_previous_effect_call_id(&effect_call, previous_kind)?;
-        require_previous_effect_catalog_entry(catalog, &agent.id, &effect_call, previous_kind)?;
-        require_previous_step_runtime_metadata(&previous_step, &run_id, previous_step_index)?;
-        require_effect_response_envelope(&effect_response)?;
-        require_matching_effect_response_id(&effect_call, &effect_response, previous_kind)?;
-
-        let previous_continuation =
-            RuntimeContinuation::from_step(&previous_step, catalog, &agent.id)?;
-        if let Some(continuation) = &previous_continuation {
-            continuation.require_next_step_index(previous_step_index)?;
-        }
-        let mut effect_results = previous_continuation
-            .as_ref()
-            .map(|continuation| continuation.effect_results.clone())
-            .unwrap_or_default();
-        let terminal_status = effect_response_terminal_status(&effect_response);
-        if terminal_status != Some("closed_early") {
-            effect_results.push(EffectResultRecord::new(
-                previous_kind,
-                effect_call.clone(),
-                effect_response.clone(),
-            ));
-        }
-
-        let next_step_index = previous_step_index + 1;
-        let mut response = match terminal_status {
-            Some(status) => {
-                let error = effect_response_error_payload(&effect_response).unwrap_or(Value::Null);
-                let effect_results_json = EffectResultRecord::to_values(&effect_results);
-                json!({
-                    "protocol_version": protocol_version(),
-                    "run_id": run_id,
-                    "agent_id": agent.id,
-                    "agent_version": agent.version,
-                    "step_index": next_step_index,
-                    "status": status,
-                    "effect": effect_call,
-                    "effect_response": effect_response,
-                    "effect_results": effect_results_json,
-                    "error": error,
-                })
-            }
-            None => match next_effect_request_from_continuation(
-                previous_continuation,
-                effect_results.clone(),
-            )? {
-                Some(next) => {
-                    let continuation = next.continuation();
-                    build_effect_requested_step(
-                        catalog,
-                        &agent.id,
-                        &agent.version,
-                        run_id,
-                        next.first,
-                        continuation,
-                    )?
-                }
-                None => {
-                    let effect_results_json = EffectResultRecord::to_values(&effect_results);
-                    terminal_completed_step(
-                        &agent.id,
-                        &agent.version,
-                        run_id,
-                        next_step_index,
-                        effect_call,
-                        effect_response,
-                        effect_results_json,
-                    )
-                }
-            },
-        };
-        attach_runtime_metadata(&mut response);
-        Ok(response)
-    }
-}
-
-fn validate_snapshot(snapshot: &EmbeddedRunSnapshot, agent_id: &str) -> Result<(), AgentError> {
-    if snapshot.protocol_version != protocol_version() {
-        return Err(validation(format!(
-            "embedded snapshot protocol_version '{}' is not supported",
-            snapshot.protocol_version
-        )));
-    }
-    if snapshot.snapshot_version != EMBEDDED_SNAPSHOT_VERSION {
-        return Err(validation(format!(
-            "embedded snapshot version {} is not supported",
-            snapshot.snapshot_version
-        )));
-    }
-    if snapshot.step.protocol_version != snapshot.protocol_version {
-        return Err(validation(
-            "embedded snapshot step protocol_version does not match snapshot",
-        ));
-    }
-    if snapshot.step.agent_id != agent_id {
-        return Err(validation(format!(
-            "embedded snapshot agent '{}' does not match requested agent '{agent_id}'",
-            snapshot.step.agent_id
-        )));
-    }
-    if snapshot.progress.dispatched_effect_count > snapshot.limits.max_effect_steps {
-        return Err(validation(
-            "embedded dispatched effect count exceeds max_effect_steps",
-        ));
-    }
-    Ok(())
 }
 
 fn advance_snapshot(
@@ -409,7 +341,7 @@ fn advance_snapshot(
     agent_id: &str,
     count_dispatch: bool,
 ) -> Result<EmbeddedRunSnapshot, AgentError> {
-    validate_snapshot(&snapshot, agent_id)?;
+    validate_snapshot(catalog, &snapshot, agent_id)?;
     if snapshot.is_terminal() {
         return Err(validation("embedded snapshot is already terminal"));
     }
@@ -433,7 +365,7 @@ fn close_snapshot_at_limits(
     mut snapshot: EmbeddedRunSnapshot,
     agent_id: &str,
 ) -> Result<EmbeddedRunSnapshot, AgentError> {
-    validate_snapshot(&snapshot, agent_id)?;
+    validate_snapshot(catalog, &snapshot, agent_id)?;
     let Some(effect) = snapshot.requested_effect() else {
         return Ok(snapshot);
     };
@@ -458,522 +390,204 @@ fn close_snapshot_at_limits(
     let Some((code, message)) = closure else {
         return Ok(snapshot);
     };
-    let response = EmbeddedEffectResponse {
-        jsonrpc: "2.0".to_owned(),
-        id: effect_id,
-        result: Some(json!({
-            "error": {
-                "code": code,
-                "message": message,
-                "max_effect_steps": snapshot.limits.max_effect_steps,
-                "dispatched_effect_count": snapshot.progress.dispatched_effect_count,
-                "max_subagent_depth": snapshot.limits.max_subagent_depth,
-                "subagent_depth": snapshot.progress.subagent_depth,
-            }
-        })),
-        error: None,
-    };
-    snapshot.step = EffectStepLoop::continue_typed(catalog, snapshot.step, response, agent_id)?;
+    snapshot.step = EffectStepLoop::continue_typed(
+        catalog,
+        snapshot.step,
+        EmbeddedEffectResponse {
+            jsonrpc: "2.0".to_owned(),
+            id: effect_id,
+            result: Some(json!({
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "max_effect_steps": snapshot.limits.max_effect_steps,
+                    "dispatched_effect_count": snapshot.progress.dispatched_effect_count,
+                    "max_subagent_depth": snapshot.limits.max_subagent_depth,
+                    "subagent_depth": snapshot.progress.subagent_depth,
+                }
+            })),
+            error: None,
+        },
+        agent_id,
+    )?;
     Ok(snapshot)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunEffectKind {
-    Tool,
-    Subagent,
+fn parse_effect_plan(
+    input: &Value,
+) -> Result<(Vec<EmbeddedPendingHostEffect>, Option<Value>), AgentError> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| validation("run request input must be a JSON object"))?;
+    let values = if let Some(effects) = object.get("effects") {
+        effects
+            .as_array()
+            .ok_or_else(|| validation("effects must be an array"))?
+            .clone()
+    } else if let Some(effect) = object.get("effect") {
+        vec![effect.clone()]
+    } else {
+        Vec::new()
+    };
+    let effects = values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| parse_pending_effect(value, &format!("effects[{index}]")))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((effects, object.get("llm_response").cloned()))
 }
 
-impl RunEffectKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Tool => "tool",
-            Self::Subagent => "subagent",
+fn parse_pending_effect(
+    value: Value,
+    label: &str,
+) -> Result<EmbeddedPendingHostEffect, AgentError> {
+    let effect: EmbeddedPendingHostEffect = serde_json::from_value(value)
+        .map_err(|error| validation(format!("{label} is invalid: {error}")))?;
+    validate_pending_effect(&effect, label)?;
+    Ok(effect)
+}
+
+fn validate_pending_effect(
+    effect: &EmbeddedPendingHostEffect,
+    label: &str,
+) -> Result<(), AgentError> {
+    match effect {
+        EmbeddedPendingHostEffect::Tool { name, input } => {
+            if name.trim().is_empty() {
+                return Err(validation(format!("{label}.name is required")));
+            }
+            require_object(input, &format!("{label}.input"))?;
+        }
+        EmbeddedPendingHostEffect::Subagent {
+            agent_id,
+            input,
+            metadata,
+            ..
+        } => {
+            if agent_id.trim().is_empty() {
+                return Err(validation(format!("{label}.agent_id is required")));
+            }
+            require_object(input, &format!("{label}.input"))?;
+            require_object(metadata, &format!("{label}.metadata"))?;
         }
     }
-
-    fn id_field(self) -> &'static str {
-        "effect_id"
-    }
-
-    fn trace_tool_name(self, call: &Value) -> Value {
-        match self {
-            Self::Tool => call.get("name").cloned().unwrap_or(Value::Null),
-            Self::Subagent => Value::Null,
-        }
-    }
-
-    fn trace_subagent_id(self, call: &Value) -> Value {
-        match self {
-            Self::Tool => Value::Null,
-            Self::Subagent => call.get("agent_id").cloned().unwrap_or(Value::Null),
-        }
-    }
+    Ok(())
 }
 
-#[derive(Debug, Clone)]
-enum RequestedEffect {
-    Tool(RequestedToolEffect),
-    Subagent(Box<RequestedSubagentEffect>),
-}
-
-#[derive(Debug, Clone)]
-struct RequestedToolEffect {
-    name: String,
-    input: Value,
-}
-
-#[derive(Debug, Clone)]
-struct RequestedSubagentEffect {
-    agent_id: String,
-    input: Value,
-    run_id: Option<Value>,
-    scope: Option<Value>,
-    workflow: Option<Value>,
-    metadata: Value,
-}
-
-#[derive(Debug, Clone)]
-struct EffectResultRecord {
-    kind: RunEffectKind,
-    effect_call: Value,
-    effect_response: Value,
-}
-
-impl EffectResultRecord {
-    fn new(kind: RunEffectKind, effect_call: Value, effect_response: Value) -> Self {
-        Self {
-            kind,
-            effect_call,
-            effect_response,
-        }
-    }
-
-    fn from_value(
-        value: &Value,
-        label: &str,
-        catalog: &AgentRuntimeCatalog,
-        agent_id: &str,
-    ) -> Result<Self, AgentError> {
-        let object = value
-            .as_object()
-            .ok_or_else(|| validation(format!("{label} must be an object")))?;
-        let effect_call = object
-            .get("effect")
-            .ok_or_else(|| validation(format!("{label}.effect is required")))?;
-        let kind = effect_kind_from_call(effect_call)?;
-        require_previous_effect_catalog_entry(catalog, agent_id, effect_call, kind)?;
-        let effect_response = object
-            .get("effect_response")
-            .ok_or_else(|| validation(format!("{label}.effect_response is required")))?;
-        require_effect_response_envelope(effect_response).map_err(|error| {
-            validation(format!("{label}.effect_response: {}", error.record.message))
-        })?;
-        require_matching_effect_response_id(effect_call, effect_response, kind).map_err(
-            |error| validation(format!("{label}.effect_response: {}", error.record.message)),
-        )?;
-        Ok(Self::new(
-            kind,
-            effect_call.clone(),
-            effect_response.clone(),
-        ))
-    }
-
-    fn to_value(&self) -> Value {
-        let mut object = Map::new();
-        object.insert(
-            "kind".to_owned(),
-            Value::String(match self.kind {
-                RunEffectKind::Tool => "tool".to_owned(),
-                RunEffectKind::Subagent => "subagent".to_owned(),
-            }),
-        );
-        object.insert("effect".to_owned(), self.effect_call.clone());
-        object.insert("effect_response".to_owned(), self.effect_response.clone());
-        Value::Object(object)
-    }
-
-    fn to_values(records: &[Self]) -> Vec<Value> {
-        records.iter().map(Self::to_value).collect()
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct RuntimeContinuationCounts {
-    remaining_effect_count: usize,
-    effect_result_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct RuntimeContinuation {
-    effects: Vec<Value>,
-    effect_results: Vec<EffectResultRecord>,
+fn continuation_for(
+    effects: Vec<EmbeddedPendingHostEffect>,
+    effect_results: Vec<EmbeddedEffectResult>,
     llm_response: Option<Value>,
     next_step_index: u64,
-}
-
-impl RuntimeContinuation {
-    fn from_effect_request_state(state: &EffectRequestState) -> Option<Self> {
-        if state.remaining.is_empty()
-            && state.effect_results.is_empty()
-            && state.llm_response.is_none()
-            && state.step_index == 0
-        {
-            return None;
-        }
-        Some(Self {
-            effects: state.remaining.clone(),
-            effect_results: state.effect_results.clone(),
-            llm_response: state.llm_response.clone(),
-            next_step_index: state.step_index + 1,
-        })
+) -> Option<EmbeddedRunContinuation> {
+    if effects.is_empty() && effect_results.is_empty() && llm_response.is_none() {
+        return None;
     }
-
-    fn from_step(
-        previous_step: &Value,
-        catalog: &AgentRuntimeCatalog,
-        agent_id: &str,
-    ) -> Result<Option<Self>, AgentError> {
-        let Some(value) = previous_step.get("continuation") else {
-            return Ok(None);
-        };
-        let object = value
-            .as_object()
-            .ok_or_else(|| validation("continuation must be an object"))?;
-        let effects = match object.get("effects") {
-            Some(value) => value
-                .as_array()
-                .cloned()
-                .ok_or_else(|| validation("continuation.effects must be an array"))?,
-            None => Vec::new(),
-        };
-        let effect_results = match object.get("effect_results") {
-            Some(value) => Self::effect_results_from_value(value, catalog, agent_id)?,
-            None => Vec::new(),
-        };
-        let next_step_index = object
-            .get("next_step_index")
-            .ok_or_else(|| {
-                validation(
-                    "continuation.next_step_index must be present when continuation is present",
-                )
-            })?
-            .as_u64()
-            .ok_or_else(|| {
-                validation("continuation.next_step_index must be a non-negative integer")
-            })?;
-        Ok(Some(Self {
-            effects,
-            effect_results,
-            llm_response: object.get("llm_response").cloned(),
-            next_step_index,
-        }))
-    }
-
-    fn counts_from_step(step: &Value) -> RuntimeContinuationCounts {
-        let Some(continuation) = step.get("continuation").and_then(Value::as_object) else {
-            return RuntimeContinuationCounts::default();
-        };
-        RuntimeContinuationCounts {
-            remaining_effect_count: continuation
-                .get("effects")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0),
-            effect_result_count: continuation
-                .get("effect_results")
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0),
-        }
-    }
-
-    fn effect_results_from_value(
-        value: &Value,
-        catalog: &AgentRuntimeCatalog,
-        agent_id: &str,
-    ) -> Result<Vec<EffectResultRecord>, AgentError> {
-        let results = value
-            .as_array()
-            .ok_or_else(|| validation("continuation.effect_results must be an array"))?;
-        results
-            .iter()
-            .enumerate()
-            .map(|(index, result)| {
-                EffectResultRecord::from_value(
-                    result,
-                    &format!("continuation.effect_results[{index}]"),
-                    catalog,
-                    agent_id,
-                )
-            })
-            .collect()
-    }
-
-    fn validate_effect_plan(
-        &self,
-        catalog: &AgentRuntimeCatalog,
-        agent_id: &str,
-    ) -> Result<(), AgentError> {
-        for (index, effect) in self.effects.iter().enumerate() {
-            let requested =
-                parse_requested_effect(effect, &format!("continuation.effects[{index}]"))?;
-            validate_requested_effect(catalog, agent_id, &requested).map_err(|error| {
-                validation(format!(
-                    "continuation.effects[{index}]: {}",
-                    error.record.message
-                ))
-            })?;
-        }
-        Ok(())
-    }
-
-    fn require_next_step_index(&self, previous_step_index: u64) -> Result<(), AgentError> {
-        let expected = previous_step_index + 1;
-        if self.next_step_index != expected {
-            return Err(validation(format!(
-                "continuation.next_step_index {} must equal previous step_index + 1 ({expected})",
-                self.next_step_index
-            )));
-        }
-        Ok(())
-    }
-
-    fn requested_step_index(&self) -> u64 {
-        self.next_step_index.saturating_sub(1)
-    }
-
-    fn to_value(&self) -> Value {
-        let mut object = Map::new();
-        object.insert("effects".to_owned(), Value::Array(self.effects.clone()));
-        object.insert(
-            "effect_results".to_owned(),
-            Value::Array(EffectResultRecord::to_values(&self.effect_results)),
-        );
-        if let Some(llm_response) = &self.llm_response {
-            object.insert("llm_response".to_owned(), llm_response.clone());
-        }
-        object.insert(
-            "next_step_index".to_owned(),
-            Value::Number(serde_json::Number::from(self.next_step_index)),
-        );
-        Value::Object(object)
-    }
-}
-
-#[derive(Debug)]
-struct EffectRequestState {
-    first: RequestedEffect,
-    remaining: Vec<Value>,
-    effect_results: Vec<EffectResultRecord>,
-    llm_response: Option<Value>,
-    step_index: u64,
-}
-
-impl EffectRequestState {
-    fn continuation(&self) -> Option<RuntimeContinuation> {
-        RuntimeContinuation::from_effect_request_state(self)
-    }
-}
-
-fn parse_initial_effect_request(input: &Value) -> Result<Option<EffectRequestState>, AgentError> {
-    if let Some(plan) = input.get("effects") {
-        let plan = plan
-            .as_array()
-            .ok_or_else(|| validation("effects must be an array"))?;
-        if plan.is_empty() {
-            return Ok(None);
-        }
-        let first = parse_requested_effect(&plan[0], "effects[0]")?;
-        return Ok(Some(EffectRequestState {
-            first,
-            remaining: plan[1..].to_vec(),
-            effect_results: Vec::new(),
-            llm_response: input.get("llm_response").cloned(),
-            step_index: 0,
-        }));
-    }
-    if let Some(effect) = input.get("effect") {
-        return Ok(Some(EffectRequestState {
-            first: parse_requested_effect(effect, "effect")?,
-            remaining: Vec::new(),
-            effect_results: Vec::new(),
-            llm_response: input.get("llm_response").cloned(),
-            step_index: 0,
-        }));
-    }
-    Ok(None)
-}
-
-fn next_effect_request_from_continuation(
-    continuation: Option<RuntimeContinuation>,
-    effect_results: Vec<EffectResultRecord>,
-) -> Result<Option<EffectRequestState>, AgentError> {
-    let Some(continuation) = continuation else {
-        return Ok(None);
-    };
-    if continuation.effects.is_empty() {
-        return Ok(None);
-    }
-    let first = parse_requested_effect(&continuation.effects[0], "continuation.effects[0]")?;
-    Ok(Some(EffectRequestState {
-        first,
-        remaining: continuation.effects[1..].to_vec(),
+    Some(EmbeddedRunContinuation {
+        effects,
         effect_results,
-        llm_response: continuation.llm_response,
-        step_index: continuation.next_step_index,
-    }))
-}
-
-fn parse_requested_effect(value: &Value, label: &str) -> Result<RequestedEffect, AgentError> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| validation(format!("{label} must be an object")))?;
-    match object.get("kind").and_then(Value::as_str) {
-        Some("tool") => parse_requested_tool_effect(value, label).map(RequestedEffect::Tool),
-        Some("subagent") => parse_requested_subagent_effect(value, label)
-            .map(Box::new)
-            .map(RequestedEffect::Subagent),
-        Some(kind) => Err(validation(format!(
-            "{label}.kind '{kind}' is not supported"
-        ))),
-        None => Err(validation(format!("{label}.kind is required"))),
-    }
-}
-
-fn parse_requested_tool_effect(
-    value: &Value,
-    label: &str,
-) -> Result<RequestedToolEffect, AgentError> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| validation(format!("{label} must be an object")))?;
-    let name = object
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| validation(format!("{label}.name is required")))?
-        .to_owned();
-    let input = match object.get("input") {
-        Some(input) if input.is_object() => input.clone(),
-        Some(_) => return Err(validation(format!("{label}.input must be an object"))),
-        None => json!({}),
-    };
-    Ok(RequestedToolEffect { name, input })
-}
-
-fn parse_requested_subagent_effect(
-    value: &Value,
-    label: &str,
-) -> Result<RequestedSubagentEffect, AgentError> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| validation(format!("{label} must be an object")))?;
-    let agent_id = object
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| validation(format!("{label}.agent_id is required")))?
-        .trim()
-        .to_owned();
-    let metadata = object.get("metadata").cloned().unwrap_or_else(|| json!({}));
-    if !metadata.is_object() {
-        return Err(validation(format!("{label}.metadata must be an object")));
-    }
-    Ok(RequestedSubagentEffect {
-        agent_id,
-        input: object.get("input").cloned().unwrap_or_else(|| json!({})),
-        run_id: object.get("run_id").cloned(),
-        scope: object.get("scope").cloned(),
-        workflow: object.get("workflow").cloned(),
-        metadata,
+        llm_response,
+        next_step_index,
     })
 }
 
-fn build_effect_requested_step(
+fn effect_requested_step(
     catalog: &AgentRuntimeCatalog,
+    run_id: RunId,
     agent_id: &str,
     agent_version: &str,
-    run_id: Value,
-    requested: RequestedEffect,
-    continuation: Option<RuntimeContinuation>,
-) -> Result<Value, AgentError> {
-    if let Some(continuation) = &continuation {
-        continuation.validate_effect_plan(catalog, agent_id)?;
-    }
-    validate_requested_effect(catalog, agent_id, &requested)?;
-    let call = build_effect_call(catalog, agent_id, requested)?;
-    let mut step = json!({
-        "protocol_version": protocol_version(),
-        "run_id": run_id,
-        "agent_id": agent_id,
-        "agent_version": agent_version,
-        "step_index": continuation
-            .as_ref()
-            .map(RuntimeContinuation::requested_step_index)
-            .unwrap_or(0),
-        "status": "effect_requested",
-        "effect": call,
-    });
-    if let Some(continuation) = continuation {
-        step.as_object_mut()
-            .expect("step is an object")
-            .insert("continuation".to_owned(), continuation.to_value());
-    }
-    attach_runtime_metadata(&mut step);
-    Ok(step)
-}
-
-fn build_effect_call(
-    catalog: &AgentRuntimeCatalog,
-    agent_id: &str,
-    requested: RequestedEffect,
-) -> Result<Value, AgentError> {
-    match requested {
-        RequestedEffect::Tool(tool_effect) => {
-            let tool = catalog_tool(catalog, agent_id, &tool_effect.name)?;
-            Ok(json!({
-                "effect_id": EffectId::new_v7(),
-                "kind": "tool",
-                "name": tool.name,
-                "input": tool_effect.input,
-                "risk": tool.risk,
-                "metadata": tool.metadata,
-            }))
-        }
-        RequestedEffect::Subagent(subagent_effect) => {
-            let subagent_effect = *subagent_effect;
-            catalog_agent(catalog, &subagent_effect.agent_id)?;
-            let mut call = json!({
-                "effect_id": EffectId::new_v7(),
-                "kind": "subagent",
-                "agent_id": subagent_effect.agent_id,
-                "input": subagent_effect.input,
-                "metadata": subagent_effect.metadata,
-            });
-            let object = call.as_object_mut().expect("subagent effect is an object");
-            if let Some(run_id) = subagent_effect.run_id {
-                object.insert("run_id".to_owned(), run_id);
-            }
-            if let Some(scope) = subagent_effect.scope {
-                object.insert("scope".to_owned(), scope);
-            }
-            if let Some(workflow) = subagent_effect.workflow {
-                object.insert("workflow".to_owned(), workflow);
-            }
-            Ok(call)
-        }
-    }
-}
-
-fn terminal_completed_step(
-    agent_id: &str,
-    agent_version: &str,
-    run_id: Value,
     step_index: u64,
-    effect_call: Value,
-    effect_response: Value,
-    effect_results: Vec<Value>,
-) -> Value {
+    pending: EmbeddedPendingHostEffect,
+    continuation: Option<EmbeddedRunContinuation>,
+) -> Result<EmbeddedRunStep, AgentError> {
+    if let Some(value) = &continuation {
+        validate_continuation(catalog, value, agent_id, step_index)?;
+    }
+    let effect = promote_effect(catalog, agent_id, pending)?;
+    Ok(build_step(StepParts {
+        run_id,
+        agent_id: agent_id.to_owned(),
+        agent_version: agent_version.to_owned(),
+        step_index,
+        status: EmbeddedRunStepStatus::EffectRequested,
+        effect: Some(effect),
+        effect_response: None,
+        effect_results: Vec::new(),
+        continuation,
+        output: None,
+        error: None,
+    }))
+}
+
+fn promote_effect(
+    catalog: &AgentRuntimeCatalog,
+    agent_id: &str,
+    pending: EmbeddedPendingHostEffect,
+) -> Result<EmbeddedHostEffect, AgentError> {
+    validate_pending_effect(&pending, "pending effect")?;
+    match pending {
+        EmbeddedPendingHostEffect::Tool { name, input } => {
+            let tool = catalog_tool(catalog, agent_id, &name)?;
+            Ok(EmbeddedHostEffect::Tool {
+                effect_id: EffectId::new_v7().0,
+                name: tool.name.clone(),
+                input,
+                risk: tool.risk.clone(),
+                metadata: tool.metadata.clone(),
+            })
+        }
+        EmbeddedPendingHostEffect::Subagent {
+            agent_id,
+            input,
+            run_id,
+            scope,
+            workflow,
+            metadata,
+        } => {
+            catalog_agent(catalog, &agent_id)?;
+            Ok(EmbeddedHostEffect::Subagent {
+                effect_id: EffectId::new_v7().0,
+                agent_id,
+                input,
+                run_id,
+                scope,
+                workflow,
+                metadata,
+            })
+        }
+    }
+}
+
+fn completed_passthrough_step(
+    run_id: RunId,
+    agent_id: &str,
+    agent_version: &str,
+    output: Value,
+) -> EmbeddedRunStep {
+    build_step(StepParts {
+        run_id,
+        agent_id: agent_id.to_owned(),
+        agent_version: agent_version.to_owned(),
+        step_index: 0,
+        status: EmbeddedRunStepStatus::Completed,
+        effect: None,
+        effect_response: None,
+        effect_results: Vec::new(),
+        continuation: None,
+        output: Some(output),
+        error: None,
+    })
+}
+
+fn completed_effect_step(
+    run_id: RunId,
+    agent_id: &str,
+    agent_version: &str,
+    step_index: u64,
+    effect: EmbeddedHostEffect,
+    effect_response: EmbeddedEffectResponse,
+    effect_results: Vec<EmbeddedEffectResult>,
+) -> EmbeddedRunStep {
     let mode = if effect_results.len() > 1 {
         "frb_effect_loop"
     } else {
@@ -981,403 +595,436 @@ fn terminal_completed_step(
     };
     let output = json!({
         "mode": mode,
-        "effect": effect_call,
-        "effect_result": effect_response.get("result").cloned().unwrap_or(Value::Null),
+        "effect": effect,
+        "effect_result": effect_response.result.clone().unwrap_or(Value::Null),
         "effect_response": effect_response,
-        "effect_results": effect_results.clone(),
+        "effect_results": effect_results,
     });
+    build_step(StepParts {
+        run_id,
+        agent_id: agent_id.to_owned(),
+        agent_version: agent_version.to_owned(),
+        step_index,
+        status: EmbeddedRunStepStatus::Completed,
+        effect: Some(effect),
+        effect_response: Some(effect_response),
+        effect_results,
+        continuation: None,
+        output: Some(output),
+        error: None,
+    })
+}
 
-    let mut step = json!({
-        "protocol_version": protocol_version(),
-        "run_id": run_id,
-        "agent_id": agent_id,
-        "agent_version": agent_version,
-        "step_index": step_index,
-        "status": "completed",
-        "output": output,
-    });
-    let object = step.as_object_mut().expect("step is an object");
-    object.insert("effect".to_owned(), effect_call.clone());
-    object.insert("effect_response".to_owned(), effect_response.clone());
-    object.insert(
-        "effect_results".to_owned(),
-        Value::Array(effect_results.clone()),
+#[allow(clippy::too_many_arguments)]
+fn terminal_effect_step(
+    run_id: RunId,
+    agent_id: &str,
+    agent_version: &str,
+    step_index: u64,
+    status: EmbeddedRunStepStatus,
+    effect: EmbeddedHostEffect,
+    effect_response: EmbeddedEffectResponse,
+    effect_results: Vec<EmbeddedEffectResult>,
+    error: Option<Value>,
+) -> EmbeddedRunStep {
+    build_step(StepParts {
+        run_id,
+        agent_id: agent_id.to_owned(),
+        agent_version: agent_version.to_owned(),
+        step_index,
+        status,
+        effect: Some(effect),
+        effect_response: Some(effect_response),
+        effect_results,
+        continuation: None,
+        output: None,
+        error,
+    })
+}
+
+struct StepParts {
+    run_id: RunId,
+    agent_id: String,
+    agent_version: String,
+    step_index: u64,
+    status: EmbeddedRunStepStatus,
+    effect: Option<EmbeddedHostEffect>,
+    effect_response: Option<EmbeddedEffectResponse>,
+    effect_results: Vec<EmbeddedEffectResult>,
+    continuation: Option<EmbeddedRunContinuation>,
+    output: Option<Value>,
+    error: Option<Value>,
+}
+
+fn build_step(parts: StepParts) -> EmbeddedRunStep {
+    let run_state = derived_run_state(
+        parts.status,
+        parts.step_index,
+        parts.continuation.as_ref(),
+        &parts.effect_results,
     );
-    step
+    let trace_event = derived_trace_event(
+        &parts.run_id,
+        &parts.agent_id,
+        parts.status,
+        parts.step_index,
+        parts.effect.as_ref(),
+        &run_state,
+    );
+    EmbeddedRunStep {
+        protocol_version: protocol_version(),
+        run_id: parts.run_id,
+        agent_id: parts.agent_id,
+        agent_version: parts.agent_version,
+        step_index: parts.step_index,
+        status: parts.status,
+        effect: parts.effect,
+        effect_response: parts.effect_response.clone(),
+        effect_result: parts
+            .effect_response
+            .as_ref()
+            .and_then(|response| response.result.clone()),
+        effect_results: parts.effect_results,
+        continuation: parts.continuation,
+        output: parts.output,
+        error: parts.error,
+        proposal: None,
+        run_state,
+        trace_event,
+        extensions: BTreeMap::new(),
+    }
 }
 
-fn previous_effect_kind(previous_step: &Value) -> Result<RunEffectKind, AgentError> {
-    match previous_step.get("status").and_then(Value::as_str) {
-        Some("effect_requested") => {
-            let effect = previous_step
-                .get("effect")
-                .ok_or_else(|| validation("previous step is missing effect"))?;
-            effect_kind_from_call(effect)
+fn derived_run_state(
+    status: EmbeddedRunStepStatus,
+    step_index: u64,
+    continuation: Option<&EmbeddedRunContinuation>,
+    effect_results: &[EmbeddedEffectResult],
+) -> EmbeddedRunState {
+    EmbeddedRunState {
+        status,
+        step_index,
+        remaining_effect_count: continuation.map(|value| value.effects.len()).unwrap_or(0),
+        effect_result_count: continuation
+            .map(|value| value.effect_results.len())
+            .unwrap_or(effect_results.len()),
+        terminal_reason: terminal_reason(status),
+    }
+}
+
+fn derived_trace_event(
+    run_id: &RunId,
+    agent_id: &str,
+    status: EmbeddedRunStepStatus,
+    step_index: u64,
+    effect: Option<&EmbeddedHostEffect>,
+    run_state: &EmbeddedRunState,
+) -> EmbeddedStepTraceEvent {
+    EmbeddedStepTraceEvent {
+        kind: "agent_runtime_step".to_owned(),
+        run_id: run_id.clone(),
+        agent_id: agent_id.to_owned(),
+        status,
+        step_index,
+        effect_id: effect.map(|value| value.effect_id().to_owned()),
+        effect_kind: effect.map(effect_kind),
+        tool_name: effect.and_then(|value| match value {
+            EmbeddedHostEffect::Tool { name, .. } => Some(name.clone()),
+            EmbeddedHostEffect::Subagent { .. } => None,
+        }),
+        subagent_id: effect.and_then(|value| match value {
+            EmbeddedHostEffect::Tool { .. } => None,
+            EmbeddedHostEffect::Subagent { agent_id, .. } => Some(agent_id.clone()),
+        }),
+        run_state: run_state.clone(),
+        extensions: BTreeMap::new(),
+    }
+}
+
+fn terminal_reason(status: EmbeddedRunStepStatus) -> Option<EmbeddedTerminalReason> {
+    match status {
+        EmbeddedRunStepStatus::EffectRequested => None,
+        EmbeddedRunStepStatus::Completed => Some(EmbeddedTerminalReason::Done),
+        EmbeddedRunStepStatus::Failed => Some(EmbeddedTerminalReason::StreamError),
+        EmbeddedRunStepStatus::Cancelled => Some(EmbeddedTerminalReason::UserCancel),
+        EmbeddedRunStepStatus::PolicyDenied => Some(EmbeddedTerminalReason::PolicyDenied),
+        EmbeddedRunStepStatus::ClosedEarly | EmbeddedRunStepStatus::TimedOut => {
+            Some(EmbeddedTerminalReason::ClosedEarly)
         }
-        _ => Err(validation(
-            "previous step status must be 'effect_requested'",
-        )),
     }
 }
 
-fn previous_effect_call(previous_step: &Value, kind: RunEffectKind) -> Result<&Value, AgentError> {
-    let _ = kind;
-    previous_step
-        .get("effect")
-        .ok_or_else(|| validation("previous step is missing effect"))
-}
-
-fn effect_kind_from_call(call: &Value) -> Result<RunEffectKind, AgentError> {
-    let object = call
-        .as_object()
-        .ok_or_else(|| validation("effect must be an object"))?;
-    match object.get("kind").and_then(Value::as_str) {
-        Some("tool") => Ok(RunEffectKind::Tool),
-        Some("subagent") => Ok(RunEffectKind::Subagent),
-        Some(kind) => Err(validation(format!("effect kind '{kind}' is not supported"))),
-        None => Err(validation("effect.kind is required")),
+fn validate_snapshot(
+    catalog: &AgentRuntimeCatalog,
+    snapshot: &EmbeddedRunSnapshot,
+    agent_id: &str,
+) -> Result<(), AgentError> {
+    if snapshot.protocol_version != protocol_version() {
+        return Err(validation(format!(
+            "embedded snapshot protocol_version '{}' is not supported",
+            snapshot.protocol_version
+        )));
     }
+    if snapshot.snapshot_version != EMBEDDED_SNAPSHOT_VERSION {
+        return Err(validation(format!(
+            "embedded snapshot version {} is not supported",
+            snapshot.snapshot_version
+        )));
+    }
+    let agent = catalog_agent(catalog, agent_id)?;
+    validate_step(catalog, &snapshot.step, &agent.id, &agent.version)?;
+    if snapshot.progress.dispatched_effect_count > snapshot.limits.max_effect_steps {
+        return Err(validation(
+            "embedded dispatched effect count exceeds max_effect_steps",
+        ));
+    }
+    if snapshot.progress.subagent_depth > snapshot.limits.max_subagent_depth {
+        return Err(validation(
+            "embedded subagent depth exceeds max_subagent_depth",
+        ));
+    }
+    Ok(())
 }
 
-fn require_previous_step_agent(
-    previous_step: &Value,
+fn validate_step(
+    catalog: &AgentRuntimeCatalog,
+    step: &EmbeddedRunStep,
     agent_id: &str,
     agent_version: &str,
 ) -> Result<(), AgentError> {
-    let previous_agent_id = previous_step
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| validation("previous step is missing agent_id"))?;
-    if previous_agent_id != agent_id {
-        return Err(validation(format!(
-            "previous step agent_id '{previous_agent_id}' does not match requested agent '{agent_id}'"
-        )));
+    if step.protocol_version != protocol_version() {
+        return Err(validation(
+            "embedded step protocol_version is not supported",
+        ));
     }
-    let previous_agent_version = previous_step
-        .get("agent_version")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| validation("previous step agent_version must be a non-empty string"))?;
-    if previous_agent_version != agent_version {
-        return Err(validation(format!(
-            "previous step agent_version '{previous_agent_version}' does not match catalog agent version '{agent_version}'"
-        )));
+    if step.run_id.0.trim().is_empty() {
+        return Err(validation("embedded step run_id must be non-empty"));
+    }
+    if step.agent_id != agent_id || step.agent_version != agent_version {
+        return Err(validation(
+            "embedded step agent identity does not match the catalog",
+        ));
+    }
+    match (step.status, step.effect.as_ref()) {
+        (EmbeddedRunStepStatus::EffectRequested, None) => {
+            return Err(validation("effect_requested step must contain an effect"));
+        }
+        (EmbeddedRunStepStatus::EffectRequested, Some(effect)) => {
+            validate_host_effect(catalog, effect, agent_id)?;
+        }
+        (_, Some(effect)) => validate_host_effect(catalog, effect, agent_id)?,
+        (_, None) => {}
+    }
+    if let Some(continuation) = &step.continuation {
+        validate_continuation(catalog, continuation, agent_id, step.step_index)?;
+    }
+    for result in &step.effect_results {
+        validate_effect_result(catalog, result, agent_id)?;
+    }
+    let expected_state = derived_run_state(
+        step.status,
+        step.step_index,
+        step.continuation.as_ref(),
+        &step.effect_results,
+    );
+    if step.run_state != expected_state {
+        return Err(validation(
+            "embedded step run_state does not match typed continuation state",
+        ));
+    }
+    let expected_trace = derived_trace_event(
+        &step.run_id,
+        &step.agent_id,
+        step.status,
+        step.step_index,
+        step.effect.as_ref(),
+        &expected_state,
+    );
+    if step.trace_event.kind != expected_trace.kind
+        || step.trace_event.run_id != expected_trace.run_id
+        || step.trace_event.agent_id != expected_trace.agent_id
+        || step.trace_event.status != expected_trace.status
+        || step.trace_event.step_index != expected_trace.step_index
+        || step.trace_event.effect_id != expected_trace.effect_id
+        || step.trace_event.effect_kind != expected_trace.effect_kind
+        || step.trace_event.tool_name != expected_trace.tool_name
+        || step.trace_event.subagent_id != expected_trace.subagent_id
+        || step.trace_event.run_state != expected_trace.run_state
+    {
+        return Err(validation(
+            "embedded step trace_event does not match typed step state",
+        ));
     }
     Ok(())
 }
 
-fn require_previous_step_protocol_version(previous_step: &Value) -> Result<(), AgentError> {
-    let previous_protocol_version = previous_step
-        .get("protocol_version")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| validation("previous step protocol_version must be a non-empty string"))?;
-    let expected = protocol_version();
-    if previous_protocol_version != expected {
-        return Err(validation(format!(
-            "previous step protocol_version '{previous_protocol_version}' does not match runtime protocol_version '{expected}'"
-        )));
+fn validate_continuation(
+    catalog: &AgentRuntimeCatalog,
+    continuation: &EmbeddedRunContinuation,
+    agent_id: &str,
+    step_index: u64,
+) -> Result<(), AgentError> {
+    if continuation.next_step_index != step_index.saturating_add(1) {
+        return Err(validation(
+            "continuation.next_step_index must equal step_index + 1",
+        ));
+    }
+    for (index, effect) in continuation.effects.iter().enumerate() {
+        validate_pending_effect(effect, &format!("continuation.effects[{index}]"))?;
+        validate_pending_effect_catalog(catalog, agent_id, effect)?;
+    }
+    for result in &continuation.effect_results {
+        validate_effect_result(catalog, result, agent_id)?;
     }
     Ok(())
 }
 
-fn require_previous_step_run_id(previous_step: &Value) -> Result<Value, AgentError> {
-    let run_id = previous_step
-        .get("run_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| validation("previous step run_id must be a non-empty string"))?;
-    Ok(Value::String(run_id.to_owned()))
-}
-
-fn require_previous_step_index(previous_step: &Value) -> Result<u64, AgentError> {
-    previous_step
-        .get("step_index")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| validation("previous step_index must be a non-negative integer"))
-}
-
-fn require_previous_effect_catalog_entry(
+fn validate_pending_effect_catalog(
     catalog: &AgentRuntimeCatalog,
     agent_id: &str,
-    effect_call: &Value,
-    kind: RunEffectKind,
+    effect: &EmbeddedPendingHostEffect,
 ) -> Result<(), AgentError> {
-    match kind {
-        RunEffectKind::Tool => {
-            let name = effect_call
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| validation("previous step effect.name is required"))?;
+    match effect {
+        EmbeddedPendingHostEffect::Tool { name, .. } => {
             catalog_tool(catalog, agent_id, name)?;
-            require_effect_call_input_object(effect_call, "previous step effect")?;
         }
-        RunEffectKind::Subagent => {
-            let subagent_id = effect_call
-                .get("agent_id")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| validation("previous step effect.agent_id is required"))?;
-            catalog_agent(catalog, subagent_id)?;
+        EmbeddedPendingHostEffect::Subagent { agent_id, .. } => {
+            catalog_agent(catalog, agent_id)?;
         }
     }
     Ok(())
 }
 
-fn require_previous_effect_call_id(
-    effect_call: &Value,
-    kind: RunEffectKind,
+fn validate_host_effect(
+    catalog: &AgentRuntimeCatalog,
+    effect: &EmbeddedHostEffect,
+    parent_agent_id: &str,
 ) -> Result<(), AgentError> {
-    effect_call
-        .get(kind.id_field())
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            validation(format!(
-                "previous step effect.{} must be a non-empty string",
-                kind.id_field()
-            ))
-        })?;
-    Ok(())
-}
-
-fn require_previous_step_runtime_metadata(
-    previous_step: &Value,
-    run_id: &Value,
-    step_index: u64,
-) -> Result<(), AgentError> {
-    let run_state = previous_step
-        .get("run_state")
-        .ok_or_else(|| validation("previous step run_state is required"))?;
-    require_previous_step_run_state(previous_step, run_state, step_index).map_err(|error| {
-        validation(format!("previous step run_state: {}", error.record.message))
-    })?;
-    let trace_event = previous_step
-        .get("trace_event")
-        .ok_or_else(|| validation("previous step trace_event is required"))?;
-    require_previous_step_trace_event(previous_step, trace_event, run_id, step_index).map_err(
-        |error| {
-            validation(format!(
-                "previous step trace_event: {}",
-                error.record.message
-            ))
-        },
-    )?;
-    Ok(())
-}
-
-fn require_previous_step_run_state(
-    previous_step: &Value,
-    run_state: &Value,
-    step_index: u64,
-) -> Result<(), AgentError> {
-    let run_state = run_state
-        .as_object()
-        .ok_or_else(|| validation("previous step run_state must be an object"))?;
-    require_step_status(run_state, "status")?;
-    require_matching_string(
-        run_state,
-        "status",
-        previous_step
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    )?;
-    match run_state.get("step_index").and_then(Value::as_u64) {
-        Some(value) if value == step_index => {}
-        _ => {
-            return Err(validation(
-                "previous step run_state.step_index must match step_index",
-            ));
+    if effect.effect_id().trim().is_empty() {
+        return Err(validation("embedded effect_id must be non-empty"));
+    }
+    match effect {
+        EmbeddedHostEffect::Tool {
+            name,
+            input,
+            metadata,
+            ..
+        } => {
+            catalog_tool(catalog, parent_agent_id, name)?;
+            require_object(input, "embedded tool input")?;
+            require_object(metadata, "embedded tool metadata")?;
+        }
+        EmbeddedHostEffect::Subagent {
+            agent_id,
+            input,
+            metadata,
+            ..
+        } => {
+            catalog_agent(catalog, agent_id)?;
+            require_object(input, "embedded subagent input")?;
+            require_object(metadata, "embedded subagent metadata")?;
         }
     }
-    let continuation_counts = RuntimeContinuation::counts_from_step(previous_step);
-    let expected_remaining = continuation_counts.remaining_effect_count as u64;
-    let remaining = run_state
-        .get("remaining_effect_count")
-        .and_then(Value::as_u64);
-    if remaining != Some(expected_remaining) {
+    Ok(())
+}
+
+fn validate_effect_result(
+    catalog: &AgentRuntimeCatalog,
+    result: &EmbeddedEffectResult,
+    agent_id: &str,
+) -> Result<(), AgentError> {
+    if result.kind != effect_kind(&result.effect) {
         return Err(validation(
-            "previous step run_state.remaining_effect_count must match continuation.effects",
+            "embedded effect result kind does not match its effect",
         ));
     }
-    let expected_results = continuation_counts.effect_result_count as u64;
-    let results = run_state.get("effect_result_count").and_then(Value::as_u64);
-    if results != Some(expected_results) {
-        return Err(validation(
-            "previous step run_state.effect_result_count must match continuation.effect_results",
-        ));
-    }
-    require_terminal_reason(run_state, "terminal_reason")?;
-    require_terminal_reason_matches_status(run_state)?;
-    Ok(())
+    validate_host_effect(catalog, &result.effect, agent_id)?;
+    validate_effect_response(&result.effect, &result.effect_response)
 }
 
-fn require_previous_step_trace_event(
-    previous_step: &Value,
-    trace_event: &Value,
-    run_id: &Value,
-    step_index: u64,
+fn validate_effect_response(
+    effect: &EmbeddedHostEffect,
+    response: &EmbeddedEffectResponse,
 ) -> Result<(), AgentError> {
-    let trace_event = trace_event
-        .as_object()
-        .ok_or_else(|| validation("previous step trace_event must be an object"))?;
-    require_matching_string(trace_event, "kind", "agent_runtime_step")?;
-    require_matching_string(trace_event, "run_id", run_id.as_str().unwrap_or_default())?;
-    require_matching_string(
-        trace_event,
-        "agent_id",
-        previous_step
-            .get("agent_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    )?;
-    require_matching_string(
-        trace_event,
-        "status",
-        previous_step
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    )?;
-    match trace_event.get("step_index").and_then(Value::as_u64) {
-        Some(value) if value == step_index => {}
-        _ => {
-            return Err(validation(
-                "previous step trace_event.step_index must match step_index",
-            ));
-        }
+    if response.jsonrpc != "2.0" {
+        return Err(validation("effect response jsonrpc must be '2.0'"));
     }
-    let run_state = previous_step
-        .get("run_state")
-        .ok_or_else(|| validation("previous step run_state is required"))?;
-    match trace_event.get("run_state") {
-        Some(value) if value == run_state => {}
-        _ => {
-            return Err(validation(
-                "previous step trace_event.run_state must match run_state",
-            ));
-        }
+    if response.id != effect.effect_id() {
+        return Err(validation(format!(
+            "effect response id '{}' does not match requested effect_id '{}'",
+            response.id,
+            effect.effect_id()
+        )));
     }
-    Ok(())
-}
-
-fn require_matching_effect_response_id(
-    effect_call: &Value,
-    effect_response: &Value,
-    kind: RunEffectKind,
-) -> Result<(), AgentError> {
-    let expected_id = effect_call
-        .get(kind.id_field())
-        .and_then(Value::as_str)
-        .ok_or_else(|| validation(format!("effect.{} is required", kind.id_field())))?;
-    match effect_response.get("id").and_then(Value::as_str) {
-        Some(value) if value == expected_id => Ok(()),
-        Some(value) => Err(validation(format!(
-            "effect response id '{value}' does not match requested {} '{expected_id}'",
-            kind.id_field()
-        ))),
-        None => Err(validation("effect response id must be a string")),
+    match (&response.result, &response.error) {
+        (Some(_), None) | (None, Some(_)) => Ok(()),
+        (Some(_), Some(_)) => Err(validation(
+            "effect response cannot contain both result and error",
+        )),
+        (None, None) => Err(validation("effect response must contain result or error")),
     }
 }
 
-fn require_effect_response_envelope(effect_response: &Value) -> Result<(), AgentError> {
-    let Some(object) = effect_response.as_object() else {
-        return Err(validation("effect response must be an object"));
-    };
-    match object.get("jsonrpc").and_then(Value::as_str) {
-        Some("2.0") => {}
-        Some(_) => return Err(validation("effect response jsonrpc must be '2.0'")),
-        None => return Err(validation("effect response jsonrpc must be '2.0'")),
+fn effect_kind(effect: &EmbeddedHostEffect) -> EmbeddedEffectKind {
+    match effect {
+        EmbeddedHostEffect::Tool { .. } => EmbeddedEffectKind::Tool,
+        EmbeddedHostEffect::Subagent { .. } => EmbeddedEffectKind::Subagent,
     }
-    if !object.contains_key("id") {
-        return Err(validation("effect response id is required"));
-    }
-    match (object.contains_key("result"), object.contains_key("error")) {
-        (true, false) | (false, true) => {}
-        (true, true) => {
-            return Err(validation(
-                "effect response cannot contain both result and error",
-            ));
-        }
-        (false, false) => {
-            return Err(validation("effect response must contain result or error"));
-        }
-    }
-    if let Some(error) = object.get("error") {
-        let error = error
-            .as_object()
-            .ok_or_else(|| validation("effect response error must be an object"))?;
-        if error.get("code").and_then(Value::as_i64).is_none() {
-            return Err(validation("effect response error.code must be an integer"));
-        }
-        if error.get("message").and_then(Value::as_str).is_none() {
-            return Err(validation("effect response error.message must be a string"));
-        }
-    }
-    Ok(())
 }
 
-fn effect_response_terminal_status(effect_response: &Value) -> Option<&'static str> {
-    let code = effect_response_error_code(effect_response);
-    match code.as_deref() {
-        Some("effect_budget_exhausted") => Some("closed_early"),
-        Some("policy_denied") => Some("policy_denied"),
-        Some("user_cancel" | "user_cancelled" | "cancelled") => Some("cancelled"),
-        Some("tool_timeout" | "timeout" | "timed_out") => Some("timed_out"),
-        Some(_) => Some("failed"),
-        None if effect_response_error_payload(effect_response).is_some() => Some("failed"),
+fn effect_response_terminal_status(
+    response: &EmbeddedEffectResponse,
+) -> Option<EmbeddedRunStepStatus> {
+    match effect_response_error_code(response).as_deref() {
+        Some("effect_budget_exhausted" | "subagent_depth_exceeded") => {
+            Some(EmbeddedRunStepStatus::ClosedEarly)
+        }
+        Some("policy_denied") => Some(EmbeddedRunStepStatus::PolicyDenied),
+        Some("user_cancel" | "user_cancelled" | "cancelled") => {
+            Some(EmbeddedRunStepStatus::Cancelled)
+        }
+        Some("tool_timeout" | "timeout" | "timed_out") => Some(EmbeddedRunStepStatus::TimedOut),
+        Some(_) => Some(EmbeddedRunStepStatus::Failed),
+        None if effect_response_error_payload(response).is_some() => {
+            Some(EmbeddedRunStepStatus::Failed)
+        }
         None => None,
     }
 }
 
-fn effect_response_error_code(effect_response: &Value) -> Option<String> {
-    effect_response
-        .get("error")
-        .and_then(|error| error.get("data"))
+fn effect_response_error_code(response: &EmbeddedEffectResponse) -> Option<String> {
+    response
+        .error
+        .as_ref()
+        .and_then(|error| error.data.as_ref())
         .and_then(|data| data.get("code"))
         .and_then(Value::as_str)
         .map(str::to_owned)
+        .or_else(|| response.error.as_ref().map(|error| error.code.to_string()))
         .or_else(|| {
-            effect_response
-                .get("error")
-                .and_then(|error| error.get("code"))
-                .and_then(|value| {
-                    value
-                        .as_str()
-                        .map(str::to_owned)
-                        .or_else(|| value.as_i64().map(|code| code.to_string()))
-                })
-        })
-        .or_else(|| {
-            effect_response
-                .get("code")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .or_else(|| {
-            effect_response
-                .get("result")
+            response
+                .result
+                .as_ref()
                 .and_then(|result| result.get("error"))
                 .and_then(|error| error.get("code"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
         .or_else(|| {
-            effect_response
-                .get("result")
+            response
+                .result
+                .as_ref()
                 .and_then(|result| result.get("code"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
 }
 
-fn effect_response_error_payload(effect_response: &Value) -> Option<Value> {
-    if let Some(error) = effect_response.get("error") {
-        return Some(error.clone());
+fn effect_response_error_payload(response: &EmbeddedEffectResponse) -> Option<Value> {
+    if let Some(error) = &response.error {
+        return serde_json::to_value(error).ok();
     }
-    let result = effect_response.get("result")?;
+    let result = response.result.as_ref()?;
     if let Some(error) = result.get("error") {
         if error.is_object() {
             return Some(error.clone());
@@ -1389,147 +1036,75 @@ fn effect_response_error_payload(effect_response: &Value) -> Option<Value> {
         object.insert("message".to_owned(), error.clone());
         return Some(Value::Object(object));
     }
-    if let Some(code) = result.get("code").and_then(Value::as_str) {
-        return Some(json!({ "code": code }));
-    }
-    None
+    result
+        .get("code")
+        .and_then(Value::as_str)
+        .map(|code| json!({"code": code}))
 }
 
-fn attach_runtime_metadata(step: &mut Value) {
-    attach_run_state(step);
-    attach_trace_event(step);
-}
-
-fn attach_run_state(step: &mut Value) {
-    let Some(object) = step.as_object_mut() else {
-        return;
-    };
-    let continuation = object.get("continuation");
-    let remaining_effect_count = continuation
-        .and_then(|value| value.get("effects"))
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0);
-    let continuation_result_count = continuation
-        .and_then(|value| value.get("effect_results"))
-        .and_then(Value::as_array)
-        .map(Vec::len);
-    let output_result_count = object
-        .get("output")
-        .and_then(|value| value.get("effect_results"))
-        .and_then(Value::as_array)
-        .map(Vec::len);
-    let root_result_count = object
-        .get("effect_results")
-        .and_then(Value::as_array)
-        .map(Vec::len);
-    let effect_result_count = continuation_result_count
-        .or(output_result_count)
-        .or(root_result_count)
-        .unwrap_or(0);
-    let status = object.get("status").cloned().unwrap_or(Value::Null);
-    let state = json!({
-        "status": status,
-        "step_index": object.get("step_index").cloned().unwrap_or(Value::Null),
-        "remaining_effect_count": remaining_effect_count,
-        "effect_result_count": effect_result_count,
-        "terminal_reason": terminal_reason_for_status(object.get("status").and_then(Value::as_str)),
-    });
-    object.insert("run_state".to_owned(), state);
-}
-
-fn terminal_reason_for_status(status: Option<&str>) -> Value {
-    match status {
-        Some("completed") => Value::String("done".to_owned()),
-        Some("failed") => Value::String("stream_error".to_owned()),
-        Some("cancelled") => Value::String("user_cancel".to_owned()),
-        Some("policy_denied") => Value::String("policy_denied".to_owned()),
-        Some("closed_early") | Some("timed_out") => Value::String("closed_early".to_owned()),
-        _ => Value::Null,
-    }
-}
-
-fn attach_trace_event(step: &mut Value) {
-    let Some(object) = step.as_object_mut() else {
-        return;
-    };
-    let call = object
-        .get("effect")
-        .and_then(|call| effect_kind_from_call(call).ok().map(|kind| (kind, call)));
-    let event = json!({
-        "kind": "agent_runtime_step",
-        "run_id": object.get("run_id").cloned().unwrap_or(Value::Null),
-        "agent_id": object.get("agent_id").cloned().unwrap_or(Value::Null),
-        "status": object.get("status").cloned().unwrap_or(Value::Null),
-        "step_index": object.get("step_index").cloned().unwrap_or(Value::Null),
-        "run_state": object.get("run_state").cloned().unwrap_or(Value::Null),
-        "effect_id": call
-            .and_then(|(_, call)| call.get("effect_id").cloned())
-            .unwrap_or(Value::Null),
-        "effect_kind": call
-            .map(|(kind, _)| Value::String(kind.as_str().to_owned()))
-            .unwrap_or(Value::Null),
-        "tool_name": call
-            .map(|(kind, call)| kind.trace_tool_name(call))
-            .unwrap_or(Value::Null),
-        "subagent_id": call
-            .map(|(kind, call)| kind.trace_subagent_id(call))
-            .unwrap_or(Value::Null),
-    });
-    object.insert("trace_event".to_owned(), event);
-}
-
-fn normalize_run_request_contract(request: &mut RunRequest) -> Result<(), AgentError> {
+fn normalize_run_request(request: &mut RunRequest) -> Result<(), AgentError> {
     agent_core::validate_protocol_version(&request.protocol_version).map_err(validation)?;
     if request.input.is_null() {
         request.input = json!({});
-    } else if !request.input.is_object() {
-        return Err(validation("run request input must be a JSON object"));
     }
+    require_object(&request.input, "run request input")?;
     if request.metadata.is_null() {
         request.metadata = json!({});
-    } else if !request.metadata.is_object() {
-        return Err(validation("run request metadata must be a JSON object"));
     }
+    require_object(&request.metadata, "run request metadata")?;
     if let Some(user) = &mut request.user {
         if user.user_id.trim().is_empty() {
-            return Err(validation(
-                "run request user.user_id must be a non-empty string",
-            ));
+            return Err(validation("run request user.user_id must be non-empty"));
         }
         if user.metadata.is_null() {
             user.metadata = json!({});
-        } else if !user.metadata.is_object() {
-            return Err(validation(
-                "run request user.metadata must be a JSON object",
-            ));
+        }
+        require_object(&user.metadata, "run request user.metadata")?;
+    }
+    Ok(())
+}
+
+fn validate_catalog(catalog: &AgentRuntimeCatalog) -> Result<(), AgentError> {
+    catalog.validate_versions().map_err(validation)?;
+    if catalog.catalog_version != catalog_version() {
+        return Err(validation("catalog_version is not supported"));
+    }
+    let mut agent_ids = HashSet::new();
+    for agent in &catalog.agents {
+        if agent.id.trim().is_empty() || agent.version.trim().is_empty() {
+            return Err(validation("catalog agent identity must be non-empty"));
+        }
+        if !agent_ids.insert(agent.id.as_str()) {
+            return Err(validation(format!(
+                "catalog agent '{}' is duplicated",
+                agent.id
+            )));
+        }
+    }
+    let mut tool_names = HashSet::new();
+    for tool in &catalog.tools {
+        validate_tool_spec(tool)?;
+        if !tool_names.insert(tool.name.as_str()) {
+            return Err(validation(format!(
+                "catalog tool '{}' is duplicated",
+                tool.name
+            )));
         }
     }
     Ok(())
 }
 
-fn require_catalog_contract(catalog: &AgentRuntimeCatalog) -> Result<(), AgentError> {
-    catalog.validate_versions().map_err(validation)
-}
-
-fn validate_requested_effect(
-    catalog: &AgentRuntimeCatalog,
-    agent_id: &str,
-    requested: &RequestedEffect,
-) -> Result<(), AgentError> {
-    match requested {
-        RequestedEffect::Tool(tool_effect) => {
-            catalog_tool(catalog, agent_id, &tool_effect.name)?;
-            if !tool_effect.input.is_object() {
-                return Err(validation("requested tool input must be an object"));
-            }
-            Ok(())
-        }
-        RequestedEffect::Subagent(subagent_effect) => {
-            catalog_agent(catalog, &subagent_effect.agent_id)?;
-            Ok(())
-        }
+fn validate_tool_spec(tool: &ToolSpec) -> Result<(), AgentError> {
+    if tool.name.trim().is_empty() || tool.description.trim().is_empty() {
+        return Err(validation(
+            "catalog tool name and description must be non-empty",
+        ));
     }
+    require_object(&tool.input_schema, "catalog tool input_schema")?;
+    if let Some(output) = &tool.output_schema {
+        require_object(output, "catalog tool output_schema")?;
+    }
+    require_object(&tool.metadata, "catalog tool metadata")
 }
 
 fn catalog_agent<'a>(
@@ -1540,140 +1115,70 @@ fn catalog_agent<'a>(
         .agents
         .iter()
         .find(|agent| agent.id == agent_id)
-        .ok_or_else(|| validation(format!("agent '{agent_id}' is not present in the catalog")))
+        .ok_or_else(|| validation(format!("agent '{agent_id}' is not in the active catalog")))
 }
 
 fn catalog_tool<'a>(
     catalog: &'a AgentRuntimeCatalog,
     agent_id: &str,
-    name: &str,
+    tool_name: &str,
 ) -> Result<&'a ToolSpec, AgentError> {
+    let agent = catalog_agent(catalog, agent_id)?;
+    if !agent.capabilities.iter().any(|name| name == tool_name) {
+        return Err(validation(format!(
+            "tool '{tool_name}' is not declared by agent '{agent_id}'"
+        )));
+    }
     catalog
         .tools
         .iter()
-        .find(|tool| tool.name == name)
-        .ok_or_else(|| {
-            validation(format!(
-                "tool '{name}' requested by agent '{agent_id}' is not present in the catalog"
-            ))
-        })
+        .find(|tool| tool.name == tool_name)
+        .ok_or_else(|| validation(format!("tool '{tool_name}' is not in the active catalog")))
 }
 
-fn require_effect_call_input_object(effect_call: &Value, label: &str) -> Result<(), AgentError> {
-    if matches!(effect_call.get("input"), Some(input) if !input.is_object()) {
-        return Err(validation(format!("{label}.input must be an object")));
-    }
-    Ok(())
-}
-
-fn require_non_empty_string(object: &Map<String, Value>, field: &str) -> Result<(), AgentError> {
-    match object.get(field).and_then(Value::as_str) {
-        Some(value) if !value.is_empty() => Ok(()),
-        _ => Err(validation(format!(
-            "agent_runtime_step {field} must be a non-empty string"
-        ))),
-    }
-}
-
-fn require_matching_string(
-    object: &Map<String, Value>,
-    field: &str,
-    expected: &str,
-) -> Result<(), AgentError> {
-    require_non_empty_string(object, field)?;
-    match object.get(field).and_then(Value::as_str) {
-        Some(value) if value == expected => Ok(()),
-        _ => Err(validation(format!(
-            "agent_runtime_step {field} must match trace {field}"
-        ))),
-    }
-}
-
-fn require_step_status(object: &Map<String, Value>, field: &str) -> Result<(), AgentError> {
-    match object.get(field).and_then(Value::as_str) {
-        Some(
-            "effect_requested" | "completed" | "failed" | "cancelled" | "policy_denied"
-            | "closed_early" | "timed_out",
-        ) => Ok(()),
-        _ => Err(validation(format!(
-            "agent_runtime_step {field} is not a supported status"
-        ))),
-    }
-}
-
-fn require_terminal_reason(object: &Map<String, Value>, field: &str) -> Result<(), AgentError> {
-    match object.get(field) {
-        Some(Value::Null) => Ok(()),
-        Some(Value::String(value))
-            if matches!(
-                value.as_str(),
-                "done" | "stream_error" | "user_cancel" | "policy_denied" | "closed_early"
-            ) =>
-        {
-            Ok(())
-        }
-        _ => Err(validation(format!(
-            "agent_runtime_step {field} is not a supported terminal reason"
-        ))),
-    }
-}
-
-fn require_terminal_reason_matches_status(object: &Map<String, Value>) -> Result<(), AgentError> {
-    let expected = match object.get("status").and_then(Value::as_str) {
-        Some("effect_requested") => None,
-        Some("completed") => Some("done"),
-        Some("failed") => Some("stream_error"),
-        Some("cancelled") => Some("user_cancel"),
-        Some("policy_denied") => Some("policy_denied"),
-        Some("closed_early" | "timed_out") => Some("closed_early"),
-        _ => return Ok(()),
-    };
-
-    match (expected, object.get("terminal_reason")) {
-        (None, Some(Value::Null)) => Ok(()),
-        (Some(expected), Some(Value::String(value))) if value == expected => Ok(()),
-        _ => Err(validation(
-            "agent_runtime_step terminal_reason must match run_state.status",
-        )),
+fn require_object(value: &Value, label: &str) -> Result<(), AgentError> {
+    if value.is_object() {
+        Ok(())
+    } else {
+        Err(validation(format!("{label} must be a JSON object")))
     }
 }
 
 fn validation(message: impl Into<String>) -> AgentError {
-    AgentError::validation(message)
+    AgentError::validation(message.into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{PROTOCOL_VERSION, ScheduleSpec, catalog_version};
-    use serde_json::json;
+    use agent_core::{AgentSpec, ScheduleSpec, ToolRisk};
     use time::OffsetDateTime;
 
     fn catalog() -> AgentRuntimeCatalog {
         AgentRuntimeCatalog {
             protocol_version: protocol_version(),
             catalog_version: catalog_version(),
-            generated_at: OffsetDateTime::UNIX_EPOCH,
-            active_domains: Vec::new(),
+            generated_at: OffsetDateTime::now_utc(),
+            active_domains: vec!["test".to_owned()],
             agents: vec![
-                agent_core::AgentSpec {
-                    protocol_version: PROTOCOL_VERSION.to_owned(),
+                AgentSpec {
+                    protocol_version: protocol_version(),
                     id: "parent".to_owned(),
                     name: "Parent".to_owned(),
                     description: None,
-                    version: "0.1.0".to_owned(),
+                    version: "1.0.0".to_owned(),
                     schedule: ScheduleSpec::Manual,
-                    capabilities: vec![],
+                    capabilities: vec!["read_first".to_owned()],
                     metadata: json!({}),
                 },
-                agent_core::AgentSpec {
-                    protocol_version: PROTOCOL_VERSION.to_owned(),
+                AgentSpec {
+                    protocol_version: protocol_version(),
                     id: "child".to_owned(),
                     name: "Child".to_owned(),
                     description: None,
-                    version: "0.1.0".to_owned(),
+                    version: "1.0.0".to_owned(),
                     schedule: ScheduleSpec::Manual,
-                    capabilities: vec![],
+                    capabilities: vec!["read_first".to_owned()],
                     metadata: json!({}),
                 },
             ],
@@ -1682,7 +1187,7 @@ mod tests {
                 description: "Read first".to_owned(),
                 input_schema: json!({"type": "object"}),
                 output_schema: None,
-                risk: agent_core::ToolRisk::ReadOnly,
+                risk: ToolRisk::ReadOnly,
                 metadata: json!({}),
             }],
             proposal_kinds: Vec::new(),
@@ -1690,465 +1195,193 @@ mod tests {
         }
     }
 
-    #[test]
-    fn effect_step_loop_requests_and_completes_host_tool_effect() {
-        let catalog = catalog();
-        let request = RunRequest {
+    fn request(run_id: &str, effects: Value) -> RunRequest {
+        RunRequest {
             protocol_version: protocol_version(),
-            run_id: Some(RunId("run_tool".to_owned())),
-            input: json!({
-                "effects": [
-                    {"kind": "tool", "name": "read_first", "input": {"id": "first"}}
-                ]
-            }),
+            run_id: Some(RunId(run_id.to_owned())),
+            input: json!({"effects": effects}),
             user: None,
             scope: None,
             trigger: agent_core::TriggerKind::Manual,
             trigger_envelope: None,
             workflow: None,
             metadata: json!({}),
-        };
+        }
+    }
 
-        let first = EffectStepLoop::start_step(&catalog, request, "parent").expect("first step");
-        assert_eq!(first["status"], "effect_requested");
-        assert_eq!(first["effect"]["kind"], "tool");
-        assert_eq!(first["effect"]["name"], "read_first");
-        assert_eq!(first["run_state"]["remaining_effect_count"], 0);
-        let id = first["effect"]["effect_id"].as_str().unwrap().to_owned();
-
-        let terminal = EffectStepLoop::continue_step(
-            &catalog,
-            first,
-            json!({"jsonrpc": "2.0", "id": id, "result": {"ok": true}}),
-            "parent",
-        )
-        .expect("terminal step");
-        assert_eq!(terminal["status"], "completed");
-        assert_eq!(terminal["output"]["effect_result"], json!({"ok": true}));
-        assert_eq!(
-            terminal["trace_event"]["run_state"]["terminal_reason"],
-            "done"
-        );
+    fn ok_response(snapshot: &EmbeddedRunSnapshot, value: Value) -> EmbeddedEffectResponse {
+        EmbeddedEffectResponse {
+            jsonrpc: "2.0".to_owned(),
+            id: snapshot
+                .requested_effect()
+                .expect("requested effect")
+                .effect_id()
+                .to_owned(),
+            result: Some(value),
+            error: None,
+        }
     }
 
     #[test]
-    fn effect_step_loop_exposes_typed_embedded_checkpoints() {
+    fn typed_snapshot_runs_tool_plan_to_completion() {
         let catalog = catalog();
-        let request = RunRequest {
-            protocol_version: protocol_version(),
-            run_id: Some(RunId("run_typed".to_owned())),
-            input: json!({
-                "effects": [
-                    {"kind": "tool", "name": "read_first", "input": {"id": "first"}},
-                    {"kind": "subagent", "agent_id": "child", "input": {}}
-                ]
-            }),
-            user: None,
-            scope: None,
-            trigger: agent_core::TriggerKind::Manual,
-            trigger_envelope: None,
-            workflow: None,
-            metadata: json!({}),
-        };
-
-        let first =
-            EffectStepLoop::start_typed(&catalog, request, "parent").expect("typed first step");
-        assert_eq!(
-            first.status,
-            agent_core::EmbeddedRunStepStatus::EffectRequested
-        );
-        assert!(first.requested_effect().unwrap().effect_id().len() > 1);
-        assert_eq!(
-            first
-                .continuation
-                .as_ref()
-                .expect("remaining continuation")
-                .effects
-                .len(),
-            1
-        );
-        let id = first.requested_effect().unwrap().effect_id().to_owned();
-        let second = EffectStepLoop::continue_typed(
-            &catalog,
-            first,
-            agent_core::EmbeddedEffectResponse {
-                jsonrpc: "2.0".to_owned(),
-                id,
-                result: Some(json!({"ok": true})),
-                error: None,
-            },
-            "parent",
-        )
-        .expect("typed second step");
-        assert_eq!(
-            second.status,
-            agent_core::EmbeddedRunStepStatus::EffectRequested
-        );
-        assert!(matches!(
-            second.requested_effect(),
-            Some(agent_core::EmbeddedHostEffect::Subagent { .. })
-        ));
-    }
-
-    #[test]
-    fn effect_step_loop_accepts_stable_embedded_control_error_codes() {
-        let catalog = catalog();
-        let request = RunRequest {
-            protocol_version: protocol_version(),
-            run_id: Some(RunId("run_budget".to_owned())),
-            input: json!({
-                "effects": [
-                    {"kind": "tool", "name": "read_first", "input": {}}
-                ]
-            }),
-            user: None,
-            scope: None,
-            trigger: agent_core::TriggerKind::Manual,
-            trigger_envelope: None,
-            workflow: None,
-            metadata: json!({}),
-        };
-        let first =
-            EffectStepLoop::start_typed(&catalog, request, "parent").expect("typed first step");
-        let id = first.requested_effect().unwrap().effect_id().to_owned();
-
-        let terminal = EffectStepLoop::continue_typed(
-            &catalog,
-            first,
-            agent_core::EmbeddedEffectResponse {
-                jsonrpc: "2.0".to_owned(),
-                id,
-                result: Some(json!({
-                    "error": {
-                        "code": "effect_budget_exhausted",
-                        "message": "agent runtime effect budget exhausted"
-                    }
-                })),
-                error: None,
-            },
-            "parent",
-        )
-        .expect("typed terminal step");
-        assert_eq!(
-            terminal.status,
-            agent_core::EmbeddedRunStepStatus::ClosedEarly
-        );
-        assert_eq!(
-            terminal.run_state.terminal_reason,
-            Some(agent_core::EmbeddedTerminalReason::ClosedEarly)
-        );
-    }
-
-    #[test]
-    fn embedded_snapshot_closes_at_runtime_owned_effect_budget() {
-        let catalog = catalog();
-        let request = RunRequest {
-            protocol_version: protocol_version(),
-            run_id: Some(RunId("run_snapshot_budget".to_owned())),
-            input: json!({
-                "effects": [
-                    {"kind": "tool", "name": "read_first", "input": {"index": 1}},
-                    {"kind": "tool", "name": "read_first", "input": {"index": 2}}
-                ]
-            }),
-            user: None,
-            scope: None,
-            trigger: agent_core::TriggerKind::Manual,
-            trigger_envelope: None,
-            workflow: None,
-            metadata: json!({}),
-        };
         let first = EffectStepLoop::start_snapshot(
             &catalog,
-            request,
+            request(
+                "run_tool",
+                json!([{"kind": "tool", "name": "read_first", "input": {}}]),
+            ),
             "parent",
-            agent_core::EmbeddedRunLimits {
-                max_effect_steps: 1,
-                max_subagent_depth: 4,
-            },
+            EmbeddedRunLimits::default(),
         )
         .expect("snapshot starts");
-        assert_eq!(first.remaining_effect_steps(), 1);
-        let id = first.requested_effect().unwrap().effect_id().to_owned();
-
+        assert_eq!(first.step.status, EmbeddedRunStepStatus::EffectRequested);
         let terminal = EffectStepLoop::continue_snapshot(
             &catalog,
-            first,
-            agent_core::EmbeddedEffectResponse {
-                jsonrpc: "2.0".to_owned(),
-                id,
-                result: Some(json!({"ok": true})),
-                error: None,
-            },
+            first.clone(),
+            ok_response(&first, json!({"ok": true})),
             "parent",
         )
-        .expect("snapshot advances and closes");
-        assert_eq!(
-            terminal.step.status,
-            agent_core::EmbeddedRunStepStatus::ClosedEarly
-        );
+        .expect("snapshot completes");
+        assert_eq!(terminal.step.status, EmbeddedRunStepStatus::Completed);
         assert_eq!(terminal.progress.dispatched_effect_count, 1);
-        assert!(terminal.progress.effect_budget_exhausted);
-        assert_eq!(terminal.remaining_effect_steps(), 0);
         assert_eq!(
-            terminal.step.error.unwrap()["code"],
-            "effect_budget_exhausted"
+            terminal.step.run_state.terminal_reason,
+            Some(EmbeddedTerminalReason::Done)
         );
     }
 
     #[test]
-    fn embedded_snapshot_owns_subagent_depth_and_shared_effect_budget() {
+    fn typed_snapshot_preserves_continuation_without_json_roundtrip() {
         let catalog = catalog();
-        let request = RunRequest {
-            protocol_version: protocol_version(),
-            run_id: Some(RunId("run_snapshot_parent".to_owned())),
-            input: json!({
-                "effects": [{
-                    "kind": "subagent",
-                    "agent_id": "child",
-                    "input": {
-                        "effects": [{
-                            "kind": "tool",
-                            "name": "read_first",
-                            "input": {"from": "child"}
-                        }]
-                    }
-                }]
-            }),
-            user: None,
-            scope: None,
-            trigger: agent_core::TriggerKind::Manual,
-            trigger_envelope: None,
-            workflow: None,
-            metadata: json!({}),
-        };
-        let parent = EffectStepLoop::start_snapshot(
+        let first = EffectStepLoop::start_snapshot(
             &catalog,
-            request,
+            request(
+                "run_multi",
+                json!([
+                    {"kind": "tool", "name": "read_first", "input": {"index": 1}},
+                    {"kind": "tool", "name": "read_first", "input": {"index": 2}}
+                ]),
+            ),
             "parent",
-            agent_core::EmbeddedRunLimits {
-                max_effect_steps: 3,
-                max_subagent_depth: 2,
+            EmbeddedRunLimits::default(),
+        )
+        .expect("snapshot starts");
+        let second = EffectStepLoop::continue_snapshot(
+            &catalog,
+            first.clone(),
+            ok_response(&first, json!({"index": 1})),
+            "parent",
+        )
+        .expect("second effect requested");
+        assert_eq!(second.step.step_index, 1);
+        assert_eq!(second.step.run_state.effect_result_count, 1);
+        let terminal = EffectStepLoop::continue_snapshot(
+            &catalog,
+            second.clone(),
+            ok_response(&second, json!({"index": 2})),
+            "parent",
+        )
+        .expect("snapshot completes");
+        assert_eq!(terminal.step.effect_results.len(), 2);
+    }
+
+    #[test]
+    fn snapshot_cancellation_is_terminal_without_consuming_budget() {
+        let catalog = catalog();
+        let snapshot = EffectStepLoop::start_snapshot(
+            &catalog,
+            request(
+                "run_cancel",
+                json!([{"kind": "tool", "name": "read_first", "input": {}}]),
+            ),
+            "parent",
+            EmbeddedRunLimits::default(),
+        )
+        .expect("snapshot starts");
+        let cancelled =
+            EffectStepLoop::cancel_snapshot(&catalog, snapshot, "parent", "user stopped the run")
+                .expect("snapshot cancels");
+        assert_eq!(cancelled.step.status, EmbeddedRunStepStatus::Cancelled);
+        assert_eq!(cancelled.progress.dispatched_effect_count, 0);
+    }
+
+    #[test]
+    fn snapshot_closes_at_effect_budget() {
+        let catalog = catalog();
+        let snapshot = EffectStepLoop::start_snapshot(
+            &catalog,
+            request(
+                "run_budget",
+                json!([{"kind": "tool", "name": "read_first", "input": {}}]),
+            ),
+            "parent",
+            EmbeddedRunLimits {
+                max_effect_steps: 0,
+                max_subagent_depth: 1,
             },
         )
+        .expect("snapshot closes");
+        assert_eq!(snapshot.step.status, EmbeddedRunStepStatus::ClosedEarly);
+        assert!(snapshot.progress.effect_budget_exhausted);
+    }
+
+    #[test]
+    fn subagent_inherits_shared_budget() {
+        let catalog = catalog();
+        let parent = EffectStepLoop::start_snapshot(
+            &catalog,
+            request(
+                "run_parent",
+                json!([{
+                    "kind": "subagent",
+                    "agent_id": "child",
+                    "input": {"effects": [{"kind": "tool", "name": "read_first", "input": {}}]},
+                    "metadata": {}
+                }]),
+            ),
+            "parent",
+            EmbeddedRunLimits::default(),
+        )
         .expect("parent starts");
-        let child = EffectStepLoop::start_requested_subagent(&catalog, &parent)
-            .expect("child starts from parent effect");
-        assert_eq!(child.progress.subagent_depth, 1);
+        let child =
+            EffectStepLoop::start_requested_subagent(&catalog, &parent).expect("child starts");
         assert_eq!(child.progress.dispatched_effect_count, 1);
-        let child_effect_id = child.requested_effect().unwrap().effect_id().to_owned();
+        assert_eq!(child.progress.subagent_depth, 1);
         let child = EffectStepLoop::continue_snapshot(
             &catalog,
-            child,
-            agent_core::EmbeddedEffectResponse {
-                jsonrpc: "2.0".to_owned(),
-                id: child_effect_id,
-                result: Some(json!({"child": "done"})),
-                error: None,
-            },
+            child.clone(),
+            ok_response(&child, json!({"ok": true})),
             "child",
         )
         .expect("child completes");
-        assert!(child.is_terminal());
-        assert_eq!(child.progress.dispatched_effect_count, 2);
-
         let parent = EffectStepLoop::resume_parent_from_subagent(&catalog, parent, child)
-            .expect("parent resumes from child");
-        assert!(parent.is_terminal());
-        assert_eq!(
-            parent.step.status,
-            agent_core::EmbeddedRunStepStatus::Completed
-        );
+            .expect("parent resumes");
+        assert_eq!(parent.step.status, EmbeddedRunStepStatus::Completed);
         assert_eq!(parent.progress.dispatched_effect_count, 2);
-        assert_eq!(parent.remaining_effect_steps(), 1);
     }
 
     #[test]
-    fn embedded_snapshot_cancellation_is_terminal_without_consuming_budget() {
+    fn tampered_derived_state_is_rejected() {
         let catalog = catalog();
-        let request = RunRequest {
-            protocol_version: protocol_version(),
-            run_id: Some(RunId("run_snapshot_cancelled".to_owned())),
-            input: json!({
-                "effect": {"kind": "tool", "name": "read_first", "input": {}}
-            }),
-            user: None,
-            scope: None,
-            trigger: agent_core::TriggerKind::Manual,
-            trigger_envelope: None,
-            workflow: None,
-            metadata: json!({}),
-        };
-        let snapshot = EffectStepLoop::start_snapshot(
-            &catalog,
-            request,
-            "parent",
-            agent_core::EmbeddedRunLimits {
-                max_effect_steps: 2,
-                max_subagent_depth: 1,
-            },
-        )
-        .expect("snapshot starts");
-
-        let cancelled = EffectStepLoop::cancel_snapshot(
-            &catalog,
-            snapshot,
-            "parent",
-            "app moved to background",
-        )
-        .expect("snapshot cancels");
-
-        assert_eq!(
-            cancelled.step.status,
-            agent_core::EmbeddedRunStepStatus::Cancelled
-        );
-        assert_eq!(
-            cancelled.step.run_state.terminal_reason,
-            Some(agent_core::EmbeddedTerminalReason::UserCancel)
-        );
-        assert_eq!(cancelled.progress.dispatched_effect_count, 0);
-        assert_eq!(cancelled.remaining_effect_steps(), 2);
-        assert_eq!(cancelled.step.error.unwrap()["code"], "user_cancel");
-    }
-
-    #[test]
-    fn embedded_snapshot_rejects_tampered_progress() {
-        let catalog = catalog();
-        let request = RunRequest {
-            protocol_version: protocol_version(),
-            run_id: Some(RunId("run_snapshot_tampered".to_owned())),
-            input: json!({
-                "effect": {"kind": "tool", "name": "read_first", "input": {}}
-            }),
-            user: None,
-            scope: None,
-            trigger: agent_core::TriggerKind::Manual,
-            trigger_envelope: None,
-            workflow: None,
-            metadata: json!({}),
-        };
         let mut snapshot = EffectStepLoop::start_snapshot(
             &catalog,
-            request,
+            request(
+                "run_tampered",
+                json!([{"kind": "tool", "name": "read_first", "input": {}}]),
+            ),
             "parent",
-            agent_core::EmbeddedRunLimits {
-                max_effect_steps: 1,
-                max_subagent_depth: 1,
-            },
+            EmbeddedRunLimits::default(),
         )
         .expect("snapshot starts");
-        let id = snapshot.requested_effect().unwrap().effect_id().to_owned();
-        snapshot.progress.dispatched_effect_count = 2;
+        snapshot.step.run_state.step_index = 99;
         let error = EffectStepLoop::continue_snapshot(
             &catalog,
-            snapshot,
-            agent_core::EmbeddedEffectResponse {
-                jsonrpc: "2.0".to_owned(),
-                id,
-                result: Some(json!({})),
-                error: None,
-            },
+            snapshot.clone(),
+            ok_response(&snapshot, json!({})),
             "parent",
         )
-        .expect_err("tampered progress is rejected");
-        assert!(
-            error
-                .record
-                .message
-                .contains("dispatched effect count exceeds")
-        );
-    }
-
-    #[test]
-    fn effect_step_loop_exposes_subagent_as_native_effect() {
-        let catalog = catalog();
-        let request = RunRequest {
-            protocol_version: protocol_version(),
-            run_id: Some(RunId("run_subagent".to_owned())),
-            input: json!({
-                "effects": [
-                    {
-                        "kind": "subagent",
-                        "agent_id": "child",
-                        "input": {"from": "parent"}
-                    }
-                ]
-            }),
-            user: None,
-            scope: None,
-            trigger: agent_core::TriggerKind::Manual,
-            trigger_envelope: None,
-            workflow: None,
-            metadata: json!({}),
-        };
-
-        let first = EffectStepLoop::start_step(&catalog, request, "parent").expect("first step");
-        assert_eq!(first["status"], "effect_requested");
-        assert_eq!(first["effect"]["kind"], "subagent");
-        assert_eq!(first["effect"]["agent_id"], "child");
-        assert_eq!(first["trace_event"]["subagent_id"], "child");
-        let id = first["effect"]["effect_id"].as_str().unwrap().to_owned();
-
-        let terminal = EffectStepLoop::continue_step(
-            &catalog,
-            first,
-            json!({"jsonrpc": "2.0", "id": id, "result": {"result": {"status": "completed"}}}),
-            "parent",
-        )
-        .expect("terminal step");
-        assert_eq!(terminal["status"], "completed");
-        assert_eq!(
-            terminal["output"]["effect_result"]["result"]["status"],
-            "completed"
-        );
-    }
-
-    #[test]
-    fn effect_step_loop_requires_current_step_metadata_and_json_rpc_response() {
-        let catalog = catalog();
-        let request = RunRequest {
-            protocol_version: protocol_version(),
-            run_id: Some(RunId("run_strict_contract".to_owned())),
-            input: json!({
-                "effects": [
-                    {"kind": "tool", "name": "read_first", "input": {}}
-                ]
-            }),
-            user: None,
-            scope: None,
-            trigger: agent_core::TriggerKind::Manual,
-            trigger_envelope: None,
-            workflow: None,
-            metadata: json!({}),
-        };
-
-        let first = EffectStepLoop::start_step(&catalog, request, "parent").expect("first step");
-        let id = first["effect"]["effect_id"]
-            .as_str()
-            .expect("effect id")
-            .to_owned();
-
-        let mut missing_metadata = first.clone();
-        missing_metadata
-            .as_object_mut()
-            .expect("step object")
-            .remove("run_state");
-        let error = EffectStepLoop::continue_step(
-            &catalog,
-            missing_metadata,
-            json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-            "parent",
-        )
-        .expect_err("run_state is required");
-        assert!(error.record.message.contains("run_state is required"));
-
-        let error = EffectStepLoop::continue_step(
-            &catalog,
-            first,
-            json!({"id": id, "result": {}}),
-            "parent",
-        )
-        .expect_err("JSON-RPC envelope is required");
-        assert!(error.record.message.contains("jsonrpc must be '2.0'"));
+        .expect_err("tampering is rejected");
+        assert!(error.record.message.contains("run_state"));
     }
 }

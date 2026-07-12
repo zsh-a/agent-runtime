@@ -140,7 +140,14 @@ export type EmbeddedTerminalReason =
 export type EmbeddedEffectKind = 'tool' | 'subagent'
 
 export type EmbeddedHostEffect =
-  | {effect_id: string; input: JsonObject; kind: 'tool'; name: string}
+  | {
+      effect_id: string
+      input: JsonObject
+      kind: 'tool'
+      metadata: JsonObject
+      name: string
+      risk: ToolRisk
+    }
   | {
       agent_id: string
       effect_id: string

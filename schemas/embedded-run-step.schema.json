@@ -178,12 +178,14 @@
       "oneOf": [
         {
           "type": "object",
-          "required": ["kind", "effect_id", "name", "input"],
+          "required": ["kind", "effect_id", "name", "input", "risk", "metadata"],
           "properties": {
             "kind": { "const": "tool" },
             "effect_id": { "type": "string", "minLength": 1 },
             "name": { "type": "string", "minLength": 1 },
-            "input": { "type": "object" }
+            "input": { "type": "object" },
+            "risk": { "enum": ["read_only", "low", "medium", "high"] },
+            "metadata": { "type": "object" }
           },
           "additionalProperties": true
         },
