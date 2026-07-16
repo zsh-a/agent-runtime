@@ -188,6 +188,8 @@ const embeddedRunStep = {
     effect_id: 'effect_1',
     name: 'read_task',
     input: {id: 'task_1'},
+    risk: 'read_only',
+    metadata: {},
   },
   run_state: {
     status: 'effect_requested',

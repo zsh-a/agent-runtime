@@ -200,7 +200,9 @@ bindings/ts/
   HTTP client including `streamChatTurn()`, and `generateObject<T>()` helpers
   over JSON Schema structured LLM requests. It intentionally does not depend on
   Zod or AI SDK; host apps convert their schema system into JSON Schema before
-  calling it.
+  calling it. `src/types.ts` is a public export facade; `src/types/` groups
+  contracts by core, run, session, hooks, metrics, LLM, chat, and proposal
+  domains.
 
 docs/integration/
   Host-application integration guidance. `business-agent-integration.md`
