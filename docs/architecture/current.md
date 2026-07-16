@@ -122,7 +122,9 @@ crates/agent-cli/src/
   lib.rs            Internal module map and reusable application entrypoint
   app/
     mod.rs          Application module facade
-    entrypoint.rs   clap definitions, effective configuration, top-level dispatch
+    entrypoint.rs   Effective configuration and top-level dispatch
+    entrypoint/
+      args.rs       clap argument and subcommand model
     infrastructure.rs Logging, JSON validation, and JSON output infrastructure
                     Remaining modules own runtime composition, catalog, tools,
                     proposals, and sessions
