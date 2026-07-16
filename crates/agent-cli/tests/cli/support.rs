@@ -25,8 +25,17 @@ pub(super) fn read_sqlite_trace(store: &std::path::Path, run_id: &str) -> AgentT
 }
 
 pub(super) fn reserve_local_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("port can be reserved");
-    listener.local_addr().expect("local addr").port()
+    static ISSUED_PORTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u16>>> =
+        std::sync::OnceLock::new();
+    let issued_ports =
+        ISSUED_PORTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    loop {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("port can be reserved");
+        let port = listener.local_addr().expect("local addr").port();
+        if issued_ports.lock().expect("issued port lock").insert(port) {
+            return port;
+        }
+    }
 }
 
 pub(super) fn spawn_openai_compatible_server() -> (u16, std::thread::JoinHandle<String>) {
