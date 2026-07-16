@@ -48,9 +48,14 @@ crates/agent-runtime/src/
   lib.rs            Public exports only
   loop_core.rs      Embedded host-effect start/continue state machine and typed API
   runner/
-    mod.rs          AgentRunner lifecycle, workflow execution, retry/timeout
+    mod.rs          AgentRunner types, construction, scope, and shared helpers
+    execution.rs    Single-run persistence, locking, cancellation, and finalization
+    attempts.rs     Retry loop, policy hooks, timeout, and agent-step execution
+    scheduling.rs   Scheduled-agent tick evaluation
     control.rs      Lease renewal helpers
     idempotency.rs  Idempotency key derivation and duplicate-run projection
+    workflow/
+      execution.rs  Workflow lease, concurrent DAG execution, and compensation
   execution_support.rs  Result, cancellation, and CAS finalization helpers
   observability.rs  Trace spans, artifacts, and usage summaries
   workflow.rs       Workflow planning, inputs, status, and compensation helpers
