@@ -135,7 +135,11 @@ crates/agent-cli/src/
                     sessions, and proposals behind one RuntimeServer facade;
                     server/ separates HTTP handlers, run-event streaming,
                     stdio dispatch, and transport error/schema support
-  devtools/         Eval, replay, metrics, debug bundles, OTLP, development hosts
+  devtools/         Eval, replay, metrics, debug bundles, OTLP, development hosts;
+                    eval/ separates execution, scoring, expectations, trace
+                    normalization, DTOs, and I/O;
+                    debug_bundle/ separates export, redaction, trace records,
+                    artifact materialization, DTOs, and I/O
   commands/         Thin command handlers for run/catalog/tool/proposal/session/llm/cmd
   tui.rs, tui/      Interactive TUI shell with narrow submodules:
                    commands/ separates dispatch, actions, argument parsing,
