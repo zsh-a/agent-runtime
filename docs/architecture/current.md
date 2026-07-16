@@ -61,7 +61,8 @@ crates/agent-runtime/src/
   services.rs       Basic and traced AgentServices wrappers
   trace.rs          In-memory trace sink
   registry.rs       In-memory AgentRegistry
-  tests/            Runner lifecycle tests
+  tests/            Shared runner fixtures plus focused lifecycle, workflow,
+                    locking, hooks, observability, scheduler, and recovery tests
 
 crates/agent-store/src/
   lib.rs            Public exports only
