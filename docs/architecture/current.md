@@ -46,7 +46,12 @@ crates/agent-core/src/
 
 crates/agent-runtime/src/
   lib.rs            Public exports only
-  loop_core.rs      Embedded host-effect start/continue state machine and typed API
+  loop_core/
+    mod.rs          Embedded host-effect public facade and typed API
+    transition.rs   Snapshot advancement and execution-limit closure
+    effects.rs      Effect parsing, promotion, response handling, and step construction
+    validation.rs   Snapshot, step, request, and catalog validation
+    tests.rs        Embedded effect-loop state-machine tests
   runner/
     mod.rs          AgentRunner types, construction, scope, and shared helpers
     execution.rs    Single-run persistence, locking, cancellation, and finalization
