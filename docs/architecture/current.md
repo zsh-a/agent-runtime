@@ -102,8 +102,10 @@ crates/agent-llm/src/
   sse.rs            Shared server-sent event frame parsing helpers
   providers/
     mod.rs          Provider exports and shared mapping helpers
-    openai.rs       OpenAI-compatible chat/completions request, response, stream mapping
-    anthropic.rs    Anthropic messages request, response, stream mapping
+    openai.rs, openai/
+                    OpenAI facade plus wire types, mappings, HTTP provider, and SSE state
+    anthropic.rs, anthropic/
+                    Anthropic facade plus wire types, mappings, HTTP provider, and SSE state
     ollama.rs       Ollama chat request, response, synthetic stream mapping
   tests.rs, tests/  Thin test facade plus provider-specific request/SSE tests
 
