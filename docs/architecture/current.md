@@ -128,7 +128,9 @@ crates/agent-cli/src/
     infrastructure.rs Logging, JSON validation, and JSON output infrastructure
                     Remaining modules own runtime composition, catalog, tools,
                     proposals, and sessions
-  interfaces/       HTTP and stdio transports plus server runtime orchestration
+  interfaces/       HTTP and stdio transports plus server runtime orchestration;
+                    runtime_server/ separates construction, DTOs, chat, runs,
+                    sessions, and proposals behind one RuntimeServer facade
   devtools/         Eval, replay, metrics, debug bundles, OTLP, development hosts
   commands/         Thin command handlers for run/catalog/tool/proposal/session/llm/cmd
   tui.rs, tui/      Interactive TUI shell with narrow submodules:
