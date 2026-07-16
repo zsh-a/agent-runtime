@@ -137,6 +137,7 @@ crates/agent-cli/tests/
   cli/support.rs    Shared process, SQLite, and HTTP test infrastructure
   cli/catalog.rs    Catalog summary, listing, and prompt-manifest CLI tests
   cli/llm.rs        Provider-specific `agent llm complete` tests
+  cli/tools.rs      Tool catalog, mock, process, MCP, HTTP, and shell adapter CLI tests
   cli/validation.rs JSON Schema validation command tests
   contracts/        JSON Schema, OpenAPI, and fixture conformance suite
 
