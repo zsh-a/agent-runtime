@@ -99,16 +99,17 @@ crates/agent-llm/src/
     openai.rs       OpenAI-compatible chat/completions request, response, stream mapping
     anthropic.rs    Anthropic messages request, response, stream mapping
     ollama.rs       Ollama chat request, response, synthetic stream mapping
-  tests.rs          Provider request mapping and SSE stream tests
+  tests.rs, tests/  Thin test facade plus provider-specific request/SSE tests
 
 crates/agent-chat/src/
-  lib.rs            Public exports and tests
+  lib.rs            Public exports only
   types.rs          ChatTurn request/state/event/tool-result wire DTOs
   state.rs          Pure chat turn state transitions
   context.rs        Context snapshot and deterministic recent-message compaction
   runner.rs         LLM/tool continuation loop, context_snapshot events, stream orchestration
   events.rs         Event sender helpers
   error.rs          ChatTurn error mapping
+  tests.rs          ChatTurn unit and fixture tests
 
 crates/agent-cli/src/
   main.rs           Thin binary entrypoint only
