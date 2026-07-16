@@ -118,7 +118,7 @@ crates/agent-chat/src/
   runner.rs         LLM/tool continuation loop, context_snapshot events, stream orchestration
   events.rs         Event sender helpers
   error.rs          ChatTurn error mapping
-  tests.rs          ChatTurn unit and fixture tests
+  tests.rs, tests/  Shared fakes plus focused runner, state, and fixture tests
 
 crates/agent-cli/src/
   main.rs           Thin binary entrypoint only
