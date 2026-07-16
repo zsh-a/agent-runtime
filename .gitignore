@@ -1,8 +1,6 @@
 /target/
-/.agent-runtime/store/
-/.agent-runtime/eval-store/
-/.agent-runtime/server-store/
-/.agent-runtime/commands/generated/
+/.agent-runtime/
+/.venv/
 *.log
 *.tmp
 /bindings/ts/dist/

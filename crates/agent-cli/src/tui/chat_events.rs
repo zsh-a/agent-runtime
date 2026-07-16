@@ -306,10 +306,9 @@ mod tests {
         let mut state = test_state(&dir, "unused").await;
         state.clear_output();
 
-        let events: Vec<ChatTurnEvent> = serde_json::from_str(include_str!(
-            "../../../../fixtures/docs/agent_chat_turn_events.json"
-        ))
-        .expect("shared chat turn events fixture");
+        let events: Vec<ChatTurnEvent> =
+            serde_json::from_str(include_str!("../../../../fixtures/chat/turn_events.json"))
+                .expect("shared chat turn events fixture");
         let mut assistant_text = String::new();
         let mut final_response = None;
         for event in &events {
@@ -401,7 +400,7 @@ mod tests {
         state.clear_output();
 
         let events: Vec<ChatTurnEvent> = serde_json::from_str(include_str!(
-            "../../../../fixtures/docs/agent_chat_ask_user_turn_events.json"
+            "../../../../fixtures/chat/ask_user_turn_events.json"
         ))
         .expect("shared ask_user turn events fixture");
         let mut assistant_text = String::new();

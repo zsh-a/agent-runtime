@@ -530,10 +530,9 @@ mod tests {
 
     #[test]
     fn shared_agent_chat_turn_event_fixture_matches_runtime_types() {
-        let events: Vec<ChatTurnEvent> = serde_json::from_str(include_str!(
-            "../../../fixtures/docs/agent_chat_turn_events.json"
-        ))
-        .expect("shared chat turn events fixture");
+        let events: Vec<ChatTurnEvent> =
+            serde_json::from_str(include_str!("../../../fixtures/chat/turn_events.json"))
+                .expect("shared chat turn events fixture");
 
         assert_eq!(
             events

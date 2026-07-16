@@ -47,7 +47,13 @@ crates/agent-core/src/
 crates/agent-runtime/src/
   lib.rs            Public exports only
   loop_core.rs      Embedded host-effect start/continue state machine and typed API
-  runner.rs         AgentRunner lifecycle, step hooks, retry/timeout, idempotency keys
+  runner/
+    mod.rs          AgentRunner lifecycle, workflow execution, retry/timeout
+    control.rs      Lease renewal helpers
+    idempotency.rs  Idempotency key derivation and duplicate-run projection
+  execution_support.rs  Result, cancellation, and CAS finalization helpers
+  observability.rs  Trace spans, artifacts, and usage summaries
+  workflow.rs       Workflow planning, inputs, status, and compensation helpers
   policy.rs         ExecutionPolicy
   lock.rs           AgentLockStore helpers and in-memory lease store
   recovery.rs       Stale run recovery
@@ -55,14 +61,24 @@ crates/agent-runtime/src/
   services.rs       Basic and traced AgentServices wrappers
   trace.rs          In-memory trace sink
   registry.rs       In-memory AgentRegistry
-  tests.rs          Runner lifecycle tests
+  tests/            Runner lifecycle tests
 
 crates/agent-store/src/
   lib.rs            Public exports only
   memory.rs         In-memory run/state/proposal/session stores
   file.rs           File-backed run/proposal/session stores
   util.rs           Shared scope and run sorting helpers
-  tests.rs          Store backend tests
+  sqlite/
+    mod.rs          SQLite connection lifecycle, migrations, shared helpers
+    codec.rs        SQLite value, cursor, status, and error conversions
+    run.rs          Run persistence and optimistic concurrency
+    events.rs       Persistent run event log
+    trace.rs        Trace persistence
+    state.rs        Scoped agent state
+    lock.rs         Lease acquisition, renewal, and release
+    proposal.rs     Proposal persistence
+    session.rs      Session, thread, and step persistence
+  tests/            Store backend tests
 
 crates/agent-tools/src/
   lib.rs            Public tool override facade, builtin debug tools, schema validation
@@ -95,19 +111,13 @@ crates/agent-chat/src/
   error.rs          ChatTurn error mapping
 
 crates/agent-cli/src/
-  main.rs           clap wiring and top-level command dispatch only
-  chat.rs           CLI/TUI LLM provider construction for ChatTurnRunner
+  main.rs           Thin binary entrypoint only
+  lib.rs            Internal module map and reusable application entrypoint
+  app/              clap definitions, effective configuration, top-level dispatch
+                    plus runtime composition, catalog, tools, proposals, sessions
+  interfaces/       HTTP and stdio transports plus server runtime orchestration
+  devtools/         Eval, replay, metrics, debug bundles, OTLP, development hosts
   commands/         Thin command handlers for run/catalog/tool/proposal/session/llm/cmd
-  catalog.rs        Catalog loading, prompt manifest, catalog dry-run registry
-  registry.rs       YAML registry and local example agent implementations
-  tools.rs          CLI AgentServices wrapper around `agent-tools`
-  runtime_server.rs HTTP/stdio runtime orchestration, runtime chat tools, agent.run facade
-  server.rs         HTTP and stdio server transport handlers
-  replay.rs         Trace replay modes and output comparison
-  eval.rs           Eval case execution, golden trace checks, scoring hooks
-  proposal.rs       Proposal lifecycle helpers and trace appenders
-  session.rs        Session/thread/step reports and recording helpers
-  debug_bundle.rs   Local reproduction bundle export and redaction helpers
   tui.rs, tui/      Interactive TUI shell with narrow submodules:
                    commands routes slash commands and natural language input;
                    chat owns the ChatTurn client-tool loop;
@@ -123,8 +133,13 @@ schemas/
 
 fixtures/contracts/
   Valid and invalid schema fixtures used by contract tests and CLI examples.
-  ChatTurn fixtures are also consumed by `agent-chat` runtime tests so schema
-  drift breaks locally.
+
+fixtures/chat/
+  ChatTurn event sequences consumed by `agent-chat` and TUI tests.
+
+examples/tui/modelscope/
+  Provider-specific ModelScope TUI launcher example. Provider examples do not
+  live in the repository maintenance-script directory.
 
 openapi/agent-runtime-api.yaml
   Minimal HTTP API contract for server-first clients.
@@ -212,10 +227,10 @@ manifest tools, and `agent.run`.
 | Change runner lifecycle | `crates/agent-runtime/src/lib.rs` | `rtk cargo test -p agent-runtime`, `rtk cargo test -p agent-cli` |
 | Change LLM provider behavior | `crates/agent-llm/src/providers/` | `rtk cargo test -p agent-llm` |
 | Change ChatTurn behavior | `crates/agent-chat/`, `schemas/chat-turn-*.schema.json`, ChatTurn fixtures | `rtk cargo test -p agent-chat`, `rtk cargo test -p agent-cli --test contracts` |
-| Change HTTP ChatTurn streaming | `crates/agent-cli/src/server.rs`, `crates/agent-cli/src/runtime_server.rs`, `openapi/agent-runtime-api.yaml`, `bindings/ts/` | `rtk cargo test -p agent-cli --test catalog_cli http_server_streams_chat_turn_events`, TS binding tests |
+| Change HTTP ChatTurn streaming | `crates/agent-cli/src/interfaces/`, `openapi/agent-runtime-api.yaml`, `bindings/ts/` | `rtk cargo test -p agent-cli --test cli http_server_streams_chat_turn_events`, TS binding tests |
 | Change CLI command behavior | `crates/agent-cli/src/commands/` plus supporting module | focused command test, `rtk cargo test -p agent-cli` |
-| Change tool host behavior | `crates/agent-tools/`, `crates/agent-cli/src/tools.rs` | CLI tool tests and focused `agent-tools` tests |
-| Change proposal apply behavior | `crates/agent-cli/src/proposal.rs` | proposal CLI tests |
+| Change tool host behavior | `crates/agent-tools/`, `crates/agent-cli/src/app/tools.rs` | CLI tool tests and focused `agent-tools` tests |
+| Change proposal apply behavior | `crates/agent-cli/src/app/proposal.rs` | proposal CLI tests |
 
 ## Invariants
 

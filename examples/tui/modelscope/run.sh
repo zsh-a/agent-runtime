@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT_DIR"
 
 CONFIG="${AGENT_RUNTIME_CONFIG:-examples/tui/agent-runtime.toml}"
@@ -41,7 +41,7 @@ fi
 
 if [[ -z "${MODELSCOPE_API_KEY:-}" ]]; then
   echo "MODELSCOPE_API_KEY or MODELSCOPE_TOKEN is required." >&2
-  echo "Example: MODELSCOPE_API_KEY=ms scripts/run-modelscope-tui.sh" >&2
+  echo "Example: MODELSCOPE_API_KEY=ms examples/tui/modelscope/run.sh" >&2
   exit 1
 fi
 

@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) async fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     let context =
         AppContext::new(load_agent_config(cli.config.clone(), cli.profile.as_deref()).await?);
@@ -76,6 +76,7 @@ pub(crate) async fn run() -> Result<()> {
         Command::Replay {
             trace_file,
             mode,
+            execute,
             registry,
             catalog,
             tools,
@@ -88,6 +89,16 @@ pub(crate) async fn run() -> Result<()> {
             let sources = context.runtime_sources(registry, catalog);
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
+            let mode = if execute {
+                match mode {
+                    Some(ReplayMode::View | ReplayMode::Deterministic) => {
+                        return Err(miette!("--execute is only compatible with --mode live"));
+                    }
+                    Some(ReplayMode::Live) | None => ReplayMode::Live,
+                }
+            } else {
+                mode.unwrap_or(ReplayMode::View)
+            };
             match mode {
                 ReplayMode::Live | ReplayMode::Deterministic => {
                     replay_trace(ReplayTraceOptions {

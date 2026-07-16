@@ -16,7 +16,7 @@ and CLI/server development.
 - `bindings/ts`: dependency-light TypeScript wire types, HTTP client, and structured output helpers.
 - `schemas`: JSON Schema wire contracts.
 - `fixtures/contracts`: valid and invalid contract fixtures.
-- `fixtures/docs`: documentation and UI event examples.
+- `fixtures/chat`: chat protocol and UI event examples used by tests.
 - `examples`: local example registry and input fixtures.
 - `evals`: deterministic eval examples and golden traces.
 - `openapi/agent-runtime-api.yaml`: minimal HTTP API contract.

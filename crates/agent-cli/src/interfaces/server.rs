@@ -150,7 +150,7 @@ async fn http_metrics_summary(State(server): State<RuntimeServer>) -> Response {
 async fn http_chat_turn(State(server): State<RuntimeServer>, body: Bytes) -> Response {
     let request = match decode_schema_json::<ChatTurnRequest>(
         &body,
-        include_str!("../../../schemas/chat-turn-request.schema.json"),
+        include_str!("../../../../schemas/chat-turn-request.schema.json"),
         "chat-turn-request",
     ) {
         Ok(request) => request,
@@ -166,7 +166,7 @@ async fn http_chat_turn(State(server): State<RuntimeServer>, body: Bytes) -> Res
 async fn http_chat_resume(State(server): State<RuntimeServer>, body: Bytes) -> Response {
     let request = match decode_schema_json::<ChatResumeRequest>(
         &body,
-        include_str!("../../../schemas/chat-resume-request.schema.json"),
+        include_str!("../../../../schemas/chat-resume-request.schema.json"),
         "chat-resume-request",
     ) {
         Ok(request) => request,
@@ -206,7 +206,7 @@ async fn http_agent_run(
 ) -> Response {
     let params = match decode_schema_json::<HttpAgentRunParams>(
         &body,
-        include_str!("../../../schemas/http-agent-run-request.schema.json"),
+        include_str!("../../../../schemas/http-agent-run-request.schema.json"),
         "http-agent-run-request",
     ) {
         Ok(params) => params,
@@ -222,7 +222,7 @@ async fn http_agent_run(
 async fn http_workflow_run(State(server): State<RuntimeServer>, body: Bytes) -> Response {
     let request = match decode_schema_json::<WorkflowRunRequest>(
         &body,
-        include_str!("../../../schemas/workflow-run-request.schema.json"),
+        include_str!("../../../../schemas/workflow-run-request.schema.json"),
         "workflow-run-request",
     ) {
         Ok(request) => request,
