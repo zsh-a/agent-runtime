@@ -113,8 +113,12 @@ crates/agent-chat/src/
 crates/agent-cli/src/
   main.rs           Thin binary entrypoint only
   lib.rs            Internal module map and reusable application entrypoint
-  app/              clap definitions, effective configuration, top-level dispatch
-                    plus runtime composition, catalog, tools, proposals, sessions
+  app/
+    mod.rs          Application module facade
+    entrypoint.rs   clap definitions, effective configuration, top-level dispatch
+    infrastructure.rs Logging, JSON validation, and JSON output infrastructure
+                    Remaining modules own runtime composition, catalog, tools,
+                    proposals, and sessions
   interfaces/       HTTP and stdio transports plus server runtime orchestration
   devtools/         Eval, replay, metrics, debug bundles, OTLP, development hosts
   commands/         Thin command handlers for run/catalog/tool/proposal/session/llm/cmd
