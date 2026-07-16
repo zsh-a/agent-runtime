@@ -75,11 +75,7 @@ pub(crate) enum ProposalCommand {
         store: Utf8PathBuf,
         #[arg(long)]
         catalog: Utf8PathBuf,
-        #[arg(
-            long = "tool-host",
-            num_args = 1..,
-            value_name = "COMMAND"
-        )]
+        #[arg(long = "tool-host", num_args = 1.., value_name = "COMMAND")]
         tool_host: Vec<String>,
         #[arg(long = "mock-tool", value_name = "NAME=JSON_OR_@PATH")]
         mock_tool: Vec<String>,
@@ -92,11 +88,7 @@ pub(crate) enum ProposalCommand {
         store: Utf8PathBuf,
         #[arg(long)]
         catalog: Utf8PathBuf,
-        #[arg(
-            long = "tool-host",
-            num_args = 1..,
-            value_name = "COMMAND"
-        )]
+        #[arg(long = "tool-host", num_args = 1.., value_name = "COMMAND")]
         tool_host: Vec<String>,
         #[arg(long = "mock-tool", value_name = "NAME=JSON_OR_@PATH")]
         mock_tool: Vec<String>,

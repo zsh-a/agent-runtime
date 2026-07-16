@@ -205,6 +205,32 @@ const SQLITE_MIGRATIONS: &[SqliteMigration] = &[
             WHERE json_extract(record_json, '$.idempotency_key') IS NOT NULL
         "#],
     },
+    SqliteMigration {
+        version: 8,
+        name: "remove_unscoped_state",
+        statements: &[
+            r#"
+            CREATE TABLE IF NOT EXISTS agent_state (
+                agent_id TEXT NOT NULL,
+                state_key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                PRIMARY KEY(agent_id, state_key)
+            )
+            "#,
+            r#"
+            INSERT OR IGNORE INTO agent_state_scoped(
+                agent_id,
+                scope_type,
+                scope_id,
+                state_key,
+                value_json
+            )
+            SELECT agent_id, 'global', '', state_key, value_json
+            FROM agent_state
+            "#,
+            "DROP TABLE agent_state",
+        ],
+    },
 ];
 
 const SCHEMA_VERSION: i64 = SQLITE_MIGRATIONS[SQLITE_MIGRATIONS.len() - 1].version;

@@ -1,5 +1,5 @@
 /target/
-.agent-runtime/
+/.agent-runtime/
 /.venv/
 *.log
 *.tmp

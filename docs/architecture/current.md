@@ -72,7 +72,14 @@ crates/agent-runtime/src/
 crates/agent-store/src/
   lib.rs            Public exports only
   memory.rs         In-memory run/state/proposal/session stores
-  file.rs           File-backed run/proposal/session stores
+  file.rs           File-store facade and public backend exports
+  file/
+    io.rs           Atomic JSON/JSONL persistence and path conventions
+    run.rs           Run records and optimistic updates
+    trace.rs         Trace snapshots and append-only run events
+    proposal.rs      Proposal persistence
+    session.rs       Session, thread, and step persistence
+    lock.rs          File-backed leases
   util.rs           Shared scope and run sorting helpers
   sqlite/
     mod.rs          SQLite connection lifecycle, migrations, shared helpers
@@ -84,7 +91,13 @@ crates/agent-store/src/
     lock.rs         Lease acquisition, renewal, and release
     proposal.rs     Proposal persistence
     session.rs      Session, thread, and step persistence
-  tests/            Store backend tests
+  tests/
+    conformance.rs  Shared contract checks across file, memory, and SQLite backends
+    persistence.rs  SQLite reopen and durable-record coverage
+    migrations.rs   Schema upgrades and supported-version boundaries
+    concurrency.rs  Cursor allocation, migration, and optimistic-write races
+    locks.rs        File and SQLite lease behavior
+    support.rs      Store test fixtures
 
 crates/agent-tools/src/
   lib.rs            Public tool override facade, builtin debug tools, schema validation
@@ -125,9 +138,10 @@ crates/agent-cli/src/
   lib.rs            Internal module map and reusable application entrypoint
   app/
     mod.rs          Application module facade
-    entrypoint.rs   Effective configuration and top-level dispatch
+    entrypoint.rs   Effective configuration resolution and application startup
     entrypoint/
       args.rs       clap argument and subcommand model
+      dispatch.rs   Top-level command routing
     infrastructure.rs Logging, JSON validation, and JSON output infrastructure
                     Remaining modules own runtime composition, catalog, tools,
                     proposals, and sessions
@@ -150,10 +164,14 @@ crates/agent-cli/src/
                    approval/policy gate high-risk tools;
                    runtime is the TUI facade over catalog, store, runner, tools,
                    and tool inventory;
-                   data/ separates view models, state behavior, and loading;
+                   data/ separates view models, loading, and state behavior;
+                   data/state/ separates lifecycle/message updates, input
+                   editing/completion, and panel navigation/selection;
                    render/ separates panels, selection, input, transcript,
                    approval overlays, and styles;
-                   terminal owns the event loop and input devices;
+                   terminal owns lifecycle and keyboard dispatch, while
+                   terminal/mouse.rs owns hit testing, drag/selection, pane
+                   resizing, and clipboard interaction;
                    tests/ mirrors these boundaries with focused test modules.
 
 crates/agent-cli/tests/

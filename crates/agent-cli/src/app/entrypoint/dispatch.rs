@@ -1,12 +1,7 @@
 use super::*;
 
-pub async fn run() -> Result<()> {
-    let cli = Cli::parse();
-    let context =
-        AppContext::new(load_agent_config(cli.config.clone(), cli.profile.as_deref()).await?);
-    init_logging(log_mode_for_command(&cli.command, &context));
-
-    match cli.command {
+pub(super) async fn dispatch(context: &AppContext, command: Command) -> Result<()> {
+    match command {
         Command::List { registry, catalog } => {
             let sources = context.runtime_sources(registry, catalog);
             let composition = compose_runtime_sources(RuntimeSourceOptions {
@@ -76,7 +71,6 @@ pub async fn run() -> Result<()> {
         Command::Replay {
             trace_file,
             mode,
-            execute,
             registry,
             catalog,
             tools,
@@ -89,16 +83,7 @@ pub async fn run() -> Result<()> {
             let sources = context.runtime_sources(registry, catalog);
             let store = context.store(store);
             let execution = context.execution(timeout_seconds, max_retries, retry_backoff_ms);
-            let mode = if execute {
-                match mode {
-                    Some(ReplayMode::View | ReplayMode::Deterministic) => {
-                        return Err(miette!("--execute is only compatible with --mode live"));
-                    }
-                    Some(ReplayMode::Live) | None => ReplayMode::Live,
-                }
-            } else {
-                mode.unwrap_or(ReplayMode::View)
-            };
+            let mode = mode.unwrap_or(ReplayMode::View);
             match mode {
                 ReplayMode::Live | ReplayMode::Deterministic => {
                     replay_trace(ReplayTraceOptions {

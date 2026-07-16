@@ -14,20 +14,11 @@ pub(super) struct Cli {
 
 #[derive(Debug, Clone, Default, Args)]
 pub(super) struct ToolCliArgs {
-    #[arg(
-        long = "tool-host",
-        visible_alias = "tool-cmd",
-        num_args = 1..,
-        value_name = "COMMAND"
-    )]
+    #[arg(long = "tool-host", num_args = 1.., value_name = "COMMAND")]
     pub(super) tool_host: Vec<String>,
-    #[arg(
-        long = "mock-tool",
-        visible_alias = "mock",
-        value_name = "NAME=JSON_OR_@PATH"
-    )]
+    #[arg(long = "mock-tool", value_name = "NAME=JSON_OR_@PATH")]
     pub(super) mock_tool: Vec<String>,
-    #[arg(long = "tool-source", visible_alias = "tools", value_name = "PATH")]
+    #[arg(long = "tool-source", value_name = "PATH")]
     pub(super) tool_source: Vec<Utf8PathBuf>,
 }
 
@@ -100,8 +91,6 @@ pub(super) enum Command {
         trace_file: Utf8PathBuf,
         #[arg(long, value_enum)]
         mode: Option<ReplayMode>,
-        #[arg(long)]
-        execute: bool,
         #[arg(long, default_value = DEFAULT_REGISTRY)]
         registry: Utf8PathBuf,
         #[arg(long)]

@@ -2,6 +2,8 @@ use super::*;
 
 #[test]
 fn tui_once_renders_catalog_and_trace_snapshot() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("tui-store");
     let output = agent_cmd()
         .args([
             "tui",
@@ -11,6 +13,8 @@ fn tui_once_renders_catalog_and_trace_snapshot() {
             "../../fixtures/contracts/trace.valid.json",
             "--tool-source",
             "../../fixtures/contracts/tool-source.example.json",
+            "--store",
+            store.to_str().expect("utf8 store path"),
             "--once",
         ])
         .assert()

@@ -1,13 +1,16 @@
 use super::*;
 use crate::tui::{
     data::{
-        TuiAgentSummary, TuiApprovalSelection, TuiPendingApproval, TuiProposalListSummary,
-        TuiProposalSummary,
+        TuiAgentSummary, TuiApprovalSelection, TuiFocusPanel, TuiPendingApproval,
+        TuiProposalListSummary, TuiProposalSummary,
     },
     policy::TuiToolRisk,
+    render::{TuiContextClickAction, context_action_for_click},
     test_support::test_state,
 };
 use agent_core::{AgentRunRecord, AgentRunStatus, PROTOCOL_VERSION, RunId, RunScope};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use serde_json::json;
 use time::OffsetDateTime;
 
