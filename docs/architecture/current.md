@@ -93,6 +93,7 @@ crates/agent-tools/src/
   http.rs           HTTP JSON tool endpoint adapter
   mcp.rs            Minimal MCP stdio request/response mapping
   error.rs          Shared ToolError helpers
+  tests.rs          Tool override, schema, timeout, retry, and environment tests
 
 crates/agent-llm/src/
   lib.rs            Public exports only
