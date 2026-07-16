@@ -89,10 +89,14 @@ pub async fn assert_run_store_conformance(store: &dyn AgentRunStore) {
     let mut updated = newer.clone();
     updated.status = AgentRunStatus::Failed;
     updated.output = json!({"updated": true});
-    store
-        .update_run(updated.clone())
-        .await
-        .expect("run updated");
+    let expected_version = updated.version;
+    updated.version += 1;
+    assert!(
+        store
+            .update_run(updated.clone(), expected_version)
+            .await
+            .expect("run updated")
+    );
     let fetched = store
         .get_run(&updated.run_id)
         .await
@@ -100,6 +104,15 @@ pub async fn assert_run_store_conformance(store: &dyn AgentRunStore) {
         .expect("run exists");
     assert_eq!(fetched.status, AgentRunStatus::Failed);
     assert_eq!(fetched.output, json!({"updated": true}));
+    assert_eq!(fetched.version, 2);
+
+    let stale_update = updated.clone();
+    assert!(
+        !store
+            .update_run(stale_update, expected_version)
+            .await
+            .expect("stale run update is rejected without an error")
+    );
 
     let failed_runs = store
         .list_runs_by_status(AgentRunStatus::Failed, None)
@@ -563,6 +576,7 @@ fn run_record(
 ) -> AgentRunRecord {
     AgentRunRecord {
         protocol_version: PROTOCOL_VERSION.to_owned(),
+        version: 1,
         run_id: RunId(run_id.to_owned()),
         idempotency_key: Some(format!("idem_{run_id}")),
         agent_id: agent_id.to_owned(),

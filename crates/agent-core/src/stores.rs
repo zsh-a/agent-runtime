@@ -18,7 +18,14 @@ pub trait AgentRegistry: Send + Sync {
 #[async_trait]
 pub trait AgentRunStore: Send + Sync {
     async fn create_run(&self, run: AgentRunRecord) -> Result<(), StoreError>;
-    async fn update_run(&self, run: AgentRunRecord) -> Result<(), StoreError>;
+    /// Atomically update a run when its stored version matches
+    /// `expected_version`. The supplied record must use the next version.
+    /// Returns `false` when another writer won the version race.
+    async fn update_run(
+        &self,
+        run: AgentRunRecord,
+        expected_version: u64,
+    ) -> Result<bool, StoreError>;
     async fn get_run(&self, run_id: &RunId) -> Result<Option<AgentRunRecord>, StoreError>;
     async fn find_run_by_idempotency_key(
         &self,

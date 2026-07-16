@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::trace::MemoryTraceSink;
+use crate::{observability::run_status_name, trace::MemoryTraceSink};
 
 const STORE_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -71,6 +71,41 @@ pub(super) async fn persisted_cancellation_requested(
         .await
         .map_err(|error| AgentError::internal(error.to_string()))?
         .is_some_and(|run| run.cancellation_requested()))
+}
+
+pub(super) async fn update_running_run_with_retry(
+    run_store: &dyn AgentRunStore,
+    mut updated: agent_core::AgentRunRecord,
+) -> Result<(), AgentError> {
+    const MAX_UPDATE_ATTEMPTS: usize = 8;
+
+    for _ in 0..MAX_UPDATE_ATTEMPTS {
+        let existing = run_store
+            .get_run(&updated.run_id)
+            .await
+            .map_err(|error| AgentError::internal(error.to_string()))?
+            .ok_or_else(|| AgentError::internal("run disappeared before update"))?;
+        if existing.status != AgentRunStatus::Running {
+            return Err(AgentError::internal(format!(
+                "run cannot transition from terminal status {}",
+                run_status_name(&existing.status)
+            )));
+        }
+        let expected_version = existing.version;
+        updated.version = expected_version
+            .checked_add(1)
+            .ok_or_else(|| AgentError::internal("run record version overflow"))?;
+        updated.merge_control_metadata_from(&existing);
+        if run_store
+            .update_run(updated.clone(), expected_version)
+            .await
+            .map_err(|error| AgentError::internal(error.to_string()))?
+        {
+            return Ok(());
+        }
+    }
+
+    Err(AgentError::internal("run update conflicted too many times"))
 }
 
 pub(super) async fn emit_cancellation_events(

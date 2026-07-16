@@ -1522,6 +1522,7 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         AgentRunRecord {
             protocol_version: PROTOCOL_VERSION.to_owned(),
+            version: 1,
             run_id: RunId(run_id.to_owned()),
             idempotency_key: None,
             agent_id: "echo_agent".to_owned(),

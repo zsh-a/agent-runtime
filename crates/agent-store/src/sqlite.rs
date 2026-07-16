@@ -9,7 +9,7 @@ use agent_core::{
 use async_trait::async_trait;
 use camino::Utf8Path;
 use sqlx::{
-    Row, Sqlite, SqlitePool, Transaction,
+    Row, Sqlite, SqliteConnection, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use time::OffsetDateTime;
@@ -241,7 +241,9 @@ impl SqliteStore {
         }
         let options = SqliteConnectOptions::new()
             .filename(path.as_std_path())
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5));
         Self::connect(options, SqlitePoolOptions::new().max_connections(5)).await
     }
 
@@ -251,7 +253,14 @@ impl SqliteStore {
             .max_connections(1)
             .idle_timeout(None::<Duration>)
             .max_lifetime(None::<Duration>);
-        Self::connect(SqliteConnectOptions::new().in_memory(true), pool_options).await
+        Self::connect(
+            SqliteConnectOptions::new()
+                .in_memory(true)
+                .foreign_keys(true)
+                .busy_timeout(Duration::from_secs(5)),
+            pool_options,
+        )
+        .await
     }
 
     pub fn pool(&self) -> &SqlitePool {
@@ -280,23 +289,42 @@ impl SqliteStore {
     }
 
     async fn migrate(&self) -> Result<(), StoreError> {
-        sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&self.pool)
+        validate_sqlite_migrations()?;
+        let mut connection = self.pool.acquire().await.map_err(map_sqlx_err)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
             .await
             .map_err(map_sqlx_err)?;
-        let existing_version = self.schema_version().await?;
-        if existing_version > SCHEMA_VERSION {
-            return Err(StoreError::new(format!(
-                "SQLite store schema version {existing_version} is newer than supported version {SCHEMA_VERSION}"
-            )));
+
+        let migration_result = async {
+            let existing_version = sqlite_connection_schema_version(&mut connection).await?;
+            if existing_version > SCHEMA_VERSION {
+                return Err(StoreError::new(format!(
+                    "SQLite store schema version {existing_version} is newer than supported version {SCHEMA_VERSION}"
+                )));
+            }
+            for migration in SQLITE_MIGRATIONS {
+                if migration.version > existing_version {
+                    apply_sqlite_migration(&mut connection, migration).await?;
+                }
+            }
+            Ok(())
         }
-        validate_sqlite_migrations()?;
-        for migration in SQLITE_MIGRATIONS {
-            if migration.version > existing_version {
-                apply_sqlite_migration(&self.pool, migration).await?;
+        .await;
+
+        match migration_result {
+            Ok(()) => {
+                sqlx::query("COMMIT")
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(map_sqlx_err)?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                Err(error)
             }
         }
-        Ok(())
     }
 }
 
@@ -314,21 +342,19 @@ fn validate_sqlite_migrations() -> Result<(), StoreError> {
 }
 
 async fn apply_sqlite_migration(
-    pool: &SqlitePool,
+    connection: &mut SqliteConnection,
     migration: &SqliteMigration,
 ) -> Result<(), StoreError> {
-    let mut transaction = pool.begin().await.map_err(map_sqlx_err)?;
     for statement in migration.statements {
         sqlx::query(statement)
-            .execute(&mut *transaction)
+            .execute(&mut *connection)
             .await
             .map_err(|err| map_migration_err(migration, err))?;
     }
     sqlx::query(&format!("PRAGMA user_version = {}", migration.version))
-        .execute(&mut *transaction)
+        .execute(&mut *connection)
         .await
         .map_err(|err| map_migration_err(migration, err))?;
-    transaction.commit().await.map_err(map_sqlx_err)?;
     Ok(())
 }
 
@@ -601,8 +627,12 @@ impl AgentRunStore for SqliteStore {
         insert_run(&self.pool, run).await
     }
 
-    async fn update_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
-        update_run_record(&self.pool, run).await
+    async fn update_run(
+        &self,
+        run: AgentRunRecord,
+        expected_version: u64,
+    ) -> Result<bool, StoreError> {
+        update_run_record(&self.pool, run, expected_version).await
     }
 
     async fn get_run(&self, run_id: &RunId) -> Result<Option<AgentRunRecord>, StoreError> {
@@ -949,7 +979,16 @@ async fn insert_run(pool: &SqlitePool, run: AgentRunRecord) -> Result<(), StoreE
     Ok(())
 }
 
-async fn update_run_record(pool: &SqlitePool, run: AgentRunRecord) -> Result<(), StoreError> {
+async fn update_run_record(
+    pool: &SqlitePool,
+    run: AgentRunRecord,
+    expected_version: u64,
+) -> Result<bool, StoreError> {
+    if run.version != expected_version.saturating_add(1) {
+        return Err(StoreError::new(
+            "updated run version must increment expected version by one",
+        ));
+    }
     let (scope_type, scope_id) = encode_scope(&run.scope);
     let record_json = encode_record(&run)?;
     let result = sqlx::query(
@@ -957,6 +996,7 @@ async fn update_run_record(pool: &SqlitePool, run: AgentRunRecord) -> Result<(),
         UPDATE agent_runs
         SET agent_id = ?, scope_type = ?, scope_id = ?, started_at_sort = ?, status = ?, record_json = ?
         WHERE run_id = ?
+          AND COALESCE(json_extract(record_json, '$.version'), 1) = ?
         "#,
     )
     .bind(&run.agent_id)
@@ -966,13 +1006,23 @@ async fn update_run_record(pool: &SqlitePool, run: AgentRunRecord) -> Result<(),
     .bind(encode_run_status(&run.status))
     .bind(record_json)
     .bind(&run.run_id.0)
+    .bind(checked_record_version(expected_version)?)
     .execute(pool)
     .await
     .map_err(map_sqlx_err)?;
-    if result.rows_affected() != 1 {
+    if result.rows_affected() == 0 {
+        let exists = sqlx::query("SELECT 1 FROM agent_runs WHERE run_id = ?")
+            .bind(&run.run_id.0)
+            .fetch_optional(pool)
+            .await
+            .map_err(map_sqlx_err)?
+            .is_some();
+        if exists {
+            return Ok(false);
+        }
         return Err(StoreError::new("run does not exist"));
     }
-    Ok(())
+    Ok(true)
 }
 
 async fn insert_proposal(pool: &SqlitePool, proposal: ProposalEnvelope) -> Result<(), StoreError> {
@@ -1070,6 +1120,16 @@ async fn sqlite_schema_version(pool: &SqlitePool) -> Result<i64, StoreError> {
         .map_err(map_sqlx_err)
 }
 
+async fn sqlite_connection_schema_version(
+    connection: &mut SqliteConnection,
+) -> Result<i64, StoreError> {
+    sqlx::query("PRAGMA user_version")
+        .fetch_one(connection)
+        .await
+        .map(|row| row.get::<i64, _>(0))
+        .map_err(map_sqlx_err)
+}
+
 fn encode_record(value: &impl serde::Serialize) -> Result<String, StoreError> {
     serde_json::to_string(value).map_err(map_json_err)
 }
@@ -1106,6 +1166,12 @@ fn checked_cursor_index(cursor: usize) -> Result<i64, StoreError> {
     cursor
         .try_into()
         .map_err(|_| StoreError::new("run event cursor exceeds SQLite integer range"))
+}
+
+fn checked_record_version(version: u64) -> Result<i64, StoreError> {
+    version
+        .try_into()
+        .map_err(|_| StoreError::new("run record version exceeds SQLite integer range"))
 }
 
 fn decode_cursor(cursor: i64) -> Result<RunEventCursor, StoreError> {

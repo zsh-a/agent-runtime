@@ -246,8 +246,9 @@ These are intentional or pending differences from the long-term design:
   with a host secret manager and sandbox policy.
 - `agent-store` has shared conformance coverage for file, in-memory, and SQLite
   run, proposal, session, state, lock, trace, and event stores. Run creation is
-  insert-only, proposal updates use optimistic versions, and SQLite enforces a
-  unique run idempotency identity.
+  insert-only, run and proposal updates use optimistic versions, and SQLite
+  enforces a unique run idempotency identity. Legacy run records without a
+  version deserialize as version 1.
 - `RunRequest.scope` and `WorkflowRunRequest.scope` are first-class run-scope
   overrides with `global`, `user`, and `tenant` variants. The resolved scope is
   stored on every `AgentRunRecord`, participates in idempotency material and
@@ -347,7 +348,11 @@ These are intentional or pending differences from the long-term design:
   the trace redaction path.
 - HTTP run cancellation records durable intent on running records under
   `metadata.control.cancel_requested`; active runners poll the store and convert
-  that intent into their local cancellation token. Full pause/resume and
-  terminal redraw/cancel remain future work.
+  that intent into their local cancellation token. Run finalization and
+  cancellation use optimistic concurrency so concurrent control updates are not
+  silently overwritten. `GET /runs/{run_id}/events?follow=true` tails the
+  durable event store when the run belongs to another runtime instance, and
+  closes after the shared run record reaches a terminal status. Full
+  pause/resume remains future work.
 
 Use this document and the current test suite as the implementation authority.

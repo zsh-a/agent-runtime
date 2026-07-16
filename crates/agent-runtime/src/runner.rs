@@ -686,6 +686,7 @@ impl AgentRunner {
             self.run_store
                 .create_run(AgentRunRecord {
                     protocol_version: PROTOCOL_VERSION.to_owned(),
+                    version: 1,
                     run_id: run_id.clone(),
                     idempotency_key: Some(idempotency_key.clone()),
                     agent_id: spec.id.clone(),
@@ -782,6 +783,7 @@ impl AgentRunner {
             self.run_store
                 .create_run(AgentRunRecord {
                     protocol_version: PROTOCOL_VERSION.to_owned(),
+                    version: 1,
                     run_id: run_id.clone(),
                     idempotency_key: Some(idempotency_key.clone()),
                     agent_id: spec.id.clone(),
@@ -888,8 +890,9 @@ impl AgentRunner {
                 )
                 .await?;
 
-            let mut final_record = AgentRunRecord {
+            let final_record = AgentRunRecord {
                 protocol_version: PROTOCOL_VERSION.to_owned(),
+                version: 1,
                 run_id: result.run_id.clone(),
                 idempotency_key: Some(idempotency_key),
                 agent_id: result.agent_id.clone(),
@@ -903,23 +906,16 @@ impl AgentRunner {
                 workflow: request.workflow.clone(),
                 metadata: request.metadata.clone(),
             };
-            if let Some(existing) = self
-                .run_store
-                .get_run(&result.run_id)
+            update_running_run_with_retry(self.run_store.as_ref(), final_record)
                 .await
-                .map_err(|e| AgentError::internal(e.to_string()))?
-            {
-                final_record.merge_control_metadata_from(&existing);
-            }
-            self.run_store.update_run(final_record).await.map_err(|e| {
-                error!(
-                    run_id = %result.run_id.0,
-                    agent_id = %result.agent_id,
-                    error = %e,
-                    "failed to update run record",
-                );
-                AgentError::internal(e.to_string())
-            })?;
+                .inspect_err(|error| {
+                    error!(
+                        run_id = %result.run_id.0,
+                        agent_id = %result.agent_id,
+                        error = %error,
+                        "failed to update run record",
+                    );
+                })?;
 
             let error_code = result.error.as_ref().map(|error| error.code.as_str());
             info!(
@@ -974,7 +970,9 @@ impl AgentRunner {
                         record.status = AgentRunStatus::Failed;
                         record.finished_at = Some(OffsetDateTime::now_utc());
                         record.error = Some((*run_error.record).clone());
-                        if let Err(store_error) = self.run_store.update_run(record).await {
+                        if let Err(store_error) =
+                            update_running_run_with_retry(self.run_store.as_ref(), record).await
+                        {
                             error!(
                                 run_id = %run_id.0,
                                 agent_id = %spec.id,

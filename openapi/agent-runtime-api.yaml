@@ -253,7 +253,7 @@ paths:
             type: string
       responses:
         "200":
-          description: Server-sent event stream of active run events when the run is live, otherwise persisted trace events.
+          description: Server-sent event stream that follows the durable run-event log until terminal status, including when the run is active in another runtime instance.
           content:
             text/event-stream:
               schema:
@@ -689,6 +689,7 @@ components:
       type: object
       required:
         - protocol_version
+        - version
         - run_id
         - agent_id
         - status
@@ -699,6 +700,10 @@ components:
       properties:
         protocol_version:
           const: agent.v1
+        version:
+          type: integer
+          minimum: 1
+          description: Optimistic concurrency version incremented by every run-record update.
         run_id:
           type: string
           pattern: "^run_"

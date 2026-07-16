@@ -1713,6 +1713,7 @@ store_backend = "sqlite"
     sqlite
         .create_run(AgentRunRecord {
             protocol_version: PROTOCOL_VERSION.to_owned(),
+            version: 1,
             run_id: run_id.clone(),
             idempotency_key: None,
             agent_id: "ai_chat".to_owned(),
@@ -5076,6 +5077,88 @@ fn llm_cli_completes_with_mock_provider() {
             .expect("usage count")
             > 0
     );
+}
+
+#[test]
+fn http_server_follows_and_cancels_run_from_another_instance() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("multi-instance-store");
+    let config_path = dir.path().join("agent-runtime.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[runtime]
+store = "{}"
+store_backend = "sqlite"
+"#,
+            store.display()
+        ),
+    )
+    .expect("config writes");
+    let first_port = reserve_local_port();
+    let mut second_port = reserve_local_port();
+    while second_port == first_port {
+        second_port = reserve_local_port();
+    }
+    let agent_bin = assert_cmd::cargo::cargo_bin("agent");
+    let spawn_server = |port: u16| {
+        std::process::Command::new(&agent_bin)
+            .args([
+                "--config",
+                config_path.to_str().expect("utf8 config path"),
+                "serve",
+                "--catalog",
+                "../../fixtures/contracts/catalog.valid.json",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("HTTP server starts")
+    };
+    let _first_server = ChildGuard(spawn_server(first_port));
+    let _second_server = ChildGuard(spawn_server(second_port));
+    wait_for_http_server(first_port);
+    wait_for_http_server(second_port);
+
+    let run_id = "run_cross_instance_follow";
+    let run_body = format!(r#"{{"run_id":"{run_id}","input":{{"sleep_ms":3000}}}}"#);
+    let run_handle = std::thread::spawn(move || {
+        http_json_request(first_port, "POST", "/agents/ai_chat/run", Some(&run_body))
+    });
+
+    let inspected = http_json_request(second_port, "GET", &format!("/runs/{run_id}"), None);
+    assert_eq!(inspected["status"], "running");
+    let events_handle = std::thread::spawn({
+        let path = format!("/runs/{run_id}/events");
+        move || http_text_request(second_port, "GET", &path, None)
+    });
+    std::thread::sleep(Duration::from_millis(100));
+
+    let cancelled = http_json_request(
+        second_port,
+        "POST",
+        &format!("/runs/{run_id}/cancel"),
+        Some("{}"),
+    );
+    assert_eq!(cancelled["cancellation_requested"], true);
+
+    let run = run_handle.join().expect("run request joins");
+    assert_eq!(run["result"]["status"], "cancelled");
+    let events = events_handle.join().expect("events request joins");
+    assert!(events.contains("event: run_started"));
+    assert!(events.contains("event: run_cancel_requested"));
+    assert!(events.contains("event: run_cancelled"));
+    assert!(events.contains("event: run_finished"));
+    assert_eq!(events.matches("event: run_started").count(), 1);
+
+    let inspected = http_json_request(second_port, "GET", &format!("/runs/{run_id}"), None);
+    assert_eq!(inspected["status"], "cancelled");
+    assert_eq!(inspected["version"], 3);
+    assert_eq!(inspected["metadata"]["control"]["cancel_requested"], true);
 }
 
 #[test]

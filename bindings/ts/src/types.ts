@@ -357,6 +357,7 @@ export interface AgentRunRecord {
   scope: RunScope
   started_at: string
   status: AgentRunStatus
+  version: number
   workflow?: null | RunWorkflow
 }
 

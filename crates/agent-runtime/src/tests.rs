@@ -2069,10 +2069,14 @@ async fn runner_observes_persisted_cancellation_request() {
         .expect("run store reads")
         .expect("run record exists");
     stored.request_cancellation(OffsetDateTime::now_utc(), Some("test".to_owned()));
+    let expected_version = stored.version;
+    stored.version += 1;
     run_store
-        .update_run(stored)
+        .update_run(stored, expected_version)
         .await
-        .expect("run cancellation intent persists");
+        .expect("run cancellation intent persists")
+        .then_some(())
+        .expect("run cancellation update wins");
 
     let outcome = tokio::time::timeout(Duration::from_secs(5), run)
         .await
@@ -2110,6 +2114,7 @@ async fn recovery_abandons_only_stale_running_runs() {
     store
         .create_run(AgentRunRecord {
             protocol_version: PROTOCOL_VERSION.to_owned(),
+            version: 1,
             run_id: RunId("run_stale".to_owned()),
             idempotency_key: Some("idem_stale".to_owned()),
             agent_id: "echo".to_owned(),
@@ -2128,6 +2133,7 @@ async fn recovery_abandons_only_stale_running_runs() {
     store
         .create_run(AgentRunRecord {
             protocol_version: PROTOCOL_VERSION.to_owned(),
+            version: 1,
             run_id: RunId("run_fresh".to_owned()),
             idempotency_key: Some("idem_fresh".to_owned()),
             agent_id: "echo".to_owned(),
@@ -2146,6 +2152,7 @@ async fn recovery_abandons_only_stale_running_runs() {
     store
         .create_run(AgentRunRecord {
             protocol_version: PROTOCOL_VERSION.to_owned(),
+            version: 1,
             run_id: RunId("run_completed_old".to_owned()),
             idempotency_key: Some("idem_completed_old".to_owned()),
             agent_id: "echo".to_owned(),
@@ -2513,6 +2520,7 @@ fn parse_rfc3339(value: &str) -> OffsetDateTime {
 fn run_record_started_at(started_at: OffsetDateTime) -> AgentRunRecord {
     AgentRunRecord {
         protocol_version: PROTOCOL_VERSION.to_owned(),
+        version: 1,
         run_id: RunId("run_schedule_test".to_owned()),
         idempotency_key: Some("idem_schedule_test".to_owned()),
         agent_id: "scheduled".to_owned(),
@@ -2626,7 +2634,11 @@ impl AgentRunStore for FailingUpdateRunStore {
         Ok(())
     }
 
-    async fn update_run(&self, _run: AgentRunRecord) -> Result<(), StoreError> {
+    async fn update_run(
+        &self,
+        _run: AgentRunRecord,
+        _expected_version: u64,
+    ) -> Result<bool, StoreError> {
         Err(StoreError::new("forced update failure"))
     }
 

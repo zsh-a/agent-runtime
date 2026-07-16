@@ -161,8 +161,10 @@ stores or external-only scheduling.
   - distributed `AgentLockStore`
 - Add migration/versioning strategy for persisted runtime records. The SQLite
   reference backend owns its current schema through a versioned migration list
-  and rejects unsupported future schema versions; explicit multi-version data
-  migrations and ownership policy remain future work.
+  and rejects unsupported future schema versions. Concurrent runtime startup
+  serializes migrations and rechecks the schema version while holding the
+  migration write lock; explicit long-term data compatibility and ownership
+  policy remain future work.
 - Extend scheduling beyond manual/interval:
   - cron schedule spec (implemented for five-field expressions)
   - timezone handling (implemented for UTC, IANA timezone names, and fixed
@@ -388,13 +390,16 @@ CLI/server paths can opt into that backend with `runtime.store_backend =
 "sqlite"` while keeping trace/debug artifacts under `runtime.store`. The
 SQLite backend owns its schema through an internal migration list and rejects
 unsupported future schema versions, but does not yet include a full
-cross-version data migration policy. Developer workflows
+cross-version data migration policy. Concurrent startup is serialized through a
+SQLite write transaction. Run records use optimistic versions for cancellation,
+recovery, and finalization, and HTTP run-event followers tail the persisted
+cursor log across runtime instances until terminal status. Developer workflows
 that still depend on file-backed runtime stores fail closed under the SQLite
 backend instead of silently mixing persistence modes.
 
-1. Define migration/versioning ownership for persisted runtime records,
-   including multi-instance lock/state-store and recovery semantics.
-2. Extend durable run event replay and subscription contracts across process
-   restarts and multi-instance deployments.
-3. Extend generated TypeScript or Dart SDK coverage from committed schemas and
-   OpenAPI contracts once the next persistence/event-log surfaces settle.
+1. Define long-term migration/versioning ownership and failure recovery for
+   persisted runtime records, including backup and rollback policy.
+2. Add restart/fault-injection coverage for durable event followers and terminal
+   run transitions.
+3. Generate broader TypeScript or Dart SDK coverage from committed schemas and
+   OpenAPI contracts.

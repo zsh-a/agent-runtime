@@ -41,13 +41,25 @@ impl AgentRunStore for InMemoryRunStore {
         Ok(())
     }
 
-    async fn update_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
+    async fn update_run(
+        &self,
+        run: AgentRunRecord,
+        expected_version: u64,
+    ) -> Result<bool, StoreError> {
+        if run.version != expected_version.saturating_add(1) {
+            return Err(StoreError::new(
+                "updated run version must increment expected version by one",
+            ));
+        }
         let mut runs = self.runs.write().await;
-        if !runs.contains_key(&run.run_id.0) {
+        let Some(existing) = runs.get(&run.run_id.0) else {
             return Err(StoreError::new("run does not exist"));
+        };
+        if existing.version != expected_version {
+            return Ok(false);
         }
         runs.insert(run.run_id.0.clone(), run);
-        Ok(())
+        Ok(true)
     }
 
     async fn get_run(&self, run_id: &RunId) -> Result<Option<AgentRunRecord>, StoreError> {

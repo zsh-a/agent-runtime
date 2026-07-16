@@ -221,13 +221,28 @@ impl AgentRunStore for FileRunStore {
         create_json(&self.path_for(&run.run_id), &run).await
     }
 
-    async fn update_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
+    async fn update_run(
+        &self,
+        run: AgentRunRecord,
+        expected_version: u64,
+    ) -> Result<bool, StoreError> {
+        if run.version != expected_version.saturating_add(1) {
+            return Err(StoreError::new(
+                "updated run version must increment expected version by one",
+            ));
+        }
         let _guard = self.updates.lock().await;
         let path = self.path_for(&run.run_id);
         if !path.exists() {
             return Err(StoreError::new("run does not exist"));
         }
-        write_json(&path, &run).await
+        let existing: AgentRunRecord = read_optional_json(&path)
+            .await?
+            .ok_or_else(|| StoreError::new("run does not exist"))?;
+        if existing.version != expected_version {
+            return Ok(false);
+        }
+        write_json(&path, &run).await.map(|_| true)
     }
 
     async fn get_run(&self, run_id: &RunId) -> Result<Option<AgentRunRecord>, StoreError> {

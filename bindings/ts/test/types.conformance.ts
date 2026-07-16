@@ -368,6 +368,7 @@ const agentRunResult = {
 
 const agentRunRecord = {
   protocol_version: 'agent.v1',
+  version: 2,
   run_id: 'run_018f0000-0000-7000-8000-000000000000',
   idempotency_key: 'idem_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
   agent_id: 'echo_agent',

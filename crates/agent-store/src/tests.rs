@@ -1,11 +1,15 @@
 use agent_core::AgentLockStore;
 #[cfg(feature = "sqlite")]
 use agent_core::{
-    AgentRunEventStore, AgentRunStore, AgentStateStore, AgentTrace, AgentTraceStore,
-    PROTOCOL_VERSION, RunId, RunScope, TraceEvent,
+    AgentRunEventStore, AgentRunRecord, AgentRunStatus, AgentRunStore, AgentStateStore, AgentTrace,
+    AgentTraceStore, PROTOCOL_VERSION, RunId, RunScope, TraceEvent,
 };
 use camino::Utf8PathBuf;
+#[cfg(feature = "sqlite")]
+use serde_json::json;
 use std::time::Duration;
+#[cfg(feature = "sqlite")]
+use time::OffsetDateTime;
 
 use super::*;
 use crate::testkit::{
@@ -123,6 +127,7 @@ async fn sqlite_store_reopens_file_backed_records() {
     );
     let run = AgentRunRecord {
         protocol_version: PROTOCOL_VERSION.to_owned(),
+        version: 1,
         run_id: run_id.clone(),
         idempotency_key: Some("idem_sqlite_reopen".to_owned()),
         agent_id: "sqlite_agent".to_owned(),
@@ -402,6 +407,7 @@ async fn sqlite_store_upgrades_v3_schema_with_run_status_index() {
     let now = OffsetDateTime::now_utc();
     let running = AgentRunRecord {
         protocol_version: PROTOCOL_VERSION.to_owned(),
+        version: 1,
         run_id: RunId("run_v3_running".to_owned()),
         idempotency_key: Some("idem_v3_running".to_owned()),
         agent_id: "sqlite_agent".to_owned(),
@@ -624,6 +630,76 @@ async fn sqlite_store_reports_supported_schema_version_from_migrations() {
         store.schema_version().await.expect("schema version reads"),
         SqliteStore::supported_schema_version()
     );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_store_serializes_concurrent_schema_migrations() {
+    let path = temp_root().join("concurrent-migrations.sqlite");
+    let first_path = path.clone();
+    let second_path = path.clone();
+    let (first, second) = tokio::join!(
+        async move { SqliteStore::open(first_path).await },
+        async move { SqliteStore::open(second_path).await },
+    );
+    let first = first.expect("first concurrent store opens");
+    let second = second.expect("second concurrent store opens");
+    assert_eq!(
+        first.schema_version().await.expect("first version reads"),
+        SqliteStore::supported_schema_version()
+    );
+    assert_eq!(
+        second.schema_version().await.expect("second version reads"),
+        SqliteStore::supported_schema_version()
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_run_update_allows_only_one_concurrent_version_writer() {
+    let path = temp_root().join("concurrent-run-update.sqlite");
+    let first = SqliteStore::open(&path).await.expect("first store opens");
+    let second = SqliteStore::open(&path).await.expect("second store opens");
+    let run_id = RunId("run_concurrent_update".to_owned());
+    let run = AgentRunRecord {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        version: 1,
+        run_id: run_id.clone(),
+        idempotency_key: Some("idem_concurrent_update".to_owned()),
+        agent_id: "sqlite_agent".to_owned(),
+        status: AgentRunStatus::Running,
+        scope: RunScope::Global,
+        started_at: OffsetDateTime::now_utc(),
+        finished_at: None,
+        input: json!({}),
+        output: json!({}),
+        error: None,
+        workflow: None,
+        metadata: json!({}),
+    };
+    first.create_run(run.clone()).await.expect("run saved");
+    let mut first_update = run.clone();
+    first_update.version = 2;
+    first_update.metadata = json!({"writer": "first"});
+    let mut second_update = run;
+    second_update.version = 2;
+    second_update.metadata = json!({"writer": "second"});
+
+    let (first_won, second_won) = tokio::join!(
+        first.update_run(first_update, 1),
+        second.update_run(second_update, 1),
+    );
+    assert_ne!(
+        first_won.expect("first update completes"),
+        second_won.expect("second update completes"),
+        "exactly one writer wins the expected version"
+    );
+    let stored = first
+        .get_run(&run_id)
+        .await
+        .expect("run reads")
+        .expect("run exists");
+    assert_eq!(stored.version, 2);
 }
 
 #[cfg(feature = "sqlite")]

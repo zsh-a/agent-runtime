@@ -163,39 +163,54 @@ impl TuiRuntime {
     }
 
     pub(super) async fn cancel_run(&self, run_id: RunId) -> Result<TuiCancelRunResult> {
-        let Some(mut run) = self
-            .inner
-            .run_store
-            .get_run(&run_id)
-            .await
-            .into_diagnostic()?
-        else {
-            return Err(miette!("run '{}' was not found", run_id.0));
-        };
-        let status = run.status.clone();
-        if status == AgentRunStatus::Running {
+        const MAX_UPDATE_ATTEMPTS: usize = 8;
+        for _ in 0..MAX_UPDATE_ATTEMPTS {
+            let Some(mut run) = self
+                .inner
+                .run_store
+                .get_run(&run_id)
+                .await
+                .into_diagnostic()?
+            else {
+                return Err(miette!("run '{}' was not found", run_id.0));
+            };
+            let status = run.status.clone();
+            if status != AgentRunStatus::Running || run.cancellation_requested() {
+                return Ok(TuiCancelRunResult {
+                    run_id,
+                    cancellation_requested: run.cancellation_requested(),
+                    status,
+                    message: if run.cancellation_requested() {
+                        "cancellation intent already persisted".to_owned()
+                    } else {
+                        "run is not active".to_owned()
+                    },
+                });
+            }
+            let expected_version = run.version;
+            run.version = expected_version
+                .checked_add(1)
+                .ok_or_else(|| miette!("run record version overflow"))?;
             run.request_cancellation(
                 time::OffsetDateTime::now_utc(),
                 Some("agent_tui".to_owned()),
             );
-            self.inner
+            if self
+                .inner
                 .run_store
-                .update_run(run)
+                .update_run(run, expected_version)
                 .await
-                .into_diagnostic()?;
-            return Ok(TuiCancelRunResult {
-                run_id,
-                cancellation_requested: true,
-                status,
-                message: "cancellation intent persisted".to_owned(),
-            });
+                .into_diagnostic()?
+            {
+                return Ok(TuiCancelRunResult {
+                    run_id,
+                    cancellation_requested: true,
+                    status,
+                    message: "cancellation intent persisted".to_owned(),
+                });
+            }
         }
-        Ok(TuiCancelRunResult {
-            run_id,
-            cancellation_requested: false,
-            status,
-            message: "run is not active".to_owned(),
-        })
+        Err(miette!("run cancellation update conflicted too many times"))
     }
 
     pub(super) fn default_agent_id(&self) -> Result<String> {

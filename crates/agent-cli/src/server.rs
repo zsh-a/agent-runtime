@@ -1,9 +1,14 @@
-use std::{collections::HashSet, convert::Infallible, net::SocketAddr};
+use std::{
+    collections::{HashSet, VecDeque},
+    convert::Infallible,
+    net::SocketAddr,
+    time::Duration,
+};
 
 use agent_chat::{ChatError, ChatResumeRequest, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest};
 use agent_core::{
-    ProposalId, RunEventCursor, RunEventRecord, RunId, SessionId, ToolSpec, TraceEvent,
-    WorkflowRunRequest,
+    AgentRunStatus, ProposalId, RunEventCursor, RunEventRecord, RunId, SessionId, ToolSpec,
+    TraceEvent, WorkflowRunRequest,
 };
 use axum::{
     Json, Router,
@@ -328,15 +333,30 @@ async fn http_run_events(
         .await
     {
         Ok(Some(records)) => {
-            let stream =
+            let last_cursor = records.last().map(|record| record.cursor).unwrap_or(after);
+            let replay_stream =
                 stream::iter(records.into_iter().map(|record| {
                     Ok::<_, Infallible>(trace_event_sse(record.cursor, record.event))
                 }));
-            return Sse::new(stream).into_response();
+            if follow {
+                let live_stream = persisted_run_event_stream(server, run_id, last_cursor);
+                return Sse::new(replay_stream.chain(live_stream)).into_response();
+            }
+            return Sse::new(replay_stream).into_response();
         }
         Ok(None) => {}
         Err(err) => {
             return http_error(StatusCode::INTERNAL_SERVER_ERROR, "run_events_failed", err);
+        }
+    }
+
+    if follow {
+        match server.get_run(run_id.clone()).await {
+            Ok(run) if run.status == AgentRunStatus::Running => {
+                return Sse::new(persisted_run_event_stream(server, run_id, after)).into_response();
+            }
+            Ok(_) => {}
+            Err(_) => {}
         }
     }
 
@@ -352,6 +372,69 @@ async fn http_run_events(
         }
         Err(err) => http_error(StatusCode::NOT_FOUND, "trace_not_found", err),
     }
+}
+
+struct PersistedRunEventStreamState {
+    server: RuntimeServer,
+    run_id: RunId,
+    cursor: RunEventCursor,
+    pending: VecDeque<RunEventRecord>,
+}
+
+fn persisted_run_event_stream(
+    server: RuntimeServer,
+    run_id: RunId,
+    after: RunEventCursor,
+) -> impl futures::Stream<Item = Result<Event, Infallible>> {
+    stream::unfold(
+        PersistedRunEventStreamState {
+            server,
+            run_id,
+            cursor: after,
+            pending: VecDeque::new(),
+        },
+        |mut state| async move {
+            loop {
+                if let Some(record) = state.pending.pop_front() {
+                    state.cursor = record.cursor;
+                    return Some((Ok(trace_event_sse(record.cursor, record.event)), state));
+                }
+
+                match state
+                    .server
+                    .get_run_event_records_after(state.run_id.clone(), state.cursor)
+                    .await
+                {
+                    Ok(Some(records)) if !records.is_empty() => {
+                        state.pending.extend(records);
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(
+                            run_id = %state.run_id.0,
+                            cursor = state.cursor,
+                            error = %error,
+                            "failed to poll persisted run events",
+                        );
+                    }
+                }
+
+                match state.server.get_run(state.run_id.clone()).await {
+                    Ok(run) if run.status != AgentRunStatus::Running => return None,
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(
+                            run_id = %state.run_id.0,
+                            error = %error,
+                            "failed to inspect run while following persisted events",
+                        );
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        },
+    )
 }
 
 async fn http_run_cancel(

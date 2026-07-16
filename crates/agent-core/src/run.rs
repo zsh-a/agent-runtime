@@ -350,6 +350,8 @@ impl AgentRunResult {
 pub struct AgentRunRecord {
     #[serde(default = "protocol_version")]
     pub protocol_version: String,
+    #[serde(default = "initial_record_version")]
+    pub version: u64,
     pub run_id: RunId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
@@ -372,6 +374,10 @@ pub struct AgentRunRecord {
     pub workflow: Option<RunWorkflow>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+fn initial_record_version() -> u64 {
+    1
 }
 
 impl AgentRunRecord {

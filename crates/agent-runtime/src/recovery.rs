@@ -61,10 +61,17 @@ pub async fn recover_stale_runs(
                 "recovered_at_unix_seconds": now.unix_timestamp(),
             }),
         });
-        run_store
-            .update_run(run.clone())
+        let expected_version = run.version;
+        run.version = expected_version
+            .checked_add(1)
+            .ok_or_else(|| AgentError::internal("run record version overflow"))?;
+        let updated = run_store
+            .update_run(run.clone(), expected_version)
             .await
             .map_err(|e| AgentError::internal(e.to_string()))?;
+        if !updated {
+            continue;
+        }
         recovered_runs.push(RecoveredRun {
             run_id: run.run_id,
             agent_id: run.agent_id,

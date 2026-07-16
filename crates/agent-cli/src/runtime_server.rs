@@ -595,15 +595,30 @@ impl RuntimeServer {
         run_id: &RunId,
         requested_by: &str,
     ) -> Result<Option<AgentRunStatus>> {
-        let Some(mut run) = self.run_store.get_run(run_id).await.into_diagnostic()? else {
-            return Ok(None);
-        };
-        let status = run.status.clone();
-        if status == AgentRunStatus::Running {
+        const MAX_UPDATE_ATTEMPTS: usize = 8;
+        for _ in 0..MAX_UPDATE_ATTEMPTS {
+            let Some(mut run) = self.run_store.get_run(run_id).await.into_diagnostic()? else {
+                return Ok(None);
+            };
+            let status = run.status.clone();
+            if status != AgentRunStatus::Running || run.cancellation_requested() {
+                return Ok(Some(status));
+            }
+            let expected_version = run.version;
+            run.version = expected_version
+                .checked_add(1)
+                .ok_or_else(|| miette!("run record version overflow"))?;
             run.request_cancellation(OffsetDateTime::now_utc(), Some(requested_by.to_owned()));
-            self.run_store.update_run(run).await.into_diagnostic()?;
+            if self
+                .run_store
+                .update_run(run, expected_version)
+                .await
+                .into_diagnostic()?
+            {
+                return Ok(Some(status));
+            }
         }
-        Ok(Some(status))
+        Err(miette!("run cancellation update conflicted too many times"))
     }
 
     fn persist_chat_steps(

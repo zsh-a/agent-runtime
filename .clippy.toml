@@ -1,0 +1,6 @@
+# Runtime protocol DTOs intentionally carry rich JSON error/context payloads.
+# Keep Clippy strict while setting thresholds that match those public records.
+large-error-threshold = 256
+enum-variant-size-threshold = 512
+too-many-arguments-threshold = 12
+
