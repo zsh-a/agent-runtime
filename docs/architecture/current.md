@@ -123,13 +123,18 @@ crates/agent-cli/src/
   devtools/         Eval, replay, metrics, debug bundles, OTLP, development hosts
   commands/         Thin command handlers for run/catalog/tool/proposal/session/llm/cmd
   tui.rs, tui/      Interactive TUI shell with narrow submodules:
-                   commands routes slash commands and natural language input;
+                   commands/ separates dispatch, actions, argument parsing,
+                   and presentation;
                    chat owns the ChatTurn client-tool loop;
                    chat_events adapts ChatTurnEvent into TUI updates;
                    approval/policy gate high-risk tools;
                    runtime is the TUI facade over catalog, store, runner, tools,
                    and tool inventory;
-                   data/render/terminal own state, presentation, and input.
+                   data/ separates view models, state behavior, and loading;
+                   render/ separates panels, selection, input, transcript,
+                   approval overlays, and styles;
+                   terminal owns the event loop and input devices;
+                   tests/ mirrors these boundaries with focused test modules.
 
 crates/agent-cli/tests/
   cli.rs            CLI integration test target
