@@ -131,6 +131,13 @@ crates/agent-cli/src/
                    and tool inventory;
                    data/render/terminal own state, presentation, and input.
 
+crates/agent-cli/tests/
+  cli.rs            CLI integration test target
+  cli/suite.rs      Cross-surface scenarios not yet owned by a focused module
+  cli/support.rs    Shared process, SQLite, and HTTP test infrastructure
+  cli/llm.rs        Provider-specific `agent llm complete` tests
+  contracts/        JSON Schema, OpenAPI, and fixture conformance suite
+
 schemas/
   JSON Schema contracts for runtime wire types, including ChatTurn request,
   state, event, and tool-result resume payloads.
