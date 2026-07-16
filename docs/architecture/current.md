@@ -133,12 +133,25 @@ crates/agent-cli/src/
 
 crates/agent-cli/tests/
   cli.rs            CLI integration test target
-  cli/suite.rs      Cross-surface scenarios not yet owned by a focused module
+  cli/suite.rs      Thin integration-test module facade and shared imports
   cli/support.rs    Shared process, SQLite, and HTTP test infrastructure
   cli/catalog.rs    Catalog summary, listing, and prompt-manifest CLI tests
   cli/llm.rs        Provider-specific `agent llm complete` tests
   cli/tools.rs      Tool catalog, mock, process, MCP, HTTP, and shell adapter CLI tests
   cli/validation.rs JSON Schema validation command tests
+  cli/config_profiles.rs, cli/config_stores.rs
+                    Runtime profile and persistence-backend configuration tests
+  cli/run.rs        Catalog-backed run and tool-loop integration tests
+  cli/workflow.rs   Workflow command validation and persistence tests
+  cli/replay.rs, cli/telemetry.rs
+                    Replay and trace-export integration tests
+  cli/debug_bundle.rs, cli/recovery.rs, cli/metrics.rs
+                    Debug export, stale-run recovery, and metrics tests
+  cli/server_*.rs   HTTP/stdio core, run, chat, proposal, and session scenarios
+  cli/eval.rs       Evaluation execution and fixture-generation tests
+  cli/proposal_*.rs Proposal lifecycle, approval, and policy command tests
+  cli/tui.rs        One-shot TUI integration tests
+  cli/compat.rs     Business integration compatibility smoke test
   contracts/        JSON Schema, OpenAPI, and fixture conformance suite
 
 schemas/
