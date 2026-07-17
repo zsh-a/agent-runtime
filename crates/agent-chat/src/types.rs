@@ -1,6 +1,9 @@
 use std::pin::Pin;
 
-use agent_core::{CompactionRecord, ContextPolicy, ContextSnapshot, PROTOCOL_VERSION, ToolSpec};
+use agent_core::{
+    CompactionRecord, ContextPolicy, ContextSnapshot, PROTOCOL_VERSION, ToolOutcome, ToolSpec,
+    infer_tool_outcome,
+};
 use agent_llm::{LlmMessage, LlmResponse, LlmUsage};
 use futures::Stream;
 use schemars::JsonSchema;
@@ -104,6 +107,20 @@ pub struct ChatToolResult {
     pub output: Value,
     #[serde(default)]
     pub is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ToolOutcome>,
+}
+
+impl ChatToolResult {
+    pub fn effective_outcome(&self) -> ToolOutcome {
+        self.outcome
+            .clone()
+            .unwrap_or_else(|| infer_tool_outcome(&self.output, self.is_error))
+    }
+
+    pub fn effective_is_error(&self) -> bool {
+        self.effective_outcome().is_error()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]

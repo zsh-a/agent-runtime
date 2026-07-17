@@ -54,6 +54,7 @@ fn add_high_risk_echo_tool(options: &mut TuiOptions) {
         input_schema: json!({"type": "object"}),
         output_schema: Some(json!({"type": "object"})),
         risk: ToolRisk::High,
+        replay_policy: agent_core::ToolReplayPolicy::AtMostOnce,
         metadata: json!({"source": "test_high_risk"}),
     });
 }

@@ -13,6 +13,11 @@
       "type": "string",
       "enum": ["read_only", "low", "medium", "high"]
     },
+    "replay_policy": {
+      "type": "string",
+      "enum": ["safe_retry", "idempotent", "at_most_once"],
+      "default": "at_most_once"
+    },
     "metadata": { "type": "object", "default": {} }
   },
   "additionalProperties": false

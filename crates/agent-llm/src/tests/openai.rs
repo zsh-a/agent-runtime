@@ -336,6 +336,7 @@ async fn openai_compatible_provider_sends_tools_and_tool_results() {
                 }),
                 output_schema: None,
                 risk: agent_core::ToolRisk::ReadOnly,
+                replay_policy: agent_core::ToolReplayPolicy::SafeRetry,
                 metadata: json!({}),
             }],
             response_format: None,

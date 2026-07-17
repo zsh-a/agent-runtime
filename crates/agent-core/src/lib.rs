@@ -9,6 +9,7 @@ pub mod run;
 pub mod services;
 pub mod session;
 pub mod stores;
+pub mod tool;
 pub mod trace;
 
 pub use catalog::{
@@ -50,6 +51,7 @@ pub use stores::{
     AgentLockStore, AgentProposalStore, AgentRegistry, AgentRunEventStore, AgentRunStore,
     AgentSessionStore, AgentStateStore, AgentTraceStore, RunEventCursor, RunEventRecord,
 };
+pub use tool::{ToolOutcome, ToolOutcomeStatus, ToolReplayPolicy, infer_tool_outcome};
 pub use trace::{
     AgentEvent, AgentTrace, ArtifactKind, ArtifactRef, ArtifactStoreRef, HookEvent, HookEventName,
     HookInvocationStatus, HookKind, RedactionClassification, TraceEvent, TraceSpan,

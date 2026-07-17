@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use agent_core::{
     AgentError, AgentRuntimeCatalog, AgentSpec, EMBEDDED_SNAPSHOT_VERSION, EmbeddedEffectResponse,
     EmbeddedEffectResult, EmbeddedHostEffect, EmbeddedPendingHostEffect, EmbeddedRunContinuation,
-    EmbeddedRunSnapshot, EmbeddedRunStep, EmbeddedRunStepStatus, RunRequest, ToolSpec,
-    catalog_version, protocol_version,
+    EmbeddedRunSnapshot, EmbeddedRunStep, EmbeddedRunStepStatus, RunRequest, ToolOutcomeStatus,
+    ToolSpec, catalog_version, infer_tool_outcome, protocol_version,
 };
 use serde_json::{Value, json};
 
@@ -215,7 +215,31 @@ pub(super) fn validate_effect_response(
         )));
     }
     match (&response.result, &response.error) {
-        (Some(_), None) | (None, Some(_)) => Ok(()),
+        (Some(result), None) => {
+            if response
+                .outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.status == ToolOutcomeStatus::Ok)
+                && infer_tool_outcome(result, false).is_error()
+            {
+                return Err(validation(
+                    "effect response outcome conflicts with its result payload",
+                ));
+            }
+            Ok(())
+        }
+        (None, Some(_)) => {
+            if response
+                .outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.status == ToolOutcomeStatus::Ok)
+            {
+                return Err(validation(
+                    "effect response with a JSON-RPC error cannot have an ok outcome",
+                ));
+            }
+            Ok(())
+        }
         (Some(_), Some(_)) => Err(validation(
             "effect response cannot contain both result and error",
         )),

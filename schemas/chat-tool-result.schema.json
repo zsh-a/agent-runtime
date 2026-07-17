@@ -8,7 +8,21 @@
     "tool_call_id": { "type": "string", "minLength": 1 },
     "tool_name": { "type": "string", "minLength": 1 },
     "output": true,
-    "is_error": { "type": "boolean" }
+    "is_error": { "type": "boolean" },
+    "outcome": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "enum": ["ok", "error", "policy_denied", "approval_required", "cancelled"]
+        },
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean", "default": false },
+        "details": { "type": "object", "default": {} }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

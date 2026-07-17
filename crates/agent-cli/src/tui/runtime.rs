@@ -414,6 +414,7 @@ mod tests {
             input_schema: json!({"type": "object"}),
             output_schema: Some(json!({"type": "object"})),
             risk: ToolRisk::High,
+            replay_policy: agent_core::ToolReplayPolicy::AtMostOnce,
             metadata: json!({"source": "test"}),
         });
         let runtime = TuiRuntime::load(&options).await.expect("runtime loads");

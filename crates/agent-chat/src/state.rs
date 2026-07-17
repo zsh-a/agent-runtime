@@ -121,7 +121,7 @@ pub fn chat_turn_apply_tool_results(
             &call.id,
             ToolOutput {
                 value: result.output.clone(),
-                is_error: result.is_error,
+                is_error: result.effective_is_error(),
             },
         ));
     }

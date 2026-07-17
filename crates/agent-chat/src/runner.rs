@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use agent_core::{
     AgentCancellation, AgentServices, CancellationFuture, CancellationSignal, PROTOCOL_VERSION,
+    infer_tool_outcome,
 };
 use agent_llm::{LlmEventKind, LlmProvider, LlmResponse};
 use futures::stream;
@@ -528,6 +529,7 @@ async fn run_chat_state(
                     }
                 }
             };
+            let outcome = infer_tool_outcome(&output.value, output.is_error);
             send_event(
                 &sender,
                 ChatTurnEvent {
@@ -541,7 +543,10 @@ async fn run_chat_state(
                     tool_output: Some(output.value.clone()),
                     usage: None,
                     round,
-                    metadata: json!({"is_error": output.is_error}),
+                    metadata: json!({
+                        "is_error": outcome.is_error(),
+                        "outcome": &outcome,
+                    }),
                 },
             )
             .await;
@@ -549,7 +554,8 @@ async fn run_chat_state(
                 tool_call_id: tool_call.id,
                 tool_name: tool_call.name,
                 output: output.value,
-                is_error: output.is_error,
+                is_error: outcome.is_error(),
+                outcome: Some(outcome),
             });
         }
         state = match chat_turn_apply_tool_results(pending_state, results) {

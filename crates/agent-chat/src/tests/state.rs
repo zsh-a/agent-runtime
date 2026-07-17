@@ -1,5 +1,25 @@
 use super::*;
 
+#[test]
+fn legacy_nested_policy_denial_is_an_effective_chat_error() {
+    let result = ChatToolResult {
+        tool_call_id: "call_policy".to_owned(),
+        tool_name: "external_lookup".to_owned(),
+        output: json!({
+            "error": {"code": "policy_denied", "message": "blocked"},
+            "policy_denied": true
+        }),
+        is_error: false,
+        outcome: None,
+    };
+
+    assert!(result.effective_is_error());
+    assert_eq!(
+        result.effective_outcome().status,
+        agent_core::ToolOutcomeStatus::PolicyDenied
+    );
+}
+
 #[tokio::test]
 async fn chat_turn_resumes_from_state_and_tool_results() {
     let initial = chat_turn_initial_state(&ChatTurnRequest {
@@ -61,6 +81,7 @@ async fn chat_turn_resumes_from_state_and_tool_results() {
                 tool_name: "echo".to_owned(),
                 output: json!({"value": "ok"}),
                 is_error: false,
+                outcome: None,
             }],
         })
         .collect::<Vec<_>>()
@@ -143,6 +164,7 @@ fn chat_turn_state_applies_tool_results_for_resume() {
             tool_name: "echo".to_owned(),
             output: json!({"value": "ok"}),
             is_error: false,
+            outcome: None,
         }],
     )
     .expect("resume applies");

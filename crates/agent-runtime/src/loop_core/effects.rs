@@ -4,7 +4,7 @@ use agent_core::{
     AgentError, AgentRuntimeCatalog, EffectId, EmbeddedEffectKind, EmbeddedEffectResponse,
     EmbeddedEffectResult, EmbeddedHostEffect, EmbeddedPendingHostEffect, EmbeddedRunContinuation,
     EmbeddedRunState, EmbeddedRunStep, EmbeddedRunStepStatus, EmbeddedStepTraceEvent,
-    EmbeddedTerminalReason, RunId, protocol_version,
+    EmbeddedTerminalReason, RunId, ToolOutcomeStatus, protocol_version,
 };
 use serde_json::{Map, Value, json};
 
@@ -363,31 +363,41 @@ pub(super) fn effect_kind(effect: &EmbeddedHostEffect) -> EmbeddedEffectKind {
 pub(super) fn effect_response_terminal_status(
     response: &EmbeddedEffectResponse,
 ) -> Option<EmbeddedRunStepStatus> {
+    let outcome = response.effective_outcome();
     match effect_response_error_code(response).as_deref() {
         Some("effect_budget_exhausted" | "subagent_depth_exceeded") => {
             Some(EmbeddedRunStepStatus::ClosedEarly)
         }
-        Some("policy_denied") => Some(EmbeddedRunStepStatus::PolicyDenied),
+        Some("policy_denied" | "runtime_not_allowed") => Some(EmbeddedRunStepStatus::PolicyDenied),
         Some("user_cancel" | "user_cancelled" | "cancelled") => {
             Some(EmbeddedRunStepStatus::Cancelled)
         }
         Some("tool_timeout" | "timeout" | "timed_out") => Some(EmbeddedRunStepStatus::TimedOut),
-        Some(_) => Some(EmbeddedRunStepStatus::Failed),
-        None if effect_response_error_payload(response).is_some() => {
-            Some(EmbeddedRunStepStatus::Failed)
-        }
-        None => None,
+        Some(_) | None => match outcome.status {
+            ToolOutcomeStatus::Ok => None,
+            ToolOutcomeStatus::PolicyDenied | ToolOutcomeStatus::ApprovalRequired => {
+                Some(EmbeddedRunStepStatus::PolicyDenied)
+            }
+            ToolOutcomeStatus::Cancelled => Some(EmbeddedRunStepStatus::Cancelled),
+            ToolOutcomeStatus::Error => Some(EmbeddedRunStepStatus::Failed),
+        },
     }
 }
 
 fn effect_response_error_code(response: &EmbeddedEffectResponse) -> Option<String> {
     response
-        .error
+        .outcome
         .as_ref()
-        .and_then(|error| error.data.as_ref())
-        .and_then(|data| data.get("code"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+        .and_then(|outcome| outcome.code.clone())
+        .or_else(|| {
+            response
+                .error
+                .as_ref()
+                .and_then(|error| error.data.as_ref())
+                .and_then(|data| data.get("code"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
         .or_else(|| response.error.as_ref().map(|error| error.code.to_string()))
         .or_else(|| {
             response
@@ -409,6 +419,10 @@ fn effect_response_error_code(response: &EmbeddedEffectResponse) -> Option<Strin
 }
 
 pub(super) fn effect_response_error_payload(response: &EmbeddedEffectResponse) -> Option<Value> {
+    let outcome = response.effective_outcome();
+    if outcome.is_error() {
+        return serde_json::to_value(outcome).ok();
+    }
     if let Some(error) = &response.error {
         return serde_json::to_value(error).ok();
     }

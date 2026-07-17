@@ -81,6 +81,7 @@ impl EffectStepLoop {
                     }
                 })),
                 error: None,
+                outcome: None,
             },
             agent_id,
             false,
@@ -193,6 +194,7 @@ impl EffectStepLoop {
                 "snapshot": child_snapshot,
             })),
             error: None,
+            outcome: None,
         };
         parent.progress.dispatched_effect_count = child_progress.dispatched_effect_count;
         parent.progress.effect_budget_exhausted |= child_progress.effect_budget_exhausted;

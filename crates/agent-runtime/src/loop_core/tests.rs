@@ -1,7 +1,7 @@
 use agent_core::{
     AgentRuntimeCatalog, AgentSpec, EmbeddedEffectResponse, EmbeddedRunLimits, EmbeddedRunSnapshot,
-    EmbeddedRunStepStatus, EmbeddedTerminalReason, RunId, RunRequest, ScheduleSpec, ToolRisk,
-    ToolSpec, catalog_version, protocol_version,
+    EmbeddedRunStepStatus, EmbeddedTerminalReason, RunId, RunRequest, ScheduleSpec, ToolOutcome,
+    ToolOutcomeStatus, ToolReplayPolicy, ToolRisk, ToolSpec, catalog_version, protocol_version,
 };
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -42,6 +42,7 @@ fn catalog() -> AgentRuntimeCatalog {
             input_schema: json!({"type": "object"}),
             output_schema: None,
             risk: ToolRisk::ReadOnly,
+            replay_policy: ToolReplayPolicy::SafeRetry,
             metadata: json!({}),
         }],
         proposal_kinds: Vec::new(),
@@ -73,6 +74,7 @@ fn ok_response(snapshot: &EmbeddedRunSnapshot, value: Value) -> EmbeddedEffectRe
             .to_owned(),
         result: Some(value),
         error: None,
+        outcome: Some(ToolOutcome::ok()),
     }
 }
 
@@ -103,6 +105,30 @@ fn typed_snapshot_runs_tool_plan_to_completion() {
         terminal.step.run_state.terminal_reason,
         Some(EmbeddedTerminalReason::Done)
     );
+}
+
+#[test]
+fn successful_business_code_does_not_become_a_terminal_error() {
+    let catalog = catalog();
+    let snapshot = EffectStepLoop::start_snapshot(
+        &catalog,
+        request(
+            "run_business_code",
+            json!([{"kind": "tool", "name": "read_first", "input": {}}]),
+        ),
+        "parent",
+        EmbeddedRunLimits::default(),
+    )
+    .expect("snapshot starts");
+    let completed = EffectStepLoop::continue_snapshot(
+        &catalog,
+        snapshot.clone(),
+        ok_response(&snapshot, json!({"code": "USD", "value": 12})),
+        "parent",
+    )
+    .expect("business payload completes");
+
+    assert_eq!(completed.step.status, EmbeddedRunStepStatus::Completed);
 }
 
 #[test]
@@ -158,6 +184,83 @@ fn snapshot_cancellation_is_terminal_without_consuming_budget() {
             .expect("snapshot cancels");
     assert_eq!(cancelled.step.status, EmbeddedRunStepStatus::Cancelled);
     assert_eq!(cancelled.progress.dispatched_effect_count, 0);
+}
+
+#[test]
+fn legacy_nested_policy_denial_is_not_recorded_as_completed() {
+    let catalog = catalog();
+    let snapshot = EffectStepLoop::start_snapshot(
+        &catalog,
+        request(
+            "run_policy_denied",
+            json!([{"kind": "tool", "name": "read_first", "input": {}}]),
+        ),
+        "parent",
+        EmbeddedRunLimits::default(),
+    )
+    .expect("snapshot starts");
+    let denied = EffectStepLoop::continue_snapshot(
+        &catalog,
+        snapshot.clone(),
+        EmbeddedEffectResponse {
+            jsonrpc: "2.0".to_owned(),
+            id: snapshot.requested_effect().unwrap().effect_id().to_owned(),
+            result: Some(json!({
+                "error": {"code": "policy_denied", "message": "blocked"},
+                "policy_denied": true
+            })),
+            error: None,
+            outcome: None,
+        },
+        "parent",
+    )
+    .expect("legacy denial is classified");
+
+    assert_eq!(denied.step.status, EmbeddedRunStepStatus::PolicyDenied);
+    assert_eq!(
+        denied.step.run_state.terminal_reason,
+        Some(EmbeddedTerminalReason::PolicyDenied)
+    );
+}
+
+#[test]
+fn explicit_timeout_outcome_is_not_recorded_as_completed() {
+    let catalog = catalog();
+    let snapshot = EffectStepLoop::start_snapshot(
+        &catalog,
+        request(
+            "run_timeout",
+            json!([{"kind": "tool", "name": "read_first", "input": {}}]),
+        ),
+        "parent",
+        EmbeddedRunLimits::default(),
+    )
+    .expect("snapshot starts");
+    let timed_out = EffectStepLoop::continue_snapshot(
+        &catalog,
+        snapshot.clone(),
+        EmbeddedEffectResponse {
+            jsonrpc: "2.0".to_owned(),
+            id: snapshot.requested_effect().unwrap().effect_id().to_owned(),
+            result: Some(json!({"message": "host timed out"})),
+            error: None,
+            outcome: Some(ToolOutcome {
+                status: ToolOutcomeStatus::Error,
+                code: Some("tool_timeout".to_owned()),
+                message: Some("host timed out".to_owned()),
+                retryable: true,
+                details: json!({}),
+            }),
+        },
+        "parent",
+    )
+    .expect("timeout is classified");
+
+    assert_eq!(timed_out.step.status, EmbeddedRunStepStatus::TimedOut);
+    assert_ne!(
+        timed_out.step.trace_event.status,
+        EmbeddedRunStepStatus::Completed
+    );
 }
 
 #[test]

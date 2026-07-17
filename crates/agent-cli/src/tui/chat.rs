@@ -448,6 +448,7 @@ where
                     },
                 }),
                 is_error: true,
+                outcome: None,
             });
             continue;
         }
@@ -469,6 +470,7 @@ where
                 tool_name: call.name.clone(),
                 output,
                 is_error: false,
+                outcome: None,
             }),
             Err(error) => results.push(ChatToolResult {
                 tool_call_id: call.id.clone(),
@@ -480,6 +482,7 @@ where
                     "details": error.record.details,
                 }),
                 is_error: true,
+                outcome: None,
             }),
         }
     }
@@ -521,6 +524,7 @@ fn denied_chat_tool_results(tool_calls: &[ChatToolCall]) -> Vec<ChatToolResult> 
                 },
             }),
             is_error: true,
+            outcome: None,
         })
         .collect()
 }

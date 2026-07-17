@@ -222,6 +222,20 @@
             "data": true
           },
           "additionalProperties": true
+        },
+        "outcome": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": {
+              "enum": ["ok", "error", "policy_denied", "approval_required", "cancelled"]
+            },
+            "code": { "type": "string" },
+            "message": { "type": "string" },
+            "retryable": { "type": "boolean", "default": false },
+            "details": { "type": "object", "default": {} }
+          },
+          "additionalProperties": false
         }
       },
       "oneOf": [

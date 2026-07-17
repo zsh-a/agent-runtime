@@ -4,7 +4,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{RunId, RunScope, RunWorkflow, ToolRisk, protocol_version};
+use crate::{
+    RunId, RunScope, RunWorkflow, ToolOutcome, ToolRisk, infer_tool_outcome, protocol_version,
+};
 
 pub const EMBEDDED_SNAPSHOT_VERSION: u32 = 1;
 
@@ -232,6 +234,23 @@ pub struct EmbeddedEffectResponse {
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<EmbeddedEffectError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ToolOutcome>,
+}
+
+impl EmbeddedEffectResponse {
+    pub fn effective_outcome(&self) -> ToolOutcome {
+        if let Some(outcome) = &self.outcome {
+            return outcome.clone();
+        }
+        if let Some(error) = &self.error {
+            return infer_tool_outcome(
+                &serde_json::to_value(error).unwrap_or_else(|_| Value::Null),
+                true,
+            );
+        }
+        infer_tool_outcome(self.result.as_ref().unwrap_or(&Value::Null), false)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

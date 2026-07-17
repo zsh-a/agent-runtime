@@ -312,6 +312,11 @@ fn tool(name: &str, risk: ToolRisk) -> ToolSpec {
         description: format!("Synthetic {name} tool for chat agent capability E2E"),
         input_schema: json!({"type": "object"}),
         output_schema: None,
+        replay_policy: if risk == ToolRisk::ReadOnly {
+            agent_core::ToolReplayPolicy::SafeRetry
+        } else {
+            agent_core::ToolReplayPolicy::AtMostOnce
+        },
         risk,
         metadata: json!({"test_only": true}),
     }

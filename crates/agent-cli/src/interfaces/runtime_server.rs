@@ -270,6 +270,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
                 output_schema: None,
                 risk: agent_core::ToolRisk::High,
+                replay_policy: agent_core::ToolReplayPolicy::AtMostOnce,
                 metadata: json!({}),
             }],
             proposal_kinds: Vec::new(),
@@ -281,6 +282,7 @@ mod tests {
             input_schema: json!({}),
             output_schema: None,
             risk: agent_core::ToolRisk::ReadOnly,
+            replay_policy: agent_core::ToolReplayPolicy::SafeRetry,
             metadata: json!({}),
         };
 
@@ -296,6 +298,7 @@ mod tests {
                     input_schema: json!({}),
                     output_schema: None,
                     risk: agent_core::ToolRisk::ReadOnly,
+                    replay_policy: agent_core::ToolReplayPolicy::SafeRetry,
                     metadata: json!({}),
                 }],
             )

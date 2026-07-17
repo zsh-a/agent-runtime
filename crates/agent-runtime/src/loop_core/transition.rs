@@ -80,6 +80,7 @@ pub(super) fn close_snapshot_at_limits(
                 }
             })),
             error: None,
+            outcome: None,
         },
         agent_id,
     )?;

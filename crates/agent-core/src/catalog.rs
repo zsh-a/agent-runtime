@@ -4,7 +4,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::{
-    AgentSpec, ProposalKindSpec, protocol_version, validate_catalog_version,
+    AgentSpec, ProposalKindSpec, ToolReplayPolicy, protocol_version, validate_catalog_version,
     validate_protocol_version,
 };
 
@@ -16,6 +16,8 @@ pub struct ToolSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
     pub risk: ToolRisk,
+    #[serde(default)]
+    pub replay_policy: ToolReplayPolicy,
     #[serde(default)]
     pub metadata: Value,
 }

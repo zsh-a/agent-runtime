@@ -390,6 +390,7 @@ async fn anthropic_provider_preserves_multimodal_content_tools_and_raw_blocks() 
                 }),
                 output_schema: None,
                 risk: agent_core::ToolRisk::ReadOnly,
+                replay_policy: agent_core::ToolReplayPolicy::SafeRetry,
                 metadata: json!({}),
             }],
             response_format: None,

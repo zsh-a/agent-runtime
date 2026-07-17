@@ -334,6 +334,7 @@ fn strict_tool_spec(output_schema: Option<Value>) -> ToolSpec {
         }),
         output_schema,
         risk: ToolRisk::ReadOnly,
+        replay_policy: agent_core::ToolReplayPolicy::SafeRetry,
         metadata: json!({}),
     }
 }
