@@ -60,6 +60,34 @@
                 "enum": ["completed", "requires_tool_results"]
               },
               "chat_state": { "$ref": "#/$defs/chat_turn_state" },
+              "chat_snapshot": {
+                "type": "object",
+                "required": [
+                  "protocol_version",
+                  "snapshot_version",
+                  "status",
+                  "state",
+                  "tool_dispatches"
+                ],
+                "properties": {
+                  "protocol_version": { "const": "agent.v1" },
+                  "snapshot_version": { "const": 1 },
+                  "status": {
+                    "enum": [
+                      "ready_for_model",
+                      "requires_tool_results",
+                      "completed",
+                      "cancelled",
+                      "failed"
+                    ]
+                  },
+                  "state": { "$ref": "#/$defs/chat_turn_state" },
+                  "tool_dispatches": { "type": "array" },
+                  "stop_reason": { "type": "string" },
+                  "error": true
+                },
+                "additionalProperties": false
+              },
               "tool_calls": {
                 "type": "array",
                 "items": { "$ref": "#/$defs/chat_tool_call" }

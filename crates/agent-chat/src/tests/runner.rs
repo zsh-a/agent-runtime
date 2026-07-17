@@ -64,6 +64,18 @@ async fn mock_chat_turn_streams_text_and_done() {
             .count(),
         1
     );
+    let round_finished = events
+        .iter()
+        .find(|event| event.kind == ChatTurnEventKind::RoundFinished)
+        .expect("round finished");
+    assert_eq!(
+        round_finished.metadata["chat_snapshot"]["snapshot_version"],
+        1
+    );
+    assert_eq!(
+        round_finished.metadata["chat_snapshot"]["status"],
+        "completed"
+    );
 }
 
 #[tokio::test]

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-runtime.local/schemas/chat-turn-snapshot.schema.json",
+  "title": "ChatTurnSnapshot",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "snapshot_version",
+    "status",
+    "state",
+    "tool_dispatches"
+  ],
+  "properties": {
+    "protocol_version": { "const": "agent.v1" },
+    "snapshot_version": { "const": 1 },
+    "status": {
+      "enum": [
+        "ready_for_model",
+        "requires_tool_results",
+        "completed",
+        "cancelled",
+        "failed"
+      ]
+    },
+    "state": {
+      "type": "object",
+      "required": ["protocol_version", "provider", "model", "messages"],
+      "properties": {
+        "protocol_version": { "const": "agent.v1" },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "messages": { "type": "array", "minItems": 1 },
+        "tools": { "type": "array" },
+        "round": { "type": "integer", "minimum": 0 },
+        "pending_tool_calls": { "type": "array" }
+      },
+      "additionalProperties": true
+    },
+    "tool_dispatches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["call", "replay_policy", "status"],
+        "properties": {
+          "call": {
+            "type": "object",
+            "required": ["id", "name", "input"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "name": { "type": "string", "minLength": 1 },
+              "input": true
+            },
+            "additionalProperties": false
+          },
+          "replay_policy": {
+            "enum": ["safe_retry", "idempotent", "at_most_once"]
+          },
+          "status": {
+            "enum": ["pending", "dispatching", "completed", "interrupted"]
+          },
+          "result": { "type": "object" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "completed" } } },
+            "then": { "required": ["result"] },
+            "else": { "not": { "required": ["result"] } }
+          }
+        ],
+        "additionalProperties": false
+      }
+    },
+    "stop_reason": { "type": "string" },
+    "error": true
+  },
+  "additionalProperties": false
+}

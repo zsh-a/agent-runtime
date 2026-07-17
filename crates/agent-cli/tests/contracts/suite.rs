@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use agent_chat::{
-    ChatResumeRequest, ChatToolResult, ChatTurnEvent, ChatTurnRequest, ChatTurnState,
+    ChatResumeRequest, ChatToolResult, ChatTurnEvent, ChatTurnRequest, ChatTurnSnapshot,
+    ChatTurnState,
 };
 use agent_core::{
     AgentRunResult, AgentRuntimeCatalog, AgentSpec, AgentTrace, ApprovalDecision, HookEvent,
@@ -203,6 +204,10 @@ fn committed_fixtures_match_json_schemas() {
         "fixtures/contracts/chat-tool-result.valid.json",
     );
     assert_valid(
+        "schemas/chat-turn-snapshot.schema.json",
+        "fixtures/contracts/chat-turn-snapshot.requires-tool-results.valid.json",
+    );
+    assert_valid(
         "schemas/chat-turn-event.schema.json",
         "fixtures/contracts/chat-turn-event.round-finished.requires-tool-results.valid.json",
     );
@@ -251,6 +256,9 @@ fn committed_valid_fixtures_deserialize_to_runtime_types() {
         "fixtures/contracts/chat-turn-state.requires-tool-results.valid.json",
     );
     assert_deserializes::<ChatToolResult>("fixtures/contracts/chat-tool-result.valid.json");
+    assert_deserializes::<ChatTurnSnapshot>(
+        "fixtures/contracts/chat-turn-snapshot.requires-tool-results.valid.json",
+    );
     assert_deserializes::<ChatTurnEvent>(
         "fixtures/contracts/chat-turn-event.round-finished.requires-tool-results.valid.json",
     );

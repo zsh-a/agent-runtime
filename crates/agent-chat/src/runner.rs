@@ -13,10 +13,10 @@ use tracing::{debug, info, warn};
 
 use crate::{
     ChatError, ChatEventStream, ChatResumeRequest, ChatToolCall, ChatToolExecution, ChatToolResult,
-    ChatTurnAdvance, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnState, ToolOutput,
-    chat_event_from_llm_event, chat_turn_apply_response, chat_turn_apply_tool_results,
-    chat_turn_initial_state, chat_turn_next_round, chat_turn_prepare_llm_request, send_done,
-    send_error, send_event, turn_metadata,
+    ChatTurnAdvance, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnSnapshot,
+    ChatTurnState, ToolOutput, chat_event_from_llm_event, chat_turn_apply_response,
+    chat_turn_apply_tool_results, chat_turn_initial_state, chat_turn_next_round,
+    chat_turn_prepare_llm_request, send_done, send_error, send_event, turn_metadata,
 };
 
 #[derive(Clone)]
@@ -638,6 +638,11 @@ async fn send_round_finished(
     state: &ChatTurnState,
     tool_calls: &[ChatToolCall],
 ) {
+    let chat_snapshot = if status == "requires_tool_results" {
+        ChatTurnSnapshot::requires_tool_results(state.clone())
+    } else {
+        ChatTurnSnapshot::completed(state.clone(), finish_reason_label(&response.finish_reason))
+    };
     send_event(
         sender,
         ChatTurnEvent {
@@ -654,6 +659,7 @@ async fn send_round_finished(
             metadata: json!({
                 "status": status,
                 "chat_state": state,
+                "chat_snapshot": chat_snapshot,
                 "tool_calls": tool_calls,
                 "finish_reason": response.finish_reason,
                 "context_snapshot": state.context_snapshot.clone(),
@@ -662,6 +668,16 @@ async fn send_round_finished(
         },
     )
     .await;
+}
+
+fn finish_reason_label(reason: &agent_llm::LlmFinishReason) -> &'static str {
+    match reason {
+        agent_llm::LlmFinishReason::Stop => "end_turn",
+        agent_llm::LlmFinishReason::Length => "max_tokens",
+        agent_llm::LlmFinishReason::ToolCall => "tool_use",
+        agent_llm::LlmFinishReason::ContentFilter => "content_filter",
+        agent_llm::LlmFinishReason::Error => "error",
+    }
 }
 
 async fn send_cancelled(

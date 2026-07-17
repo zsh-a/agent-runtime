@@ -1,0 +1,53 @@
+{
+  "protocol_version": "agent.v1",
+  "snapshot_version": 1,
+  "status": "requires_tool_results",
+  "state": {
+    "protocol_version": "agent.v1",
+    "turn_id": "turn_snapshot_1",
+    "surface": "ai_chat",
+    "mode": "chat",
+    "agent_id": "ai_chat",
+    "provider": "mock",
+    "model": "mock-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read task",
+        "metadata": {}
+      }
+    ],
+    "tools": [
+      {
+        "name": "read_task",
+        "description": "Read a task",
+        "input_schema": { "type": "object" },
+        "risk": "read_only",
+        "replay_policy": "safe_retry",
+        "metadata": {}
+      }
+    ],
+    "metadata": {},
+    "max_tool_rounds": 4,
+    "round": 1,
+    "pending_tool_calls": [
+      {
+        "id": "call_1",
+        "name": "read_task",
+        "input": { "id": "task_1" }
+      }
+    ],
+    "tool_execution": "client"
+  },
+  "tool_dispatches": [
+    {
+      "call": {
+        "id": "call_1",
+        "name": "read_task",
+        "input": { "id": "task_1" }
+      },
+      "replay_policy": "safe_retry",
+      "status": "pending"
+    }
+  ]
+}
