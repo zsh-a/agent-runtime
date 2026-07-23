@@ -3,15 +3,16 @@
   "$id": "https://agent-runtime.local/schemas/chat-resume-request.schema.json",
   "title": "ChatResumeRequest",
   "type": "object",
-  "required": ["protocol_version", "state", "tool_results"],
+  "required": ["protocol_version", "state"],
   "properties": {
     "protocol_version": { "const": "agent.v1" },
     "state": { "$ref": "#/$defs/chat_turn_state" },
     "tool_results": {
       "type": "array",
-      "minItems": 1,
-      "items": { "$ref": "#/$defs/chat_tool_result" }
-    }
+      "items": { "$ref": "#/$defs/chat_tool_result" },
+      "default": []
+    },
+    "interaction_response": { "type": ["object", "null"] }
   },
   "additionalProperties": false,
   "$defs": {
@@ -119,6 +120,11 @@
           "items": { "$ref": "#/$defs/tool_spec" },
           "default": []
         },
+        "context_blocks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/context_block" },
+          "default": []
+        },
         "metadata": { "type": "object", "default": {} },
         "context_policy": {
           "$ref": "#/$defs/context_policy",
@@ -141,6 +147,9 @@
           "type": "array",
           "items": { "$ref": "#/$defs/chat_tool_call" },
           "default": []
+        },
+        "pending_interaction": {
+          "type": ["object", "null"]
         },
         "tool_execution": {
           "type": "string",

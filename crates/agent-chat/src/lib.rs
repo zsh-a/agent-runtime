@@ -13,8 +13,9 @@ pub use snapshot::{
     ChatTurnSnapshotStatus,
 };
 pub use state::{
-    chat_turn_apply_response, chat_turn_apply_tool_results, chat_turn_initial_state,
-    chat_turn_llm_request, chat_turn_next_round, chat_turn_prepare_llm_request,
+    chat_turn_apply_interaction_response, chat_turn_apply_response, chat_turn_apply_tool_results,
+    chat_turn_initial_state, chat_turn_llm_request, chat_turn_next_round,
+    chat_turn_prepare_llm_request, chat_turn_resume_state, chat_turn_suspend_for_interaction,
 };
 pub use types::{
     ChatEventStream, ChatResumeRequest, ChatToolCall, ChatToolExecution, ChatToolResult,

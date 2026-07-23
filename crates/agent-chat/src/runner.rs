@@ -16,7 +16,8 @@ use crate::{
     ChatTurnAdvance, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnSnapshot,
     ChatTurnState, ToolOutput, chat_event_from_llm_event, chat_turn_apply_response,
     chat_turn_apply_tool_results, chat_turn_initial_state, chat_turn_next_round,
-    chat_turn_prepare_llm_request, send_done, send_error, send_event, turn_metadata,
+    chat_turn_prepare_llm_request, chat_turn_resume_state, send_done, send_error, send_event,
+    turn_metadata,
 };
 
 #[derive(Clone)]
@@ -158,6 +159,7 @@ async fn run_chat_resume(
     }
     let turn_timer = std::time::Instant::now();
     let pending_calls = request.state.pending_tool_calls.clone();
+    let pending_interaction = request.state.pending_interaction.clone();
     let previous_round = request.state.round;
     info!(
         turn_id = request.state.turn_id.as_deref().unwrap_or("none"),
@@ -170,7 +172,11 @@ async fn run_chat_resume(
         tool_result_count = request.tool_results.len(),
         "resuming chat turn",
     );
-    let state = match chat_turn_apply_tool_results(request.state, request.tool_results.clone()) {
+    let state = match chat_turn_resume_state(
+        request.state,
+        request.tool_results.clone(),
+        request.interaction_response.clone(),
+    ) {
         Ok(state) => state,
         Err(error) => {
             warn!(
@@ -200,6 +206,29 @@ async fn run_chat_resume(
         },
     )
     .await;
+    if let Some(interaction) = pending_interaction {
+        send_event(
+            &sender,
+            ChatTurnEvent {
+                kind: ChatTurnEventKind::InteractionResolved,
+                content: None,
+                response: None,
+                tool_call_id: None,
+                tool_name: None,
+                partial_input_json: None,
+                tool_input: None,
+                tool_output: None,
+                usage: None,
+                round: state.round,
+                metadata: json!({
+                    "interaction_id": interaction.interaction_id,
+                    "interaction_kind": interaction.kind,
+                    "resumed": true,
+                }),
+            },
+        )
+        .await;
+    }
     for call in pending_calls {
         if let Some(result) = request
             .tool_results

@@ -139,6 +139,28 @@ pub(super) fn updates_from_chat_event(
         ChatTurnEventKind::ContextSnapshot => {
             push_context_status_updates(event, &mut updates);
         }
+        ChatTurnEventKind::InteractionRequired | ChatTurnEventKind::InteractionResolved => {
+            let interaction_id = event
+                .metadata
+                .get("interaction_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let interaction_kind = event
+                .metadata
+                .get("interaction_kind")
+                .and_then(Value::as_str)
+                .unwrap_or("interaction");
+            let label = if event.kind == ChatTurnEventKind::InteractionRequired {
+                "interaction required"
+            } else {
+                "interaction resolved"
+            };
+            updates.push(TuiUpdate::Activity(TuiActivityItem::with_detail(
+                TuiActivityKind::Chat,
+                label,
+                format!("{interaction_kind} {interaction_id}"),
+            )));
+        }
         ChatTurnEventKind::RoundFinished => {
             push_context_status_updates(event, &mut updates);
             if let Some(response) = &event.response {

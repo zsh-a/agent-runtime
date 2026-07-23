@@ -19,6 +19,8 @@
         "tool_result",
         "usage",
         "context_snapshot",
+        "interaction_required",
+        "interaction_resolved",
         "round_finished",
         "error",
         "done"
@@ -316,6 +318,9 @@
           "type": "array",
           "items": { "$ref": "#/$defs/chat_tool_call" },
           "default": []
+        },
+        "pending_interaction": {
+          "type": ["object", "null"]
         },
         "tool_execution": {
           "type": "string",

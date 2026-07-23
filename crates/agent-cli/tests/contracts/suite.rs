@@ -6,8 +6,8 @@ use agent_chat::{
 };
 use agent_core::{
     AgentRunResult, AgentRuntimeCatalog, AgentSpec, AgentTrace, ApprovalDecision, HookEvent,
-    HookSpec, PromptManifest, ProposalEnvelope, RunRequest, SessionRecord, StepRecord,
-    ThreadRecord, WorkflowRunRequest, WorkflowRunResult,
+    HookSpec, InteractionEnvelope, InteractionResponse, PromptManifest, ProposalEnvelope,
+    RunRequest, SessionRecord, StepRecord, ThreadRecord, WorkflowRunRequest, WorkflowRunResult,
 };
 use agent_llm::{LlmRequest, LlmResponse};
 use agent_runtime::RecoveryReport;
@@ -164,6 +164,14 @@ fn committed_fixtures_match_json_schemas() {
         "fixtures/contracts/proposal-envelope.valid.json",
     );
     assert_valid(
+        "schemas/interaction-envelope.schema.json",
+        "fixtures/contracts/interaction-envelope.valid.json",
+    );
+    assert_valid(
+        "schemas/interaction-response.schema.json",
+        "fixtures/contracts/interaction-response.valid.json",
+    );
+    assert_valid(
         "schemas/approval-decision.schema.json",
         "fixtures/contracts/approval-decision.valid.json",
     );
@@ -190,6 +198,10 @@ fn committed_fixtures_match_json_schemas() {
     assert_valid(
         "schemas/chat-resume-request.schema.json",
         "fixtures/contracts/chat-resume-request.valid.json",
+    );
+    assert_valid(
+        "schemas/chat-resume-request.schema.json",
+        "fixtures/contracts/chat-resume-request.interaction.valid.json",
     );
     assert_invalid(
         "schemas/chat-turn-request.schema.json",
@@ -245,6 +257,12 @@ fn committed_valid_fixtures_deserialize_to_runtime_types() {
     assert_deserializes::<HookEvent>("fixtures/contracts/hook-event.valid.json");
     assert_deserializes::<HookSpec>("fixtures/contracts/hook-spec.valid.json");
     assert_deserializes::<ProposalEnvelope>("fixtures/contracts/proposal-envelope.valid.json");
+    assert_deserializes::<InteractionEnvelope>(
+        "fixtures/contracts/interaction-envelope.valid.json",
+    );
+    assert_deserializes::<InteractionResponse>(
+        "fixtures/contracts/interaction-response.valid.json",
+    );
     assert_deserializes::<ApprovalDecision>("fixtures/contracts/approval-decision.valid.json");
     assert_deserializes::<LlmRequest>("fixtures/contracts/llm-request.valid.json");
     assert_deserializes::<LlmRequest>("fixtures/contracts/llm-request.structured.valid.json");
@@ -252,6 +270,9 @@ fn committed_valid_fixtures_deserialize_to_runtime_types() {
     assert_deserializes::<LlmResponse>("fixtures/contracts/llm-response.structured.valid.json");
     assert_deserializes::<ChatTurnRequest>("fixtures/contracts/chat-turn-request.valid.json");
     assert_deserializes::<ChatResumeRequest>("fixtures/contracts/chat-resume-request.valid.json");
+    assert_deserializes::<ChatResumeRequest>(
+        "fixtures/contracts/chat-resume-request.interaction.valid.json",
+    );
     assert_deserializes::<ChatTurnState>(
         "fixtures/contracts/chat-turn-state.requires-tool-results.valid.json",
     );

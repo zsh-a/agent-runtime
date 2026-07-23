@@ -1,0 +1,9 @@
+{
+  "protocol_version": "agent.v1",
+  "interaction_id": "interaction_1",
+  "action": "submit",
+  "value": { "option_id": "safe" },
+  "responded_by": "user-1",
+  "responded_at": "2026-07-23T10:01:00Z",
+  "metadata": {}
+}

@@ -54,6 +54,16 @@ impl ProposalId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
+pub struct InteractionId(pub String);
+
+impl InteractionId {
+    pub fn new_v7() -> Self {
+        Self(format!("interaction_{}", Uuid::now_v7()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
 pub struct EffectId(pub String);
 
 impl EffectId {

@@ -34,6 +34,11 @@
       "items": { "$ref": "#/$defs/tool_spec" },
       "default": []
     },
+    "context_blocks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/context_block" },
+      "default": []
+    },
     "metadata": { "type": "object", "default": {} },
     "context_policy": {
       "$ref": "#/$defs/context_policy",
@@ -56,6 +61,9 @@
       "type": "array",
       "items": { "$ref": "#/$defs/chat_tool_call" },
       "default": []
+    },
+    "pending_interaction": {
+      "type": ["object", "null"]
     },
     "tool_execution": {
       "type": "string",

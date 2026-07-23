@@ -92,6 +92,7 @@ fn test_chat_state() -> ChatTurnState {
         temperature: None,
         max_output_tokens: None,
         tools: Vec::new(),
+        context_blocks: Vec::new(),
         metadata: json!({}),
         context_policy: Default::default(),
         max_tool_rounds: 4,

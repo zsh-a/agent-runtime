@@ -4,6 +4,7 @@ pub mod embedded;
 pub mod errors;
 pub mod hooks;
 pub mod ids;
+pub mod interaction;
 pub mod proposal;
 pub mod run;
 pub mod services;
@@ -27,7 +28,14 @@ pub use embedded::{
 };
 pub use errors::{AgentError, AgentErrorKind, AgentErrorRecord, StoreError, ToolError};
 pub use hooks::{HookEffect, HookSpec, PolicyDecision, PolicyDecisionKind};
-pub use ids::{EffectId, ProposalId, RunId, SessionId, StepId, ThreadId, ToolCallId};
+pub use ids::{
+    EffectId, InteractionId, ProposalId, RunId, SessionId, StepId, ThreadId, ToolCallId,
+};
+pub use interaction::{
+    InteractionAction, InteractionConfirmation, InteractionEnvelope, InteractionKind,
+    InteractionMode, InteractionOption, InteractionResponse, InteractionResume,
+    InteractionResumeKind, InteractionStatus, InteractionSubject,
+};
 pub use proposal::{
     ApprovalDecision, ApprovalDecisionKind, ApprovalLevel, ProposalApprovalPolicy, ProposalDiff,
     ProposalDiffOperation, ProposalEnvelope, ProposalKindSpec, ProposalStatus, ProposalWarning,

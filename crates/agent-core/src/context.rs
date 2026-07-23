@@ -28,6 +28,11 @@ pub struct ContextBlock {
     pub priority: i32,
     #[serde(default)]
     pub token_estimate: u32,
+    /// Optional host-side hash. Runtime context planners must recompute this
+    /// from [content] before using the block in a persisted snapshot; the
+    /// default keeps host adapters from having to implement the runtime's hash
+    /// algorithm.
+    #[serde(default)]
     pub content_hash: String,
     #[serde(default)]
     pub content: Value,

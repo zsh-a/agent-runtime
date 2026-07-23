@@ -26,6 +26,11 @@
       "items": { "$ref": "#/$defs/tool_spec" },
       "default": []
     },
+    "context_blocks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/context_block" },
+      "default": []
+    },
     "metadata": { "type": "object", "default": {} },
     "context_policy": {
       "$ref": "#/$defs/context_policy",
@@ -93,6 +98,34 @@
         "reserve_output_tokens": { "type": "integer", "minimum": 0 },
         "preserve_recent_messages": { "type": "integer", "minimum": 0 },
         "compact_when_over_budget": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "context_block": {
+      "type": "object",
+      "required": ["block_id", "kind", "source", "content_hash"],
+      "properties": {
+        "block_id": { "type": "string", "minLength": 1 },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "runtime_instructions",
+            "agent_instructions",
+            "command_instructions",
+            "memory",
+            "compaction_summary",
+            "message",
+            "tool_schema",
+            "resource",
+            "metadata"
+          ]
+        },
+        "source": { "type": "string", "minLength": 1 },
+        "priority": { "type": "integer", "default": 0 },
+        "token_estimate": { "type": "integer", "minimum": 0, "default": 0 },
+        "content_hash": { "type": "string", "minLength": 1 },
+        "content": true,
+        "metadata": { "type": "object", "default": {} }
       },
       "additionalProperties": false
     }

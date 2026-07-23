@@ -1,8 +1,8 @@
 use std::pin::Pin;
 
 use agent_core::{
-    CompactionRecord, ContextPolicy, ContextSnapshot, PROTOCOL_VERSION, ToolOutcome, ToolSpec,
-    infer_tool_outcome,
+    CompactionRecord, ContextBlock, ContextPolicy, ContextSnapshot, InteractionEnvelope,
+    InteractionResponse, PROTOCOL_VERSION, ToolOutcome, ToolSpec, infer_tool_outcome,
 };
 use agent_llm::{LlmMessage, LlmResponse, LlmUsage};
 use futures::Stream;
@@ -38,6 +38,11 @@ pub struct ChatTurnRequest {
     pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub tools: Vec<ToolSpec>,
+    /// Host-provided context that is independent from the conversational
+    /// transcript. The runtime validates, budgets, snapshots, and renders
+    /// these blocks; hosts retain ownership of retrieval and business policy.
+    #[serde(default)]
+    pub context_blocks: Vec<ContextBlock>,
     #[serde(default)]
     pub metadata: Value,
     #[serde(default)]
@@ -74,6 +79,8 @@ pub struct ChatTurnState {
     #[serde(default)]
     pub tools: Vec<ToolSpec>,
     #[serde(default)]
+    pub context_blocks: Vec<ContextBlock>,
+    #[serde(default)]
     pub metadata: Value,
     #[serde(default)]
     pub context_policy: ContextPolicy,
@@ -87,6 +94,10 @@ pub struct ChatTurnState {
     pub round: u32,
     #[serde(default)]
     pub pending_tool_calls: Vec<ChatToolCall>,
+    /// A durable human-in-the-loop boundary. It is mutually exclusive with
+    /// pending tool calls and is resolved through [ChatResumeRequest].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_interaction: Option<InteractionEnvelope>,
     #[serde(default)]
     pub tool_execution: ChatToolExecution,
 }
@@ -137,6 +148,8 @@ pub struct ChatResumeRequest {
     pub state: ChatTurnState,
     #[serde(default)]
     pub tool_results: Vec<ChatToolResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_response: Option<InteractionResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -190,6 +203,8 @@ pub enum ChatTurnEventKind {
     ToolResult,
     Usage,
     ContextSnapshot,
+    InteractionRequired,
+    InteractionResolved,
     RoundFinished,
     Error,
     Done,

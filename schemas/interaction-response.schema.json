@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-runtime.local/schemas/interaction-response.schema.json",
+  "title": "InteractionResponse",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "interaction_id",
+    "action",
+    "value",
+    "responded_at",
+    "metadata"
+  ],
+  "properties": {
+    "protocol_version": { "const": "agent.v1" },
+    "interaction_id": { "type": "string", "minLength": 1 },
+    "action": { "enum": ["submit", "approve", "reject", "cancel"] },
+    "value": true,
+    "confirmation_text": { "type": ["string", "null"] },
+    "responded_by": { "type": ["string", "null"], "minLength": 1 },
+    "responded_at": { "type": "string", "format": "date-time" },
+    "metadata": { "type": "object", "default": {} }
+  },
+  "additionalProperties": false
+}

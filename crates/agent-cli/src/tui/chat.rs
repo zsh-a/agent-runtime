@@ -139,6 +139,7 @@ where
             protocol_version: PROTOCOL_VERSION.to_owned(),
             state: chat_state,
             tool_results,
+            interaction_response: None,
         },
         cancellation.clone(),
     );
@@ -230,6 +231,7 @@ fn chat_turn_request(
         temperature: options.chat.temperature,
         max_output_tokens: options.chat.max_output_tokens,
         tools: runtime.chat_tools(),
+        context_blocks: Vec::new(),
         metadata: json!({
             "source": "agent_tui",
             "surface": "agent_tui",
@@ -325,6 +327,7 @@ where
                 protocol_version: PROTOCOL_VERSION.to_owned(),
                 state: pending_resume.state,
                 tool_results,
+                interaction_response: None,
             },
             cancellation.clone(),
         );
@@ -632,6 +635,7 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             tools: Vec::new(),
+            context_blocks: Vec::new(),
             metadata: json!({}),
             context_policy: Default::default(),
             max_tool_rounds: 4,

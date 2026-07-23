@@ -42,6 +42,7 @@ async fn chat_runner_executes_multiround_tools_and_memory_as_independent_e2e() {
             temperature: Some(0.0),
             max_output_tokens: Some(512),
             tools: capability_tools(),
+            context_blocks: vec![],
             metadata: json!({"case": "chat_agent_capabilities_e2e"}),
             context_policy: Default::default(),
             max_tool_rounds: 5,

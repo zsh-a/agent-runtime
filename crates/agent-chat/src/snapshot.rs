@@ -14,6 +14,7 @@ pub const CHAT_TURN_SNAPSHOT_VERSION: u32 = 1;
 pub enum ChatTurnSnapshotStatus {
     ReadyForModel,
     RequiresToolResults,
+    RequiresInteraction,
     Completed,
     Cancelled,
     Failed,
@@ -115,6 +116,18 @@ impl ChatTurnSnapshot {
         }
     }
 
+    pub fn requires_interaction(state: ChatTurnState) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            snapshot_version: CHAT_TURN_SNAPSHOT_VERSION,
+            status: ChatTurnSnapshotStatus::RequiresInteraction,
+            state,
+            tool_dispatches: Vec::new(),
+            stop_reason: None,
+            error: None,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ChatError> {
         if self.protocol_version != PROTOCOL_VERSION
             || self.state.protocol_version != PROTOCOL_VERSION
@@ -177,16 +190,32 @@ impl ChatTurnSnapshot {
         }
         match self.status {
             ChatTurnSnapshotStatus::RequiresToolResults => {
-                if pending_ids.is_empty() || pending_ids != dispatch_ids {
+                if self.state.pending_interaction.is_some()
+                    || pending_ids.is_empty()
+                    || pending_ids != dispatch_ids
+                {
                     return Err(ChatError::validation(
                         "chat snapshot tool journal must match pending tool calls",
                     ));
                 }
             }
-            ChatTurnSnapshotStatus::ReadyForModel | ChatTurnSnapshotStatus::Completed => {
-                if !self.state.pending_tool_calls.is_empty() || !self.tool_dispatches.is_empty() {
+            ChatTurnSnapshotStatus::RequiresInteraction => {
+                if self.state.pending_interaction.is_none()
+                    || !self.state.pending_tool_calls.is_empty()
+                    || !self.tool_dispatches.is_empty()
+                {
                     return Err(ChatError::validation(
-                        "non-tool chat snapshot cannot retain pending tool calls",
+                        "interaction snapshot must contain exactly one pending interaction",
+                    ));
+                }
+            }
+            ChatTurnSnapshotStatus::ReadyForModel | ChatTurnSnapshotStatus::Completed => {
+                if self.state.pending_interaction.is_some()
+                    || !self.state.pending_tool_calls.is_empty()
+                    || !self.tool_dispatches.is_empty()
+                {
+                    return Err(ChatError::validation(
+                        "ready/completed chat snapshot cannot retain pending work",
                     ));
                 }
             }
@@ -228,6 +257,7 @@ mod tests {
                 replay_policy,
                 metadata: json!({}),
             }],
+            context_blocks: vec![],
             metadata: json!({}),
             context_policy: Default::default(),
             max_tool_rounds: 4,

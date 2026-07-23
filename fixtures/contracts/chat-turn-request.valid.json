@@ -27,6 +27,23 @@
       "metadata": {}
     }
   ],
+  "context_blocks": [
+    {
+      "block_id": "memory_preference_1",
+      "kind": "memory",
+      "source": "host.memory",
+      "priority": 80,
+      "token_estimate": 0,
+      "content_hash": "host-recomputed",
+      "content": {
+        "statement": "User prefers concise answers",
+        "authority": "user_confirmed"
+      },
+      "metadata": {
+        "trusted_as_instruction": false
+      }
+    }
+  ],
   "metadata": {
     "source": "contract_test"
   },
