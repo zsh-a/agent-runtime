@@ -183,7 +183,11 @@ struct PersistedRunEventStreamState {
     run_id: RunId,
     cursor: RunEventCursor,
     pending: VecDeque<RunEventRecord>,
+    terminal_event_seen: bool,
+    terminal_empty_polls: u8,
 }
+
+const PERSISTED_RUN_TERMINAL_GRACE_POLLS: u8 = 20;
 
 pub(super) fn persisted_run_event_stream(
     server: RuntimeServer,
@@ -196,12 +200,18 @@ pub(super) fn persisted_run_event_stream(
             run_id,
             cursor: after,
             pending: VecDeque::new(),
+            terminal_event_seen: false,
+            terminal_empty_polls: 0,
         },
         |mut state| async move {
             loop {
                 if let Some(record) = state.pending.pop_front() {
                     state.cursor = record.cursor;
+                    state.terminal_event_seen |= record.event.kind == "run_finished";
                     return Some((Ok(trace_event_sse(record.cursor, record.event)), state));
+                }
+                if state.terminal_event_seen {
+                    return None;
                 }
 
                 match state
@@ -211,6 +221,7 @@ pub(super) fn persisted_run_event_stream(
                 {
                     Ok(Some(records)) if !records.is_empty() => {
                         state.pending.extend(records);
+                        state.terminal_empty_polls = 0;
                         continue;
                     }
                     Ok(_) => {}
@@ -225,7 +236,17 @@ pub(super) fn persisted_run_event_stream(
                 }
 
                 match state.server.get_run(state.run_id.clone()).await {
-                    Ok(run) if run.status != AgentRunStatus::Running => return None,
+                    Ok(run) if run.status != AgentRunStatus::Running => {
+                        state.terminal_empty_polls = state.terminal_empty_polls.saturating_add(1);
+                        if state.terminal_empty_polls >= PERSISTED_RUN_TERMINAL_GRACE_POLLS {
+                            warn!(
+                                run_id = %state.run_id.0,
+                                cursor = state.cursor,
+                                "closing persisted run event stream without run_finished after terminal grace period",
+                            );
+                            return None;
+                        }
+                    }
                     Ok(_) => {}
                     Err(error) => {
                         warn!(
