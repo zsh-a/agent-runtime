@@ -11,12 +11,67 @@ pub enum ContextBlockKind {
     RuntimeInstructions,
     AgentInstructions,
     CommandInstructions,
+    Profile,
     Memory,
     CompactionSummary,
     Message,
     ToolSchema,
     Resource,
     Metadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceAuthority {
+    UserConfirmed,
+    SourceFact,
+    DeterministicDerived,
+    ModelDerived,
+    LegacyUnknown,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct EvidenceProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub algorithm_version: Option<String>,
+    #[schemars(with = "Option<String>")]
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub observed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContextEvidence {
+    pub authority: EvidenceAuthority,
+    #[serde(default)]
+    pub provenance: EvidenceProvenance,
+    #[schemars(with = "Option<String>")]
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub valid_from: Option<OffsetDateTime>,
+    #[schemars(with = "Option<String>")]
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub valid_until: Option<OffsetDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -36,6 +91,8 @@ pub struct ContextBlock {
     pub content_hash: String,
     #[serde(default)]
     pub content: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<ContextEvidence>,
     #[serde(default)]
     pub metadata: Value,
 }

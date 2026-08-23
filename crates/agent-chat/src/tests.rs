@@ -5,9 +5,9 @@ use std::sync::{
 
 use agent_core::{
     AgentError, AgentEvent, AgentEventEmitter, AgentStateAccess, ArtifactPublisher, ContextBlock,
-    ContextBlockKind, ContextPolicy, InteractionAction, InteractionEnvelope, InteractionOption,
-    InteractionResponse, PROTOCOL_VERSION, ProposalCreator, SubagentRunner, ToolCaller, ToolError,
-    TraceEvent,
+    ContextBlockKind, ContextEvidence, ContextPolicy, EvidenceAuthority, EvidenceProvenance,
+    InteractionAction, InteractionEnvelope, InteractionOption, InteractionResponse,
+    PROTOCOL_VERSION, ProposalCreator, SubagentRunner, ToolCaller, ToolError, TraceEvent,
 };
 use agent_llm::{
     LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmMessage, LlmProvider,

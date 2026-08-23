@@ -39,6 +39,13 @@
         "statement": "User prefers concise answers",
         "authority": "user_confirmed"
       },
+      "evidence": {
+        "authority": "user_confirmed",
+        "provenance": {
+          "source": "settings_profile",
+          "source_id": "preference_1"
+        }
+      },
       "metadata": {
         "trusted_as_instruction": false
       }

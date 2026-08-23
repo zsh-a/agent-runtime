@@ -17,8 +17,8 @@ pub use catalog::{
     AgentRuntimeCatalog, PromptBlockSpec, PromptManifest, PromptManifestBlock, ToolRisk, ToolSpec,
 };
 pub use context::{
-    CompactionRecord, ContextBlock, ContextBlockKind, ContextPolicy, ContextSnapshot,
-    ContextSnapshotInput,
+    CompactionRecord, ContextBlock, ContextBlockKind, ContextEvidence, ContextPolicy,
+    ContextSnapshot, ContextSnapshotInput, EvidenceAuthority, EvidenceProvenance,
 };
 pub use embedded::{
     EMBEDDED_SNAPSHOT_VERSION, EmbeddedEffectError, EmbeddedEffectKind, EmbeddedEffectResponse,

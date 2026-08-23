@@ -186,6 +186,7 @@
             "runtime_instructions",
             "agent_instructions",
             "command_instructions",
+            "profile",
             "memory",
             "compaction_summary",
             "message",
@@ -199,6 +200,39 @@
         "token_estimate": { "type": "integer", "minimum": 0, "default": 0 },
         "content_hash": { "type": "string", "minLength": 1 },
         "content": true,
+        "evidence": {
+          "type": "object",
+          "required": ["authority"],
+          "properties": {
+            "authority": {
+              "type": "string",
+              "enum": [
+                "user_confirmed",
+                "source_fact",
+                "deterministic_derived",
+                "model_derived",
+                "legacy_unknown"
+              ]
+            },
+            "provenance": {
+              "type": "object",
+              "properties": {
+                "source": { "type": "string" },
+                "source_id": { "type": "string" },
+                "source_event_id": { "type": "string" },
+                "candidate_id": { "type": "string" },
+                "algorithm_version": { "type": "string" },
+                "observed_at": { "type": "string", "format": "date-time" }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "valid_from": { "type": "string", "format": "date-time" },
+            "valid_until": { "type": "string", "format": "date-time" },
+            "supersedes": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
         "metadata": { "type": "object", "default": {} }
       },
       "additionalProperties": false
