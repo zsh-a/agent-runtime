@@ -1,4 +1,5 @@
 use super::*;
+use crate::testkit::assert_chat_context_store_conformance;
 
 #[tokio::test]
 async fn file_run_store_satisfies_conformance() {
@@ -45,12 +46,14 @@ async fn file_session_store_satisfies_conformance() {
     let root = temp_root();
     let store = FileSessionStore::new(root).await.expect("store opens");
     assert_session_store_conformance(&store).await;
+    assert_chat_context_store_conformance(&store).await;
 }
 
 #[tokio::test]
 async fn in_memory_session_store_satisfies_conformance() {
     let store = InMemorySessionStore::default();
     assert_session_store_conformance(&store).await;
+    assert_chat_context_store_conformance(&store).await;
 }
 
 #[tokio::test]
@@ -68,6 +71,7 @@ async fn sqlite_store_satisfies_conformance() {
     assert_trace_store_conformance(&store).await;
     assert_proposal_store_conformance(&store).await;
     assert_session_store_conformance(&store).await;
+    assert_chat_context_store_conformance(&store).await;
     assert_state_store_conformance(&store).await;
     assert_lock_store_conformance(&store).await;
 }

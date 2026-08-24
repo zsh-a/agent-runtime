@@ -142,6 +142,11 @@ impl ChatTurnSnapshot {
                 self.snapshot_version
             )));
         }
+        if self.state.context_epoch.base_sequence > self.state.transcript_sequence {
+            return Err(ChatError::validation(
+                "chat snapshot context epoch base sequence is ahead of transcript sequence",
+            ));
+        }
         let pending_ids = self
             .state
             .pending_tool_calls

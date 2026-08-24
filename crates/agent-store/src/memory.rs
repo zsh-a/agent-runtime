@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use agent_core::{
     AgentProposalStore, AgentRunRecord, AgentRunStore, AgentSessionStore, AgentStateStore,
+    ChatTranscriptEvent, ChatTranscriptEventKind, ContextCheckpoint, ContextCheckpointCommit,
     ProposalEnvelope, ProposalId, RunId, RunScope, SessionId, SessionRecord, StepRecord,
     StoreError, ThreadId, ThreadRecord,
 };
@@ -232,6 +233,13 @@ pub struct InMemorySessionStore {
     sessions: RwLock<HashMap<String, SessionRecord>>,
     threads: RwLock<HashMap<String, ThreadRecord>>,
     steps: RwLock<HashMap<String, StepRecord>>,
+    chat_logs: RwLock<HashMap<String, InMemoryChatLog>>,
+}
+
+#[derive(Default)]
+struct InMemoryChatLog {
+    events: Vec<ChatTranscriptEvent>,
+    checkpoint: Option<ContextCheckpoint>,
 }
 
 impl InMemorySessionStore {
@@ -314,5 +322,129 @@ impl AgentSessionStore for InMemorySessionStore {
             .collect::<Vec<_>>();
         steps.sort_by_key(|step| step.created_at);
         Ok(steps)
+    }
+
+    async fn append_chat_transcript_event(
+        &self,
+        event: ChatTranscriptEvent,
+        expected_sequence: u64,
+    ) -> Result<bool, StoreError> {
+        let mut logs = self.chat_logs.write().await;
+        let log = logs.entry(event.thread_id.0.clone()).or_default();
+        if let Some(existing) = log
+            .events
+            .iter()
+            .find(|item| item.event_id == event.event_id)
+        {
+            if existing.content_hash == event.content_hash && existing.payload == event.payload {
+                return Ok(true);
+            }
+            return Err(StoreError::new(format!(
+                "chat transcript event '{}' already exists with different content",
+                event.event_id
+            )));
+        }
+        let current_sequence = log.events.last().map(|event| event.sequence).unwrap_or(0);
+        if current_sequence != expected_sequence
+            || event.sequence != expected_sequence.saturating_add(1)
+        {
+            return Ok(false);
+        }
+        log.events.push(event);
+        Ok(true)
+    }
+
+    async fn list_chat_transcript_events_after(
+        &self,
+        thread_id: &ThreadId,
+        after: u64,
+    ) -> Result<Vec<ChatTranscriptEvent>, StoreError> {
+        let logs = self.chat_logs.read().await;
+        let mut events = logs
+            .get(&thread_id.0)
+            .map(|log| {
+                log.events
+                    .iter()
+                    .filter(|event| event.sequence > after)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        events.sort_by_key(|event| event.sequence);
+        Ok(events)
+    }
+
+    async fn get_context_checkpoint(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<ContextCheckpoint>, StoreError> {
+        Ok(self
+            .chat_logs
+            .read()
+            .await
+            .get(&thread_id.0)
+            .and_then(|log| log.checkpoint.clone()))
+    }
+
+    async fn commit_context_checkpoint(
+        &self,
+        checkpoint: ContextCheckpoint,
+        expected_sequence: u64,
+    ) -> Result<Option<ContextCheckpointCommit>, StoreError> {
+        let mut logs = self.chat_logs.write().await;
+        let thread_id = checkpoint.thread_id.clone();
+        let log = logs.entry(thread_id.0.clone()).or_default();
+        if let Some(existing) = &log.checkpoint {
+            if existing.checkpoint_id == checkpoint.checkpoint_id {
+                let event = log
+                    .events
+                    .iter()
+                    .find(|event| {
+                        event.kind == ChatTranscriptEventKind::ContextCheckpointed
+                            && event
+                                .payload
+                                .get("checkpoint_id")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(checkpoint.checkpoint_id.as_str())
+                    })
+                    .cloned()
+                    .ok_or_else(|| StoreError::new("checkpoint exists without checkpoint event"))?;
+                return Ok(Some(ContextCheckpointCommit {
+                    checkpoint: existing.clone(),
+                    event,
+                }));
+            }
+        }
+        let current_sequence = log.events.last().map(|event| event.sequence).unwrap_or(0);
+        if current_sequence != expected_sequence {
+            return Ok(None);
+        }
+        let current_checkpoint_id = log
+            .checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.checkpoint_id.clone());
+        if checkpoint.previous_checkpoint_id != current_checkpoint_id {
+            return Ok(None);
+        }
+        let event = ChatTranscriptEvent {
+            protocol_version: agent_core::PROTOCOL_VERSION.to_owned(),
+            event_id: format!("checkpoint:{}", checkpoint.checkpoint_id),
+            thread_id: thread_id.clone(),
+            sequence: expected_sequence.saturating_add(1),
+            turn_id: None,
+            kind: ChatTranscriptEventKind::ContextCheckpointed,
+            payload: serde_json::json!({
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "replaces_through_seq": checkpoint.replaces_through_seq,
+                "archive_through_seq": checkpoint.archive_through_seq,
+                "semantic_basis_digest": checkpoint.semantic_basis_digest,
+                "replacement_plan_digest": checkpoint.replacement_plan_digest,
+            }),
+            content_hash: checkpoint.replacement_plan_digest.clone(),
+            created_at: checkpoint.created_at,
+        };
+        log.events.push(event.clone());
+        log.checkpoint = Some(checkpoint.clone());
+        Ok(Some(ContextCheckpointCommit { checkpoint, event }))
     }
 }

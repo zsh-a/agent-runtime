@@ -6,8 +6,9 @@ use std::{
 use agent_core::{
     AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunStatus,
     AgentRunStore, AgentSessionStore, AgentStateStore, AgentTrace, AgentTraceStore,
-    PROTOCOL_VERSION, ProposalEnvelope, ProposalId, ProposalStatus, RunId, RunScope, SessionRecord,
-    StepRecord, ThreadRecord, TraceEvent,
+    ChatTranscriptEvent, ChatTranscriptEventKind, ContextCheckpoint, PROTOCOL_VERSION,
+    ProposalEnvelope, ProposalId, ProposalStatus, RunId, RunScope, SessionRecord, StepRecord,
+    ThreadId, ThreadRecord, TraceEvent,
 };
 use serde_json::json;
 use time::OffsetDateTime;
@@ -440,6 +441,96 @@ pub async fn assert_session_store_conformance(store: &dyn AgentSessionStore) {
             .expect("step exists")
             .step_id,
         step.step_id
+    );
+}
+
+/// Assert sequence/CAS and atomic checkpoint behavior shared by all session
+/// store implementations.
+pub async fn assert_chat_context_store_conformance(store: &dyn AgentSessionStore) {
+    let prefix = unique_prefix("chat_context");
+    let thread_id = ThreadId(id(&prefix, "thread"));
+    let created_at = OffsetDateTime::now_utc();
+    let event = ChatTranscriptEvent {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        event_id: id(&prefix, "turn_started"),
+        thread_id: thread_id.clone(),
+        sequence: 1,
+        turn_id: Some(id(&prefix, "turn")),
+        kind: ChatTranscriptEventKind::TurnStarted,
+        payload: json!({"message": "hello"}),
+        content_hash: "blake3:test-event".to_owned(),
+        created_at,
+    };
+    assert!(
+        store
+            .append_chat_transcript_event(event.clone(), 0)
+            .await
+            .expect("chat event appends")
+    );
+    assert!(
+        store
+            .append_chat_transcript_event(event.clone(), 0)
+            .await
+            .expect("duplicate chat event is idempotent")
+    );
+    assert!(
+        !store
+            .append_chat_transcript_event(
+                ChatTranscriptEvent {
+                    sequence: 2,
+                    event_id: id(&prefix, "stale"),
+                    ..event.clone()
+                },
+                0,
+            )
+            .await
+            .expect("stale chat event is rejected without mutation")
+    );
+
+    let checkpoint = ContextCheckpoint {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        checkpoint_id: id(&prefix, "checkpoint_1"),
+        thread_id: thread_id.clone(),
+        previous_checkpoint_id: None,
+        replaces_through_seq: 1,
+        archive_through_seq: 1,
+        semantic_basis_digest: "blake3:basis".to_owned(),
+        protected_content_digest: "blake3:protected".to_owned(),
+        replacement_plan_digest: "blake3:plan".to_owned(),
+        body: "continuity".to_owned(),
+        archive_records: Vec::new(),
+        retained_entries: vec![json!({"role": "user", "content": "hello"})],
+        created_at,
+    };
+    let committed = store
+        .commit_context_checkpoint(checkpoint.clone(), 1)
+        .await
+        .expect("checkpoint commits")
+        .expect("checkpoint CAS matches");
+    assert_eq!(committed.event.sequence, 2);
+    assert_eq!(
+        store
+            .get_context_checkpoint(&thread_id)
+            .await
+            .expect("checkpoint reads")
+            .expect("checkpoint exists")
+            .checkpoint_id,
+        checkpoint.checkpoint_id
+    );
+    assert!(
+        store
+            .commit_context_checkpoint(checkpoint, 0)
+            .await
+            .expect("duplicate checkpoint is idempotent")
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .list_chat_transcript_events_after(&thread_id, 0)
+            .await
+            .expect("chat events list")
+            .len(),
+        2
     );
 }
 

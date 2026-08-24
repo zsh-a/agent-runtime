@@ -390,6 +390,192 @@ fn chat_turn_prepare_llm_request_compacts_over_budget_context() {
 }
 
 #[test]
+fn context_plan_reports_required_and_dynamic_layers() {
+    let state = chat_turn_initial_state(&ChatTurnRequest {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        turn_id: Some("turn_plan".to_owned()),
+        surface: None,
+        mode: None,
+        session_id: None,
+        thread_id: None,
+        agent_id: Some("chat".to_owned()),
+        provider: "mock".to_owned(),
+        model: "mock-model".to_owned(),
+        messages: vec![
+            LlmMessage {
+                role: LlmRole::System,
+                content: Value::String("policy".to_owned()),
+                name: None,
+                metadata: json!({}),
+            },
+            user_message("current input"),
+        ],
+        temperature: None,
+        max_output_tokens: None,
+        tools: vec![],
+        context_blocks: vec![],
+        metadata: json!({}),
+        context_policy: Default::default(),
+        max_tool_rounds: 4,
+        tool_execution: ChatToolExecution::Runtime,
+    })
+    .expect("state");
+
+    let plan = chat_turn_context_plan(&state).expect("context plan");
+    assert!(plan.footprint.total_tokens > 0);
+    assert!(plan.footprint.required_tokens > 0);
+    assert_eq!(
+        plan.footprint.total_tokens,
+        plan.footprint.stable_prefix_tokens + plan.footprint.dynamic_suffix_tokens
+    );
+    assert!(plan.footprint.by_layer.contains_key("current_input"));
+    assert_eq!(
+        state.messages.len(),
+        2,
+        "non-mutating plan leaves state intact"
+    );
+}
+
+#[test]
+fn hard_preflight_rejects_an_unfit_required_current_message() {
+    let state = chat_turn_initial_state(&ChatTurnRequest {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        turn_id: Some("turn_required_overflow".to_owned()),
+        surface: None,
+        mode: None,
+        session_id: None,
+        thread_id: None,
+        agent_id: Some("chat".to_owned()),
+        provider: "mock".to_owned(),
+        model: "mock-model".to_owned(),
+        messages: vec![user_message("x".repeat(2_000))],
+        temperature: None,
+        max_output_tokens: None,
+        tools: vec![],
+        context_blocks: vec![],
+        metadata: json!({}),
+        context_policy: ContextPolicy {
+            max_input_tokens: 32,
+            reserve_output_tokens: 0,
+            preserve_recent_messages: 2,
+            compact_when_over_budget: true,
+        },
+        max_tool_rounds: 4,
+        tool_execution: ChatToolExecution::Runtime,
+    })
+    .expect("state");
+
+    let error = chat_turn_context_plan(&state).expect_err("required layer must fail hard");
+    assert_eq!(error.record.code, "validation_error");
+    assert_eq!(error.record.details["layer"], "context");
+    assert!(
+        error.record.details["required_tokens"]
+            .as_u64()
+            .unwrap_or_default()
+            > 32
+    );
+}
+
+#[test]
+fn compaction_keeps_tool_call_and_result_in_one_protocol_unit() {
+    let messages = vec![
+        user_message("old context ".repeat(8)),
+        LlmMessage {
+            role: LlmRole::Assistant,
+            content: json!([{
+                "type": "tool_use",
+                "id": "call_pair",
+                "name": "read",
+                "input": {}
+            }]),
+            name: None,
+            metadata: json!({}),
+        },
+        LlmMessage {
+            role: LlmRole::User,
+            content: json!([{
+                "type": "tool_result",
+                "tool_use_id": "call_pair",
+                "content": "result"
+            }]),
+            name: None,
+            metadata: json!({}),
+        },
+        user_message("latest"),
+    ];
+    let mut state = chat_turn_initial_state(&ChatTurnRequest {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        turn_id: Some("turn_pair".to_owned()),
+        surface: None,
+        mode: None,
+        session_id: None,
+        thread_id: None,
+        agent_id: Some("chat".to_owned()),
+        provider: "mock".to_owned(),
+        model: "mock-model".to_owned(),
+        messages,
+        temperature: None,
+        max_output_tokens: None,
+        tools: vec![],
+        context_blocks: vec![],
+        metadata: json!({}),
+        context_policy: ContextPolicy {
+            max_input_tokens: 24,
+            reserve_output_tokens: 0,
+            preserve_recent_messages: 1,
+            compact_when_over_budget: true,
+        },
+        max_tool_rounds: 4,
+        tool_execution: ChatToolExecution::Runtime,
+    })
+    .expect("state");
+
+    let request = chat_turn_prepare_llm_request(&mut state).expect("protocol-safe compaction");
+    let has_call = request.messages.iter().any(|message| {
+        message
+            .content
+            .as_array()
+            .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_use"))
+    });
+    let has_result = request.messages.iter().any(|message| {
+        message
+            .content
+            .as_array()
+            .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_result"))
+    });
+    assert_eq!(has_call, has_result);
+}
+
+#[test]
+fn context_epoch_rejects_provider_basis_changes_on_resume() {
+    let mut state = chat_turn_initial_state(&ChatTurnRequest {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        turn_id: Some("turn_epoch".to_owned()),
+        surface: None,
+        mode: None,
+        session_id: None,
+        thread_id: None,
+        agent_id: Some("chat".to_owned()),
+        provider: "mock".to_owned(),
+        model: "mock-model".to_owned(),
+        messages: vec![user_message("resume")],
+        temperature: None,
+        max_output_tokens: None,
+        tools: vec![],
+        context_blocks: vec![],
+        metadata: json!({}),
+        context_policy: Default::default(),
+        max_tool_rounds: 4,
+        tool_execution: ChatToolExecution::Runtime,
+    })
+    .expect("state");
+    state.model = "different-model".to_owned();
+
+    let error = chat_turn_prepare_llm_request(&mut state).expect_err("basis mismatch");
+    assert!(error.record.message.contains("semantic basis"));
+}
+
+#[test]
 fn chat_turn_renders_host_memory_as_untrusted_context_data() {
     let mut state = chat_turn_initial_state(&ChatTurnRequest {
         protocol_version: PROTOCOL_VERSION.to_owned(),

@@ -230,6 +230,10 @@ pub(super) fn step_dir(root: &Utf8Path) -> Utf8PathBuf {
     root.join("steps")
 }
 
+pub(super) fn chat_dir(root: &Utf8Path) -> Utf8PathBuf {
+    root.join("chat")
+}
+
 pub(super) fn lock_dir(root: &Utf8Path) -> Utf8PathBuf {
     root.join("locks")
 }

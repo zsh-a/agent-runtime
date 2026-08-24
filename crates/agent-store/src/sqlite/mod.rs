@@ -3,8 +3,10 @@ use std::time::Duration;
 use agent_core::{
     AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunStatus,
     AgentRunStore, AgentSessionStore, AgentStateStore, AgentTrace, AgentTraceStore,
-    ProposalEnvelope, ProposalId, RunEventCursor, RunEventRecord, RunId, RunLease, RunScope,
-    SessionId, SessionRecord, StepRecord, StoreError, ThreadId, ThreadRecord, TraceEvent,
+    ChatTranscriptEvent, ChatTranscriptEventKind, ContextCheckpoint, ContextCheckpointCommit,
+    PROTOCOL_VERSION, ProposalEnvelope, ProposalId, RunEventCursor, RunEventRecord, RunId,
+    RunLease, RunScope, SessionId, SessionRecord, StepId, StepKind, StepRecord, StoreError,
+    ThreadId, ThreadRecord, TraceEvent,
 };
 use async_trait::async_trait;
 use camino::Utf8Path;

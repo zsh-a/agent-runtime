@@ -3,10 +3,15 @@ use agent_core::{
 };
 use agent_llm::{LlmFinishReason, LlmMessage, LlmRequest, LlmResponse, LlmRole};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 use crate::{
-    ChatError, ChatToolCall, ChatToolResult, ChatTurnAdvance, ChatTurnRequest, ChatTurnState,
-    context::{build_llm_request_without_state_update, prepare_llm_request},
+    ChatContextEpoch, ChatError, ChatToolCall, ChatToolResult, ChatTurnAdvance, ChatTurnRequest,
+    ChatTurnState,
+    context::{
+        ContextPlan, build_llm_request_without_state_update, prepare_context_plan,
+        prepare_llm_request,
+    },
 };
 
 pub fn chat_turn_initial_state(request: &ChatTurnRequest) -> Result<ChatTurnState, ChatError> {
@@ -20,6 +25,13 @@ pub fn chat_turn_initial_state(request: &ChatTurnRequest) -> Result<ChatTurnStat
             "chat turn metadata must be a JSON object",
         ));
     }
+    let semantic_basis_digest = context_semantic_basis_digest(
+        &request.protocol_version,
+        &request.provider,
+        &request.model,
+        &request.tools,
+        &request.context_policy,
+    );
     Ok(ChatTurnState {
         protocol_version: request.protocol_version.clone(),
         turn_id: request.turn_id.clone(),
@@ -43,6 +55,13 @@ pub fn chat_turn_initial_state(request: &ChatTurnRequest) -> Result<ChatTurnStat
         context_policy: request.context_policy.clone(),
         context_snapshot: None,
         compaction: None,
+        context_epoch: ChatContextEpoch {
+            epoch_id: format!("epoch_{}", digest_suffix(&semantic_basis_digest)),
+            base_sequence: 0,
+            checkpoint_id: None,
+            semantic_basis_digest,
+        },
+        transcript_sequence: 0,
         max_tool_rounds: request.max_tool_rounds.max(1),
         round: 0,
         pending_tool_calls: Vec::new(),
@@ -55,8 +74,26 @@ pub fn chat_turn_llm_request(state: &ChatTurnState) -> LlmRequest {
     build_llm_request_without_state_update(state)
 }
 
+/// Strict, non-mutating request construction. Unlike the legacy convenience
+/// function above, this never falls back to sending an unvalidated raw
+/// transcript.
+pub fn chat_turn_llm_request_checked(state: &ChatTurnState) -> Result<LlmRequest, ChatError> {
+    Ok(chat_turn_context_plan(state)?.request)
+}
+
 pub fn chat_turn_prepare_llm_request(state: &mut ChatTurnState) -> Result<LlmRequest, ChatError> {
+    validate_context_epoch(state)?;
     prepare_llm_request(state).map(|prepared| prepared.request)
+}
+
+/// Build the complete provider-visible plan without mutating the caller's
+/// state. The runner uses the mutating preparation path so a compacted tail is
+/// carried into subsequent tool rounds; hosts can use this for preflight and
+/// observability.
+pub fn chat_turn_context_plan(state: &ChatTurnState) -> Result<ContextPlan, ChatError> {
+    let mut state = state.clone();
+    validate_context_epoch(&mut state)?;
+    prepare_context_plan(&mut state)
 }
 
 pub fn chat_turn_next_round(state: &ChatTurnState) -> u32 {
@@ -71,6 +108,7 @@ pub fn chat_turn_apply_response(
 ) -> Result<ChatTurnAdvance, ChatError> {
     let round = chat_turn_next_round(&state);
     state.round = round;
+    state.transcript_sequence = state.transcript_sequence.saturating_add(1);
     if !matches!(response.finish_reason, LlmFinishReason::ToolCall) || tool_calls.is_empty() {
         let content = if assistant_text.is_empty() {
             response.content.as_str()
@@ -113,7 +151,13 @@ pub fn chat_turn_apply_tool_results(
             "chat turn has no pending tool calls to resume",
         ));
     }
+    if results.len() != state.pending_tool_calls.len() {
+        return Err(ChatError::validation(
+            "tool resume must contain exactly one result for every pending tool call",
+        ));
+    }
     let mut result_blocks = Vec::new();
+    let mut result_ids = HashSet::new();
     for call in state.pending_tool_calls.clone() {
         let result = results
             .iter()
@@ -121,6 +165,12 @@ pub fn chat_turn_apply_tool_results(
             .ok_or_else(|| {
                 ChatError::validation(format!("missing tool result for tool call '{}'", call.id))
             })?;
+        if !result_ids.insert(result.tool_call_id.clone()) {
+            return Err(ChatError::validation(format!(
+                "duplicate tool result for call '{}'",
+                result.tool_call_id
+            )));
+        }
         if result.tool_name != call.name {
             return Err(ChatError::validation(format!(
                 "tool result '{}' uses tool '{}' but pending call requires '{}'",
@@ -135,6 +185,11 @@ pub fn chat_turn_apply_tool_results(
             },
         ));
     }
+    if result_ids.len() != results.len() {
+        return Err(ChatError::validation(
+            "tool resume contains duplicate or unexpected tool results",
+        ));
+    }
     state.pending_tool_calls.clear();
     state.messages.push(LlmMessage {
         role: LlmRole::User,
@@ -142,6 +197,7 @@ pub fn chat_turn_apply_tool_results(
         name: None,
         metadata: json!({}),
     });
+    state.transcript_sequence = state.transcript_sequence.saturating_add(1);
     Ok(state)
 }
 
@@ -213,7 +269,69 @@ pub fn chat_turn_apply_interaction_response(
             "interaction_subject": interaction.subject,
         }),
     });
+    state.transcript_sequence = state.transcript_sequence.saturating_add(1);
     Ok(state)
+}
+
+pub(crate) fn validate_context_epoch(state: &mut ChatTurnState) -> Result<(), ChatError> {
+    let expected = context_semantic_basis_digest(
+        &state.protocol_version,
+        &state.provider,
+        &state.model,
+        &state.tools,
+        &state.context_policy,
+    );
+    if state.context_epoch.semantic_basis_digest.is_empty() {
+        state.context_epoch.semantic_basis_digest = expected.clone();
+    } else if state.context_epoch.semantic_basis_digest != expected {
+        return Err(ChatError::validation(
+            "chat resume context semantic basis does not match the active provider/model/tools",
+        ));
+    }
+    if state.context_epoch.epoch_id.is_empty() || state.context_epoch.epoch_id == "epoch_legacy" {
+        state.context_epoch.epoch_id = format!("epoch_{}", digest_suffix(&expected));
+    }
+    if state.context_epoch.base_sequence > state.transcript_sequence {
+        return Err(ChatError::validation(
+            "chat context epoch base sequence is ahead of transcript sequence",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn refresh_context_epoch_for_compaction(state: &mut ChatTurnState, snapshot_hash: &str) {
+    let basis = format!(
+        "{}:{snapshot_hash}",
+        state.context_epoch.semantic_basis_digest
+    );
+    let digest = blake3::hash(basis.as_bytes()).to_hex().to_string();
+    state.context_epoch.epoch_id = format!("epoch_{digest}");
+    state.context_epoch.base_sequence = state.transcript_sequence;
+}
+
+fn context_semantic_basis_digest(
+    protocol_version: &str,
+    provider: &str,
+    model: &str,
+    tools: &[agent_core::ToolSpec],
+    policy: &agent_core::ContextPolicy,
+) -> String {
+    let value = json!({
+        "protocol_version": protocol_version,
+        "provider": provider,
+        "model": model,
+        "tools": tools,
+        "context_policy": policy,
+        "wire_contract": "chat_context_v1",
+    });
+    format!(
+        "blake3:{}",
+        blake3::hash(&serde_json::to_vec(&value).unwrap_or_default()).to_hex()
+    )
+}
+
+fn digest_suffix(digest: &str) -> &str {
+    digest.strip_prefix("blake3:").unwrap_or(digest)
 }
 
 /// Apply exactly one continuation input. Tool dispatch and human interaction
@@ -317,6 +435,14 @@ pub(crate) fn llm_metadata(state: &ChatTurnState) -> Value {
         if let Some(value) = &state.mode {
             object.insert("mode".to_owned(), Value::String(value.clone()));
         }
+        object.insert(
+            "context_epoch".to_owned(),
+            serde_json::to_value(&state.context_epoch).unwrap_or_else(|_| json!({})),
+        );
+        object.insert(
+            "transcript_sequence".to_owned(),
+            json!(state.transcript_sequence),
+        );
     }
     metadata
 }

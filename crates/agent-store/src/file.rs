@@ -1,12 +1,13 @@
 use agent_core::{
     AgentLockStore, AgentProposalStore, AgentRunEventStore, AgentRunRecord, AgentRunStore,
-    AgentSessionStore, AgentTrace, AgentTraceStore, ProposalEnvelope, ProposalId, RunEventCursor,
-    RunEventRecord, RunId, RunLease, RunScope, SessionId, SessionRecord, StepRecord, StoreError,
-    ThreadId, ThreadRecord, TraceEvent,
+    AgentSessionStore, AgentTrace, AgentTraceStore, ChatTranscriptEvent, ChatTranscriptEventKind,
+    ContextCheckpoint, ContextCheckpointCommit, PROTOCOL_VERSION, ProposalEnvelope, ProposalId,
+    RunEventCursor, RunEventRecord, RunId, RunLease, RunScope, SessionId, SessionRecord,
+    StepRecord, StoreError, ThreadId, ThreadRecord, TraceEvent,
 };
 use async_trait::async_trait;
 use camino::{Utf8Path, Utf8PathBuf};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 

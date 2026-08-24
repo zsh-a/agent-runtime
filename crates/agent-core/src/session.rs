@@ -148,3 +148,42 @@ impl StepRecord {
         )
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatTranscriptEventKind {
+    TurnStarted,
+    UserMessage,
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    InteractionResult,
+    TurnCompleted,
+    TurnFailed,
+    ContextCheckpointed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChatTranscriptEvent {
+    #[serde(default = "protocol_version")]
+    pub protocol_version: String,
+    pub event_id: String,
+    pub thread_id: ThreadId,
+    pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub kind: ChatTranscriptEventKind,
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default)]
+    pub content_hash: String,
+    #[schemars(with = "String")]
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContextCheckpointCommit {
+    pub checkpoint: crate::ContextCheckpoint,
+    pub event: ChatTranscriptEvent,
+}

@@ -17,8 +17,9 @@ pub use catalog::{
     AgentRuntimeCatalog, PromptBlockSpec, PromptManifest, PromptManifestBlock, ToolRisk, ToolSpec,
 };
 pub use context::{
-    CompactionRecord, ContextBlock, ContextBlockKind, ContextEvidence, ContextPolicy,
-    ContextSnapshot, ContextSnapshotInput, EvidenceAuthority, EvidenceProvenance,
+    CompactionRecord, ContextArchiveRecord, ContextBlock, ContextBlockKind, ContextCheckpoint,
+    ContextEvidence, ContextPolicy, ContextSnapshot, ContextSnapshotInput, EvidenceAuthority,
+    EvidenceProvenance,
 };
 pub use embedded::{
     EMBEDDED_SNAPSHOT_VERSION, EmbeddedEffectError, EmbeddedEffectKind, EmbeddedEffectResponse,
@@ -54,7 +55,10 @@ pub use services::{
     CancellationSignal, ExecutionContext, ProposalCreator, StaticAgentServicesFactory,
     SubagentRequest, SubagentRunner, ToolCaller, ToolContext, ToolRegistry, TraceSink,
 };
-pub use session::{SessionRecord, StepKind, StepRecord, ThreadRecord};
+pub use session::{
+    ChatTranscriptEvent, ChatTranscriptEventKind, ContextCheckpointCommit, SessionRecord, StepKind,
+    StepRecord, ThreadRecord,
+};
 pub use stores::{
     AgentLockStore, AgentProposalStore, AgentRegistry, AgentRunEventStore, AgentRunStore,
     AgentSessionStore, AgentStateStore, AgentTraceStore, RunEventCursor, RunEventRecord,

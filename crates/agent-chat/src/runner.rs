@@ -17,7 +17,7 @@ use crate::{
     ChatTurnState, ToolOutput, chat_event_from_llm_event, chat_turn_apply_response,
     chat_turn_apply_tool_results, chat_turn_initial_state, chat_turn_next_round,
     chat_turn_prepare_llm_request, chat_turn_resume_state, send_done, send_error, send_event,
-    turn_metadata,
+    state::validate_context_epoch, turn_metadata,
 };
 
 #[derive(Clone)]
@@ -140,7 +140,7 @@ async fn run_chat_turn(
 async fn run_chat_resume(
     provider: Arc<dyn LlmProvider>,
     services: Arc<dyn AgentServices>,
-    request: ChatResumeRequest,
+    mut request: ChatResumeRequest,
     sender: mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
     cancellation: CancellationToken,
 ) {
@@ -155,6 +155,10 @@ async fn run_chat_resume(
             )),
         )
         .await;
+        return;
+    }
+    if let Err(error) = validate_context_epoch(&mut request.state) {
+        send_error(&sender, request.state.round, error).await;
         return;
     }
     let turn_timer = std::time::Instant::now();
@@ -624,6 +628,8 @@ async fn send_context_snapshot(
             metadata: json!({
                 "context_snapshot": state.context_snapshot.clone(),
                 "compaction": state.compaction.clone(),
+                "context_epoch": state.context_epoch.clone(),
+                "transcript_sequence": state.transcript_sequence,
             }),
         },
     )
@@ -693,6 +699,8 @@ async fn send_round_finished(
                 "finish_reason": response.finish_reason,
                 "context_snapshot": state.context_snapshot.clone(),
                 "compaction": state.compaction.clone(),
+                "context_epoch": state.context_epoch.clone(),
+                "transcript_sequence": state.transcript_sequence,
             }),
         },
     )

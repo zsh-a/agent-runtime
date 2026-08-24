@@ -97,5 +97,7 @@ pub(crate) fn turn_metadata(state: &ChatTurnState) -> Value {
         "mode": state.mode,
         "provider": state.provider,
         "model": state.model,
+        "context_epoch": state.context_epoch,
+        "transcript_sequence": state.transcript_sequence,
     })
 }

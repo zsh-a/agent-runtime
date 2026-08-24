@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::{
-    Agent, AgentError, AgentRunRecord, AgentRunStatus, AgentSpec, AgentTrace, ProposalEnvelope,
-    ProposalId, RunId, RunLease, RunScope, SessionId, SessionRecord, StepRecord, StoreError,
-    ThreadId, ThreadRecord, TraceEvent, WorkflowRunResult,
+    Agent, AgentError, AgentRunRecord, AgentRunStatus, AgentSpec, AgentTrace, ChatTranscriptEvent,
+    ContextCheckpoint, ContextCheckpointCommit, ProposalEnvelope, ProposalId, RunId, RunLease,
+    RunScope, SessionId, SessionRecord, StepRecord, StoreError, ThreadId, ThreadRecord, TraceEvent,
+    WorkflowRunResult,
 };
 
 #[async_trait]
@@ -149,6 +150,35 @@ pub trait AgentSessionStore: Send + Sync {
     async fn get_thread(&self, thread_id: &ThreadId) -> Result<Option<ThreadRecord>, StoreError>;
     async fn create_step(&self, step: StepRecord) -> Result<(), StoreError>;
     async fn list_steps(&self, thread_id: &ThreadId) -> Result<Vec<StepRecord>, StoreError>;
+
+    /// Append one chat transcript event iff `expected_sequence` is still the
+    /// last durable sequence for the thread.  Implementations must treat a
+    /// repeated event id with the same payload as an idempotent success.
+    async fn append_chat_transcript_event(
+        &self,
+        event: ChatTranscriptEvent,
+        expected_sequence: u64,
+    ) -> Result<bool, StoreError>;
+
+    async fn list_chat_transcript_events_after(
+        &self,
+        thread_id: &ThreadId,
+        after: u64,
+    ) -> Result<Vec<ChatTranscriptEvent>, StoreError>;
+
+    async fn get_context_checkpoint(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<ContextCheckpoint>, StoreError>;
+
+    /// Atomically append a ContextCheckpointed event and publish the
+    /// checkpoint when both sequence and parent-checkpoint CAS checks pass.
+    /// `None` means another writer won the race.
+    async fn commit_context_checkpoint(
+        &self,
+        checkpoint: ContextCheckpoint,
+        expected_sequence: u64,
+    ) -> Result<Option<ContextCheckpointCommit>, StoreError>;
 }
 
 #[async_trait]

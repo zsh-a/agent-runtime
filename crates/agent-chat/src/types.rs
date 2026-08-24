@@ -88,6 +88,10 @@ pub struct ChatTurnState {
     pub context_snapshot: Option<ContextSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<CompactionRecord>,
+    #[serde(default)]
+    pub context_epoch: ChatContextEpoch,
+    #[serde(default)]
+    pub transcript_sequence: u64,
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
     #[serde(default)]
@@ -100,6 +104,32 @@ pub struct ChatTurnState {
     pub pending_interaction: Option<InteractionEnvelope>,
     #[serde(default)]
     pub tool_execution: ChatToolExecution,
+}
+
+/// Runtime identity for an immutable context generation.  Provider cache
+/// handles intentionally do not appear here; this value remains valid when a
+/// provider cache is disabled or misses.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ChatContextEpoch {
+    #[serde(default = "default_epoch_id")]
+    pub epoch_id: String,
+    #[serde(default)]
+    pub base_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub semantic_basis_digest: String,
+}
+
+impl Default for ChatContextEpoch {
+    fn default() -> Self {
+        Self {
+            epoch_id: default_epoch_id(),
+            base_sequence: 0,
+            checkpoint_id: None,
+            semantic_basis_digest: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -216,4 +246,8 @@ pub(crate) fn default_max_tool_rounds() -> u32 {
 
 fn protocol_version() -> String {
     PROTOCOL_VERSION.to_owned()
+}
+
+fn default_epoch_id() -> String {
+    "epoch_legacy".to_owned()
 }

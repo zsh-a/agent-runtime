@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::{PROTOCOL_VERSION, protocol_version};
+use crate::{PROTOCOL_VERSION, ThreadId, protocol_version};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -163,6 +163,52 @@ pub struct CompactionRecord {
     pub summary: String,
     #[serde(default)]
     pub metadata: Value,
+}
+
+/// An immutable, per-turn continuity record.
+///
+/// Archive records are deliberately not used as instructions.  They are
+/// evidence selected by the context planner and retain enough provenance to
+/// be audited without making the checkpoint a second source of truth.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContextArchiveRecord {
+    pub record_id: String,
+    pub source_start_seq: u64,
+    pub source_end_seq: u64,
+    pub body: String,
+    pub body_digest: String,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+/// A durable, bounded continuity view for one chat thread.
+///
+/// The transcript and typed task state remain authoritative.  This object is
+/// only the immutable view that a future context epoch may put in its stable
+/// prefix.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContextCheckpoint {
+    #[serde(default = "protocol_version")]
+    pub protocol_version: String,
+    pub checkpoint_id: String,
+    pub thread_id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_checkpoint_id: Option<String>,
+    pub replaces_through_seq: u64,
+    pub archive_through_seq: u64,
+    pub semantic_basis_digest: String,
+    pub protected_content_digest: String,
+    pub replacement_plan_digest: String,
+    pub body: String,
+    #[serde(default)]
+    pub archive_records: Vec<ContextArchiveRecord>,
+    /// Provider-neutral retained entries.  The wire layer is responsible for
+    /// decoding these; core never depends on a provider message type.
+    #[serde(default)]
+    pub retained_entries: Vec<Value>,
+    #[schemars(with = "String")]
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
 }
 
 impl ContextSnapshot {

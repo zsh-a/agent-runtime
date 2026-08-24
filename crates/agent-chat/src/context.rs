@@ -1,21 +1,55 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use agent_core::{
     CompactionRecord, ContextBlock, ContextBlockKind, ContextPolicy, ContextSnapshot,
     ContextSnapshotInput, PROTOCOL_VERSION, ToolSpec,
 };
 use agent_llm::{LlmMessage, LlmRequest, LlmRole};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{ChatError, ChatTurnState, state::llm_metadata};
+use crate::{
+    ChatError, ChatTurnState,
+    state::{llm_metadata, refresh_context_epoch_for_compaction},
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextFootprint {
+    pub total_tokens: u32,
+    pub required_tokens: u32,
+    pub stable_prefix_tokens: u32,
+    pub dynamic_suffix_tokens: u32,
+    pub input_items: u32,
+    pub multimodal_units: u32,
+    #[serde(default)]
+    pub by_layer: BTreeMap<String, u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextPlan {
+    pub request: LlmRequest,
+    pub snapshot: ContextSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<CompactionRecord>,
+    pub footprint: ContextFootprint,
+    pub state_messages: Vec<LlmMessage>,
+    #[serde(default)]
+    pub omitted_optional_context: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedContext {
     pub(crate) request: LlmRequest,
+    pub(crate) plan: ContextPlan,
 }
 
 pub(crate) fn prepare_llm_request(state: &mut ChatTurnState) -> Result<PreparedContext, ChatError> {
     let policy = state.context_policy.clone();
+    if policy.max_input_tokens == 0 || policy.reserve_output_tokens >= policy.max_input_tokens {
+        return Err(ChatError::validation(
+            "context policy must leave a positive input budget after the output reserve",
+        ));
+    }
     let original_messages = state.messages.clone();
     let (host_blocks, filtered_host_block_ids, mut omission_reasons) =
         normalize_host_context_blocks(&state.context_blocks)?;
@@ -25,46 +59,69 @@ pub(crate) fn prepare_llm_request(state: &mut ChatTurnState) -> Result<PreparedC
     let budget = effective_input_budget(&policy);
 
     let tool_tokens = total_tokens(&tool_context_blocks(&state.tools));
-    let reserved_message_tokens =
-        reserved_message_tokens(&original_messages, policy.preserve_recent_messages);
+    let mandatory_host_tokens = host_blocks
+        .iter()
+        .filter(|block| is_instruction_block(block.kind))
+        .map(|block| block.token_estimate)
+        .sum::<u32>();
+    let message_budget = budget
+        .saturating_sub(tool_tokens)
+        .saturating_sub(mandatory_host_tokens);
+    let original_message_tokens = total_tokens(&message_context_blocks(&original_messages));
+    let (messages, omitted_message_count, message_summary) =
+        if original_message_tokens > message_budget && !policy.compact_when_over_budget {
+            return Err(context_overflow_error(
+                "conversation exceeds the hard input budget and compaction is disabled",
+                message_budget,
+                original_message_tokens,
+                mandatory_host_tokens.saturating_add(tool_tokens),
+            ));
+        } else {
+            compact_messages(
+                &original_messages,
+                policy.preserve_recent_messages,
+                message_budget,
+            )?
+        };
+
     let host_budget = budget
         .saturating_sub(tool_tokens)
-        .saturating_sub(reserved_message_tokens);
+        .saturating_sub(total_tokens(&message_context_blocks(&messages)));
     let (selected_host_blocks, budget_omitted_host_block_ids) =
-        if policy.compact_when_over_budget && before_tokens > budget {
-            select_host_context_blocks(host_blocks, host_budget)
-        } else {
-            (host_blocks, Vec::new())
-        };
+        select_host_context_blocks(host_blocks, host_budget)?;
     for id in &budget_omitted_host_block_ids {
         omission_reasons.insert(id.clone(), "over_budget".to_owned());
     }
     let mut omitted_host_block_ids = filtered_host_block_ids;
     omitted_host_block_ids.extend(budget_omitted_host_block_ids.iter().cloned());
-    let selected_host_tokens = total_tokens(&selected_host_blocks);
-    let message_budget = budget
-        .saturating_sub(tool_tokens)
-        .saturating_sub(selected_host_tokens);
-    let original_message_tokens = total_tokens(&message_context_blocks(&original_messages));
-    let (messages, omitted_message_count, message_summary) =
-        if policy.compact_when_over_budget && original_message_tokens > message_budget {
-            compact_messages(&original_messages, policy.preserve_recent_messages)
-        } else {
-            (original_messages, 0, None)
-        };
-
     if omitted_message_count > 0 {
         state.messages = messages.clone();
     }
 
     let blocks = snapshot_blocks(&selected_host_blocks, &messages, &state.tools);
     let token_estimate = total_tokens(&blocks);
+    if token_estimate > budget {
+        return Err(context_overflow_error(
+            "context plan remains over the hard input budget",
+            budget,
+            token_estimate,
+            mandatory_host_tokens.saturating_add(tool_tokens),
+        ));
+    }
     let content_hash = blocks_hash(&blocks);
     let omitted_host_count = u32::try_from(omitted_host_block_ids.len()).unwrap_or(u32::MAX);
     let compacted_host_count =
         u32::try_from(budget_omitted_host_block_ids.len()).unwrap_or(u32::MAX);
     let omitted_block_count = omitted_message_count.saturating_add(omitted_host_count);
     let compacted_block_count = omitted_message_count.saturating_add(compacted_host_count);
+    let rendered_messages = inject_host_context(messages.clone(), &selected_host_blocks);
+    validate_message_protocol(&rendered_messages)?;
+    let footprint = context_footprint(
+        &selected_host_blocks,
+        &messages,
+        &state.tools,
+        mandatory_host_tokens,
+    );
     let snapshot = ContextSnapshot::new(ContextSnapshotInput {
         snapshot_id: format!(
             "ctx_{}",
@@ -84,11 +141,13 @@ pub(crate) fn prepare_llm_request(state: &mut ChatTurnState) -> Result<PreparedC
             "thread_id": state.thread_id,
             "agent_id": state.agent_id,
             "round": state.round,
+            "before_token_estimate": before_tokens,
             "provided_context_block_count": state.context_blocks.len(),
             "selected_context_block_count": selected_host_blocks.len(),
             "omitted_context_block_ids": omitted_host_block_ids,
             "context_omission_reasons": omission_reasons,
             "omitted_message_count": omitted_message_count,
+            "footprint": footprint,
         }),
     });
     let compaction = (compacted_block_count > 0).then(|| CompactionRecord {
@@ -109,6 +168,9 @@ pub(crate) fn prepare_llm_request(state: &mut ChatTurnState) -> Result<PreparedC
             "omitted_context_block_ids": omitted_host_block_ids,
         }),
     });
+    if compacted_block_count > 0 {
+        refresh_context_epoch_for_compaction(state, &snapshot.content_hash);
+    }
     state.context_snapshot = Some(snapshot.clone());
     state.compaction = compaction.clone();
 
@@ -132,20 +194,30 @@ pub(crate) fn prepare_llm_request(state: &mut ChatTurnState) -> Result<PreparedC
         }
     }
 
-    let rendered_messages = inject_host_context(messages, &selected_host_blocks);
-    Ok(PreparedContext {
-        request: LlmRequest {
-            protocol_version: state.protocol_version.clone(),
-            provider: state.provider.clone(),
-            model: state.model.clone(),
-            messages: rendered_messages,
-            temperature: state.temperature,
-            max_output_tokens: state.max_output_tokens,
-            tools: state.tools.clone(),
-            response_format: None,
-            metadata,
-        },
-    })
+    let request = LlmRequest {
+        protocol_version: state.protocol_version.clone(),
+        provider: state.provider.clone(),
+        model: state.model.clone(),
+        messages: rendered_messages,
+        temperature: state.temperature,
+        max_output_tokens: state.max_output_tokens,
+        tools: state.tools.clone(),
+        response_format: None,
+        metadata,
+    };
+    let plan = ContextPlan {
+        request: request.clone(),
+        snapshot,
+        compaction: compaction.clone(),
+        footprint,
+        state_messages: messages,
+        omitted_optional_context: budget_omitted_host_block_ids,
+    };
+    Ok(PreparedContext { request, plan })
+}
+
+pub(crate) fn prepare_context_plan(state: &mut ChatTurnState) -> Result<ContextPlan, ChatError> {
+    Ok(prepare_llm_request(state)?.plan)
 }
 
 pub(crate) fn build_llm_request_without_state_update(state: &ChatTurnState) -> LlmRequest {
@@ -189,7 +261,7 @@ fn message_context_blocks(messages: &[LlmMessage]) -> Vec<ContextBlock> {
             kind: ContextBlockKind::Message,
             source: "chat.messages".to_owned(),
             priority: message_priority(message),
-            token_estimate: token_estimate(&content),
+            token_estimate: message_token_estimate(message),
             content_hash: value_hash(&content),
             content,
             evidence: None,
@@ -379,7 +451,7 @@ fn normalize_host_context_blocks(
 fn select_host_context_blocks(
     blocks: Vec<ContextBlock>,
     budget: u32,
-) -> (Vec<ContextBlock>, Vec<String>) {
+) -> Result<(Vec<ContextBlock>, Vec<String>), ChatError> {
     let mut mandatory = Vec::new();
     let mut optional = Vec::new();
     for block in blocks {
@@ -394,6 +466,14 @@ fn select_host_context_blocks(
 
     let mut selected = mandatory;
     let mandatory_tokens = total_tokens(&selected);
+    if mandatory_tokens > budget {
+        return Err(context_overflow_error(
+            "required host context exceeds the hard input budget",
+            budget,
+            mandatory_tokens,
+            mandatory_tokens,
+        ));
+    }
     let mut remaining = budget.saturating_sub(mandatory_tokens);
     let mut omitted = Vec::new();
     for block in optional {
@@ -405,7 +485,7 @@ fn select_host_context_blocks(
         }
     }
     selected.sort_by(context_block_order);
-    (selected, omitted)
+    Ok((selected, omitted))
 }
 
 fn context_block_order(left: &ContextBlock, right: &ContextBlock) -> std::cmp::Ordering {
@@ -422,19 +502,6 @@ fn is_instruction_block(kind: ContextBlockKind) -> bool {
             | ContextBlockKind::AgentInstructions
             | ContextBlockKind::CommandInstructions
     )
-}
-
-fn reserved_message_tokens(messages: &[LlmMessage], preserve_recent_messages: usize) -> u32 {
-    let system_prefix_len = messages
-        .iter()
-        .take_while(|message| matches!(message.role, LlmRole::System))
-        .count();
-    let protected_prefix = &messages[..system_prefix_len];
-    let rest = &messages[system_prefix_len..];
-    let recent_start = rest.len().saturating_sub(preserve_recent_messages);
-    let protected_tokens = total_tokens(&message_context_blocks(protected_prefix));
-    let recent_tokens = total_tokens(&message_context_blocks(&rest[recent_start..]));
-    protected_tokens.saturating_add(recent_tokens)
 }
 
 fn inject_host_context(messages: Vec<LlmMessage>, host_blocks: &[ContextBlock]) -> Vec<LlmMessage> {
@@ -503,47 +570,173 @@ fn compaction_summary(
     parts.join("\n")
 }
 
-fn compact_messages(
-    messages: &[LlmMessage],
-    preserve_recent_messages: usize,
-) -> (Vec<LlmMessage>, u32, Option<String>) {
-    if messages.len() <= preserve_recent_messages.saturating_add(1) {
-        return (messages.to_vec(), 0, None);
-    }
+#[derive(Debug, Clone)]
+struct MessageUnit {
+    messages: Vec<LlmMessage>,
+    token_estimate: u32,
+}
 
+/// Split the transcript into protocol-safe units.  An assistant tool-use
+/// message and all immediately following tool-result messages are one unit,
+/// so compaction can never leave a dangling tool call or result.
+fn message_units(messages: &[LlmMessage]) -> Vec<MessageUnit> {
     let system_prefix_len = messages
         .iter()
         .take_while(|message| matches!(message.role, LlmRole::System))
         .count();
-    let protected_prefix = &messages[..system_prefix_len];
+    let mut units = messages[..system_prefix_len]
+        .iter()
+        .cloned()
+        .map(|message| MessageUnit {
+            token_estimate: total_tokens(&message_context_blocks(std::slice::from_ref(&message))),
+            messages: vec![message],
+        })
+        .collect::<Vec<_>>();
     let rest = &messages[system_prefix_len..];
-    if rest.len() <= preserve_recent_messages {
-        return (messages.to_vec(), 0, None);
+    let mut index = 0;
+    while index < rest.len() {
+        let mut unit_messages = vec![rest[index].clone()];
+        let joins_tool_results = matches!(rest[index].role, LlmRole::Assistant)
+            && contains_block_type(&rest[index], "tool_use");
+        index += 1;
+        if joins_tool_results {
+            while index < rest.len() && contains_tool_result(&rest[index]) {
+                unit_messages.push(rest[index].clone());
+                index += 1;
+            }
+        }
+        let token_estimate = total_tokens(&message_context_blocks(&unit_messages));
+        units.push(MessageUnit {
+            messages: unit_messages,
+            token_estimate,
+        });
     }
-
-    let omit_count = rest.len() - preserve_recent_messages;
-    let omitted = &rest[..omit_count];
-    let preserved = &rest[omit_count..];
-    let summary = summarize_messages(omitted);
-    let mut compacted = protected_prefix.to_vec();
-    compacted.push(LlmMessage {
-        role: LlmRole::System,
-        content: Value::String(summary.clone()),
-        name: Some("context_compaction".to_owned()),
-        metadata: json!({
-            "context_compaction": true,
-            "omitted_message_count": omit_count,
-        }),
-    });
-    compacted.extend_from_slice(preserved);
-    (
-        compacted,
-        u32::try_from(omit_count).unwrap_or(u32::MAX),
-        Some(summary),
-    )
+    units
 }
 
-fn summarize_messages(messages: &[LlmMessage]) -> String {
+fn compact_messages(
+    messages: &[LlmMessage],
+    preserve_recent_messages: usize,
+    budget: u32,
+) -> Result<(Vec<LlmMessage>, u32, Option<String>), ChatError> {
+    let units = message_units(messages);
+    let all_tokens = units.iter().map(|unit| unit.token_estimate).sum::<u32>();
+    if all_tokens <= budget {
+        validate_message_protocol(messages)?;
+        return Ok((messages.to_vec(), 0, None));
+    }
+
+    let system_count = messages
+        .iter()
+        .take_while(|message| matches!(message.role, LlmRole::System))
+        .count();
+    let system_units = units.iter().take(system_count).cloned().collect::<Vec<_>>();
+    let mut rest_units = units.into_iter().skip(system_count).collect::<Vec<_>>();
+    if rest_units.is_empty() {
+        return Err(context_overflow_error(
+            "required system context exceeds the hard input budget",
+            budget,
+            all_tokens,
+            all_tokens,
+        ));
+    }
+
+    let desired_recent = preserve_recent_messages.max(1);
+    let mut retained_start = rest_units.len();
+    let mut retained_count = 0usize;
+    while retained_start > 0 && retained_count < desired_recent {
+        retained_start -= 1;
+        retained_count = retained_count.saturating_add(rest_units[retained_start].messages.len());
+    }
+    let mut retained = rest_units.split_off(retained_start);
+    let mut omitted = rest_units;
+    let system_tokens = system_units
+        .iter()
+        .map(|unit| unit.token_estimate)
+        .sum::<u32>();
+
+    let min_required = system_tokens.saturating_add(
+        retained
+            .last()
+            .map(|unit| unit.token_estimate)
+            .unwrap_or_default(),
+    );
+    if min_required > budget {
+        return Err(context_overflow_error(
+            "current conversation unit exceeds the hard input budget",
+            budget,
+            min_required,
+            min_required,
+        ));
+    }
+
+    // If the desired tail is too large, evict its oldest complete units.  The
+    // last unit is the current input and is never evicted.
+    while system_tokens.saturating_add(message_units_tokens(&retained)) > budget
+        && retained.len() > 1
+    {
+        omitted.push(retained.remove(0));
+    }
+
+    let omitted_messages = omitted
+        .iter()
+        .flat_map(|unit| unit.messages.iter().cloned())
+        .collect::<Vec<_>>();
+    let omitted_count = u32::try_from(omitted_messages.len()).unwrap_or(u32::MAX);
+    let summary_budget = budget
+        .saturating_sub(system_tokens)
+        .saturating_sub(message_units_tokens(&retained));
+    let mut summary = summarize_messages(&omitted_messages, summary_budget);
+    let mut compacted = system_units
+        .iter()
+        .flat_map(|unit| unit.messages.iter().cloned())
+        .collect::<Vec<_>>();
+    if let Some(summary) = &summary {
+        compacted.push(LlmMessage {
+            role: LlmRole::System,
+            content: Value::String(summary.clone()),
+            name: Some("context_compaction".to_owned()),
+            metadata: json!({
+                "context_compaction": true,
+                "evidence_only": true,
+                "omitted_message_count": omitted_count,
+            }),
+        });
+    }
+    compacted.extend(
+        retained
+            .iter()
+            .flat_map(|unit| unit.messages.iter().cloned()),
+    );
+
+    // A bounded summary is optional evidence.  If its wrapper still consumes
+    // the last token, drop it before failing the hard preflight.
+    if total_tokens(&message_context_blocks(&compacted)) > budget {
+        compacted.retain(|message| message.name.as_deref() != Some("context_compaction"));
+        summary = None;
+    }
+    let compacted_tokens = total_tokens(&message_context_blocks(&compacted));
+    if compacted_tokens > budget {
+        return Err(context_overflow_error(
+            "protocol-safe conversation tail exceeds the hard input budget",
+            budget,
+            compacted_tokens,
+            system_tokens.saturating_add(
+                retained
+                    .last()
+                    .map(|unit| unit.token_estimate)
+                    .unwrap_or_default(),
+            ),
+        ));
+    }
+    validate_message_protocol(&compacted)?;
+    Ok((compacted, omitted_count, summary))
+}
+
+fn summarize_messages(messages: &[LlmMessage], max_tokens: u32) -> Option<String> {
+    if messages.is_empty() || max_tokens < 2 {
+        return None;
+    }
     let mut role_counts = serde_json::Map::new();
     for message in messages {
         let key = format!("{:?}", message.role).to_ascii_lowercase();
@@ -564,12 +757,191 @@ fn summarize_messages(messages: &[LlmMessage]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    format!(
+    let summary = format!(
         "Context compaction summary: {} older messages were compacted. Role counts: {}.\nPreserved facts are represented by these previews:\n{}",
         messages.len(),
         Value::Object(role_counts),
         previews
-    )
+    );
+    let mut bounded = truncate(
+        &summary,
+        usize::try_from(max_tokens)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(4),
+    );
+    while token_estimate(&Value::String(bounded.clone())) > max_tokens && !bounded.is_empty() {
+        let next_len = bounded.chars().count().saturating_sub(4);
+        bounded = truncate(&bounded, next_len);
+    }
+    (!bounded.is_empty()).then_some(bounded)
+}
+
+fn message_units_tokens(units: &[MessageUnit]) -> u32 {
+    units
+        .iter()
+        .fold(0, |total, unit| total.saturating_add(unit.token_estimate))
+}
+
+fn contains_block_type(message: &LlmMessage, block_type: &str) -> bool {
+    message.content.as_array().is_some_and(|blocks| {
+        blocks
+            .iter()
+            .any(|block| block.get("type").and_then(Value::as_str) == Some(block_type))
+    })
+}
+
+fn contains_tool_result(message: &LlmMessage) -> bool {
+    matches!(message.role, LlmRole::Tool) || contains_block_type(message, "tool_result")
+}
+
+fn tool_use_ids(message: &LlmMessage) -> Vec<String> {
+    message
+        .content
+        .as_array()
+        .into_iter()
+        .flat_map(|blocks| blocks.iter())
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .filter_map(|block| block.get("id").and_then(Value::as_str))
+        .filter(|id| !id.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn tool_result_ids(message: &LlmMessage) -> Vec<String> {
+    message
+        .content
+        .as_array()
+        .into_iter()
+        .flat_map(|blocks| blocks.iter())
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .filter_map(|block| block.get("tool_use_id").and_then(Value::as_str))
+        .filter(|id| !id.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn validate_message_protocol(messages: &[LlmMessage]) -> Result<(), ChatError> {
+    let mut pending_tool_calls = HashSet::new();
+    for message in messages {
+        for id in tool_use_ids(message) {
+            if !pending_tool_calls.insert(id.clone()) {
+                return Err(ChatError::validation(format!(
+                    "duplicate tool call id '{id}' in context"
+                )));
+            }
+        }
+        let result_ids = tool_result_ids(message);
+        if contains_tool_result(message) && result_ids.is_empty() {
+            return Err(ChatError::validation(
+                "tool result message must contain a tool_use_id",
+            ));
+        }
+        for id in result_ids {
+            if !pending_tool_calls.remove(&id) {
+                return Err(ChatError::validation(format!(
+                    "tool result '{id}' has no matching tool call in context"
+                )));
+            }
+        }
+        if matches!(message.role, LlmRole::User)
+            && !contains_tool_result(message)
+            && !pending_tool_calls.is_empty()
+        {
+            return Err(ChatError::validation(
+                "a user message cannot appear before pending tool results",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn context_overflow_error(message: &str, budget: u32, observed: u32, required: u32) -> ChatError {
+    let mut error = ChatError::validation(message);
+    error.record.details = json!({
+        "layer": "context",
+        "budget_tokens": budget,
+        "observed_tokens": observed,
+        "required_tokens": required,
+    });
+    error
+}
+
+fn context_footprint(
+    host_blocks: &[ContextBlock],
+    messages: &[LlmMessage],
+    tools: &[ToolSpec],
+    mandatory_host_tokens: u32,
+) -> ContextFootprint {
+    let host_tokens = total_tokens(host_blocks);
+    let message_tokens = total_tokens(&message_context_blocks(messages));
+    let tool_tokens = total_tokens(&tool_context_blocks(tools));
+    let total_input_tokens = host_tokens
+        .saturating_add(message_tokens)
+        .saturating_add(tool_tokens);
+    let system_messages = messages
+        .iter()
+        .take_while(|message| matches!(message.role, LlmRole::System))
+        .cloned()
+        .collect::<Vec<_>>();
+    let system_tokens = total_tokens(&message_context_blocks(&system_messages));
+    let stable_prefix_tokens = host_tokens
+        .saturating_add(system_tokens)
+        .saturating_add(tool_tokens);
+    let current_input_tokens = messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, LlmRole::User))
+        .map(|message| total_tokens(&message_context_blocks(std::slice::from_ref(message))))
+        .unwrap_or_default();
+    let required_tokens = mandatory_host_tokens
+        .saturating_add(tool_tokens)
+        .saturating_add(system_tokens)
+        .saturating_add(current_input_tokens);
+    let mut by_layer = BTreeMap::new();
+    by_layer.insert("policy_tools".to_owned(), tool_tokens);
+    by_layer.insert("host_required".to_owned(), mandatory_host_tokens);
+    by_layer.insert(
+        "host_optional".to_owned(),
+        host_tokens.saturating_sub(mandatory_host_tokens),
+    );
+    by_layer.insert("stable_system".to_owned(), system_tokens);
+    by_layer.insert(
+        "retained_raw_tail".to_owned(),
+        message_tokens
+            .saturating_sub(system_tokens)
+            .saturating_sub(current_input_tokens),
+    );
+    by_layer.insert("current_input".to_owned(), current_input_tokens);
+    let input_items = u32::try_from(messages.len().saturating_add(tools.len())).unwrap_or(u32::MAX);
+    let multimodal_units = messages
+        .iter()
+        .map(|message| count_multimodal_units(&message.content))
+        .sum();
+    ContextFootprint {
+        total_tokens: total_input_tokens,
+        required_tokens,
+        stable_prefix_tokens,
+        dynamic_suffix_tokens: total_input_tokens.saturating_sub(stable_prefix_tokens),
+        input_items,
+        multimodal_units,
+        by_layer,
+    }
+}
+
+fn count_multimodal_units(value: &Value) -> u32 {
+    match value {
+        Value::Array(values) => values.iter().map(count_multimodal_units).sum(),
+        Value::Object(object) => {
+            let own = object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    matches!(kind, "image" | "image_url" | "audio" | "input_audio")
+                });
+            u32::from(own).saturating_add(object.values().map(count_multimodal_units).sum::<u32>())
+        }
+        _ => 0,
+    }
 }
 
 fn snapshot_summary(snapshot: &ContextSnapshot) -> Value {
@@ -621,6 +993,15 @@ fn message_priority(message: &LlmMessage) -> i32 {
 fn token_estimate(value: &Value) -> u32 {
     let chars = value.to_string().chars().count();
     u32::try_from(chars / 4 + 1).unwrap_or(u32::MAX)
+}
+
+// Message estimates intentionally exclude the provider-neutral JSON envelope
+// and use a conservative character heuristic.  Host blocks and tool schemas
+// retain the stricter generic estimate because their wrappers are part of the
+// stable request contract.
+fn message_token_estimate(message: &LlmMessage) -> u32 {
+    let chars = content_text(&message.content).chars().count();
+    u32::try_from(chars / 8 + 1).unwrap_or(u32::MAX)
 }
 
 fn value_hash(value: &Value) -> String {
