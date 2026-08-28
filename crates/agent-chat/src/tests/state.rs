@@ -992,3 +992,109 @@ fn chat_turn_rejects_cyclic_supersede_lineage() {
             .contains("supersede lineage contains a cycle")
     );
 }
+
+#[test]
+fn chat_turn_keeps_tool_calls_when_provider_reports_stop() {
+    let state = chat_turn_initial_state(&ChatTurnRequest {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        turn_id: Some("turn_stop_with_tool".to_owned()),
+        surface: None,
+        mode: None,
+        session_id: None,
+        thread_id: None,
+        agent_id: Some("chat".to_owned()),
+        provider: "mock".to_owned(),
+        model: "mock-model".to_owned(),
+        messages: vec![user_message("read the task")],
+        temperature: None,
+        max_output_tokens: None,
+        tools: vec![],
+        context_blocks: vec![],
+        metadata: json!({}),
+        context_policy: Default::default(),
+        max_tool_rounds: 4,
+        tool_execution: ChatToolExecution::Runtime,
+    })
+    .expect("initial state");
+    let response = LlmResponse {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        provider: "mock".to_owned(),
+        model: "mock-model".to_owned(),
+        content: String::new(),
+        finish_reason: LlmFinishReason::Stop,
+        object: None,
+        usage: None,
+        metadata: json!({}),
+    };
+
+    let advance = chat_turn_apply_response(
+        state,
+        "",
+        vec![ChatToolCall {
+            id: "call_stop".to_owned(),
+            name: "read_task".to_owned(),
+            input: json!({"id": "task_1"}),
+        }],
+        &response,
+    )
+    .expect("tool call remains actionable");
+
+    match advance {
+        ChatTurnAdvance::RequiresToolResults { state, tool_calls } => {
+            assert_eq!(tool_calls.len(), 1);
+            assert_eq!(state.pending_tool_calls[0].id, "call_stop");
+        }
+        ChatTurnAdvance::Completed { .. } => {
+            panic!("a complete tool call must not be reported as end_turn")
+        }
+    }
+}
+
+#[test]
+fn chat_turn_rejects_tool_call_without_object_input() {
+    let state = chat_turn_initial_state(&ChatTurnRequest {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        turn_id: Some("turn_invalid_tool_input".to_owned()),
+        surface: None,
+        mode: None,
+        session_id: None,
+        thread_id: None,
+        agent_id: Some("chat".to_owned()),
+        provider: "mock".to_owned(),
+        model: "mock-model".to_owned(),
+        messages: vec![user_message("read the task")],
+        temperature: None,
+        max_output_tokens: None,
+        tools: vec![],
+        context_blocks: vec![],
+        metadata: json!({}),
+        context_policy: Default::default(),
+        max_tool_rounds: 4,
+        tool_execution: ChatToolExecution::Runtime,
+    })
+    .expect("initial state");
+    let response = LlmResponse {
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        provider: "mock".to_owned(),
+        model: "mock-model".to_owned(),
+        content: String::new(),
+        finish_reason: LlmFinishReason::ToolCall,
+        object: None,
+        usage: None,
+        metadata: json!({}),
+    };
+
+    let error = chat_turn_apply_response(
+        state,
+        "",
+        vec![ChatToolCall {
+            id: "call_invalid".to_owned(),
+            name: "read_task".to_owned(),
+            input: Value::Null,
+        }],
+        &response,
+    )
+    .expect_err("null tool input must be rejected");
+
+    assert!(error.record.message.contains("input must be a JSON object"));
+}

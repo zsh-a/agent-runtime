@@ -43,6 +43,8 @@ pub(crate) struct PreparedContext {
     pub(crate) plan: ContextPlan,
 }
 
+type NormalizedHostContext = (Vec<ContextBlock>, Vec<String>, HashMap<String, String>);
+
 pub(crate) fn prepare_llm_request(state: &mut ChatTurnState) -> Result<PreparedContext, ChatError> {
     let policy = state.context_policy.clone();
     if policy.max_input_tokens == 0 || policy.reserve_output_tokens >= policy.max_input_tokens {
@@ -292,7 +294,7 @@ fn tool_context_blocks(tools: &[ToolSpec]) -> Vec<ContextBlock> {
 
 fn normalize_host_context_blocks(
     blocks: &[ContextBlock],
-) -> Result<(Vec<ContextBlock>, Vec<String>, HashMap<String, String>), ChatError> {
+) -> Result<NormalizedHostContext, ChatError> {
     let mut ids = HashSet::new();
     let mut kinds = HashMap::new();
     for block in blocks {
@@ -341,12 +343,12 @@ fn normalize_host_context_blocks(
         let Some(evidence) = &block.evidence else {
             continue;
         };
-        let is_current = !evidence
+        let is_current = evidence
             .valid_from
-            .is_some_and(|valid_from| valid_from > now)
-            && !evidence
+            .is_none_or(|valid_from| valid_from <= now)
+            && evidence
                 .valid_until
-                .is_some_and(|valid_until| valid_until <= now);
+                .is_none_or(|valid_until| valid_until > now);
         if !is_current {
             continue;
         }

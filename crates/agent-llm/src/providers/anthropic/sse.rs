@@ -28,6 +28,8 @@ impl AnthropicSseState {
             pending,
             content: String::new(),
             finish_reason: None,
+            raw_finish_reason: None,
+            terminal_signal: None,
             input_tokens: 0,
             output_tokens: 0,
             raw_blocks: Vec::new(),
@@ -72,7 +74,11 @@ impl AnthropicSseState {
                         self.handle_frame(&frame);
                     }
                     if !self.finished {
-                        self.push_finished();
+                        if self.terminal_signal.is_some() {
+                            self.push_finished();
+                        } else {
+                            self.push_stream_incomplete();
+                        }
                     }
                 }
             }
@@ -93,6 +99,7 @@ impl AnthropicSseState {
         let decoded = match serde_json::from_str::<AnthropicStreamEvent>(&data) {
             Ok(decoded) => decoded,
             Err(err) => {
+                self.finished = true;
                 warn!(
                     provider = %self.provider,
                     model = %self.model,
@@ -233,6 +240,8 @@ impl AnthropicSseState {
                 if let Some(delta) = decoded.delta
                     && let Some(reason) = delta.get("stop_reason").and_then(Value::as_str)
                 {
+                    self.raw_finish_reason = Some(reason.to_owned());
+                    self.terminal_signal = Some("stop_reason".to_owned());
                     self.finish_reason = Some(anthropic_finish_reason(Some(reason)));
                 }
                 if let Some(usage) = decoded.usage {
@@ -245,7 +254,7 @@ impl AnthropicSseState {
                     && state.block_type == "tool_use"
                 {
                     let input = if state.partial_input_json.trim().is_empty() {
-                        Some(state.input.unwrap_or_else(|| json!({})))
+                        state.input.clone()
                     } else {
                         decode_json_value_or_null(&state.partial_input_json)
                     };
@@ -261,8 +270,12 @@ impl AnthropicSseState {
                     }));
                 }
             }
-            "message_stop" => self.push_finished(),
+            "message_stop" => {
+                self.terminal_signal = Some("message_stop".to_owned());
+                self.push_finished();
+            }
             "error" => {
+                self.finished = true;
                 let error = decoded.error.unwrap_or(AnthropicErrorBody {
                     r#type: Some("provider_error".to_owned()),
                     message: "provider stream error".to_owned(),
@@ -355,6 +368,8 @@ impl AnthropicSseState {
                 "stream": true,
                 "anthropic_version": self.anthropic_version,
                 "anthropic_content": self.raw_blocks,
+                "termination_signal": self.terminal_signal.clone(),
+                "raw_finish_reason": self.raw_finish_reason.clone(),
             }),
         };
         info!(
@@ -377,5 +392,22 @@ impl AnthropicSseState {
             tool_input: None,
             metadata: json!({"api": "anthropic_messages", "stream": true}),
         }));
+    }
+
+    fn push_stream_incomplete(&mut self) {
+        self.finished = true;
+        self.pending.push_back(Err(LlmError::provider(
+            "provider_stream_incomplete",
+            format!(
+                "Anthropic stream ended before a terminal signal ({})",
+                self.provider
+            ),
+            false,
+            json!({
+                "provider": self.provider,
+                "model": self.model,
+                "termination_signal": Value::Null,
+            }),
+        )));
     }
 }

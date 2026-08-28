@@ -153,6 +153,8 @@ pub(super) struct OpenAiSseState {
     pub(super) pending: VecDeque<Result<LlmEvent, LlmError>>,
     pub(super) content: String,
     pub(super) finish_reason: Option<LlmFinishReason>,
+    pub(super) raw_finish_reason: Option<String>,
+    pub(super) terminal_signal: Option<String>,
     pub(super) usage: Option<LlmUsage>,
     pub(super) tools: BTreeMap<i64, OpenAiToolCallState>,
     pub(super) response_format: Option<LlmResponseFormat>,

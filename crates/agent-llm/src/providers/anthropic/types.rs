@@ -88,6 +88,8 @@ pub(super) struct AnthropicSseState {
     pub(super) pending: VecDeque<Result<LlmEvent, LlmError>>,
     pub(super) content: String,
     pub(super) finish_reason: Option<LlmFinishReason>,
+    pub(super) raw_finish_reason: Option<String>,
+    pub(super) terminal_signal: Option<String>,
     pub(super) input_tokens: u32,
     pub(super) output_tokens: u32,
     pub(super) raw_blocks: Vec<Value>,

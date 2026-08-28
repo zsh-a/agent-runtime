@@ -388,7 +388,10 @@ async fn run_chat_state(
                 tool_calls.push(ChatToolCall {
                     id,
                     name,
-                    input: event.tool_input.clone().unwrap_or_else(|| json!({})),
+                    // Keep a missing/invalid input visible to the state
+                    // validator. Substituting `{}` turns a malformed model
+                    // call into a potentially destructive valid call.
+                    input: event.tool_input.clone().unwrap_or_else(|| json!(null)),
                 });
             }
             if matches!(event.kind, LlmEventKind::Finished) {

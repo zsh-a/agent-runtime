@@ -26,6 +26,8 @@ impl OpenAiSseState {
             pending,
             content: String::new(),
             finish_reason: None,
+            raw_finish_reason: None,
+            terminal_signal: None,
             usage: None,
             tools: BTreeMap::new(),
             response_format,
@@ -68,7 +70,15 @@ impl OpenAiSseState {
                         self.handle_frame(&frame);
                     }
                     if !self.finished {
-                        self.push_finished();
+                        if self.terminal_signal.is_some() {
+                            // Some OpenAI-compatible gateways omit [DONE] but
+                            // still send the final choice.finish_reason. That
+                            // is an explicit terminal signal and is safe to
+                            // accept; a bare EOF is not.
+                            self.push_finished();
+                        } else {
+                            self.push_stream_incomplete();
+                        }
                     }
                 }
             }
@@ -87,12 +97,14 @@ impl OpenAiSseState {
             return;
         }
         if data.trim() == "[DONE]" {
+            self.terminal_signal = Some("done_marker".to_owned());
             self.push_finished();
             return;
         }
         let decoded = match serde_json::from_str::<OpenAiChatCompletionResponse>(&data) {
             Ok(decoded) => decoded,
             Err(err) => {
+                self.finished = true;
                 warn!(
                     provider = %self.provider,
                     model = %self.model,
@@ -110,6 +122,7 @@ impl OpenAiSseState {
             }
         };
         if let Some(error) = decoded.error {
+            self.finished = true;
             warn!(
                 provider = %self.provider,
                 model = %self.model,
@@ -226,8 +239,16 @@ impl OpenAiSseState {
                 }
             }
             if let Some(reason) = choice.finish_reason {
+                self.raw_finish_reason = Some(reason.clone());
+                self.terminal_signal = Some("finish_reason".to_owned());
                 self.finish_reason = Some(openai_finish_reason(Some(&reason)));
-                if matches!(self.finish_reason, Some(LlmFinishReason::ToolCall)) {
+                if !matches!(
+                    self.finish_reason,
+                    Some(LlmFinishReason::ContentFilter | LlmFinishReason::Error)
+                ) {
+                    // OpenAI-compatible gateways occasionally report `stop`
+                    // or `length` together with tool deltas. The deltas are
+                    // authoritative; close those calls before the response.
                     self.push_openai_tool_call_ends();
                 }
             }
@@ -270,6 +291,14 @@ impl OpenAiSseState {
         if self.finished {
             return;
         }
+        // `[DONE]` is also a valid terminal signal when the gateway omitted a
+        // choice.finish_reason. Do not lose tool calls accumulated in deltas.
+        if !matches!(
+            self.finish_reason,
+            Some(LlmFinishReason::ContentFilter | LlmFinishReason::Error)
+        ) {
+            self.push_openai_tool_call_ends();
+        }
         self.finished = true;
         let object = match structured_output_from_content(&self.response_format, &self.content) {
             Ok(object) => object,
@@ -286,7 +315,12 @@ impl OpenAiSseState {
             finish_reason: self.finish_reason.clone().unwrap_or(LlmFinishReason::Stop),
             object,
             usage: self.usage.clone(),
-            metadata: json!({"api": "openai_chat_completions", "stream": true}),
+            metadata: json!({
+                "api": "openai_chat_completions",
+                "stream": true,
+                "termination_signal": self.terminal_signal.clone(),
+                "raw_finish_reason": self.raw_finish_reason.clone(),
+            }),
         };
         info!(
             provider = %self.provider,
@@ -308,5 +342,22 @@ impl OpenAiSseState {
             tool_input: None,
             metadata: json!({"api": "openai_chat_completions", "stream": true}),
         }));
+    }
+
+    fn push_stream_incomplete(&mut self) {
+        self.finished = true;
+        self.pending.push_back(Err(LlmError::provider(
+            "provider_stream_incomplete",
+            format!(
+                "OpenAI-compatible stream ended before a terminal signal ({})",
+                self.provider
+            ),
+            false,
+            json!({
+                "provider": self.provider,
+                "model": self.model,
+                "termination_signal": Value::Null,
+            }),
+        )));
     }
 }

@@ -109,7 +109,19 @@ pub fn chat_turn_apply_response(
     let round = chat_turn_next_round(&state);
     state.round = round;
     state.transcript_sequence = state.transcript_sequence.saturating_add(1);
-    if !matches!(response.finish_reason, LlmFinishReason::ToolCall) || tool_calls.is_empty() {
+    if matches!(response.finish_reason, LlmFinishReason::ToolCall) && tool_calls.is_empty() {
+        return Err(ChatError::validation(
+            "LLM response requested tool use but contained no tool calls",
+        ));
+    }
+    let tools_are_allowed = !matches!(
+        response.finish_reason,
+        LlmFinishReason::Error | LlmFinishReason::ContentFilter
+    );
+    if !tool_calls.is_empty() && tools_are_allowed {
+        validate_tool_calls(&tool_calls)?;
+    }
+    if tool_calls.is_empty() || !tools_are_allowed {
         let content = if assistant_text.is_empty() {
             response.content.as_str()
         } else {
@@ -124,6 +136,9 @@ pub fn chat_turn_apply_response(
             stop_reason: finish_reason(&response.finish_reason).to_owned(),
         });
     }
+    // A complete tool call is authoritative even when a provider reports
+    // `stop` (or `length`) instead of `tool_calls`. Executing the call is
+    // safer than dropping it and reporting a misleading completed turn.
     if round >= state.max_tool_rounds {
         return Err(ChatError::validation(
             "chat turn exceeded the tool round budget",
@@ -156,6 +171,7 @@ pub fn chat_turn_apply_tool_results(
             "tool resume must contain exactly one result for every pending tool call",
         ));
     }
+    validate_tool_calls(&state.pending_tool_calls)?;
     let mut result_blocks = Vec::new();
     let mut result_ids = HashSet::new();
     for call in state.pending_tool_calls.clone() {
@@ -407,6 +423,34 @@ fn tool_result_block(tool_call_id: &str, output: ToolOutput) -> Value {
         },
         "is_error": output.is_error,
     })
+}
+
+fn validate_tool_calls(tool_calls: &[ChatToolCall]) -> Result<(), ChatError> {
+    let mut ids = HashSet::new();
+    for (index, call) in tool_calls.iter().enumerate() {
+        let id = call.id.trim();
+        if id.is_empty() {
+            return Err(ChatError::validation(format!(
+                "tool call {index} requires a non-empty id"
+            )));
+        }
+        if !ids.insert(id.to_owned()) {
+            return Err(ChatError::validation(format!(
+                "duplicate tool call id '{id}'"
+            )));
+        }
+        if call.name.trim().is_empty() {
+            return Err(ChatError::validation(format!(
+                "tool call '{id}' requires a non-empty name"
+            )));
+        }
+        if !call.input.is_object() {
+            return Err(ChatError::validation(format!(
+                "tool call '{id}' input must be a JSON object"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn llm_metadata(state: &ChatTurnState) -> Value {

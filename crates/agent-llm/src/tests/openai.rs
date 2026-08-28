@@ -347,3 +347,103 @@ async fn openai_compatible_provider_sends_tools_and_tool_results() {
 
     assert_eq!(response.content, "done");
 }
+
+#[tokio::test]
+async fn openai_stream_without_terminal_signal_is_reported_as_incomplete() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let error = provider
+        .stream(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "gpt-stream-test".to_owned(),
+            messages: vec![user_message("ping")],
+            temperature: None,
+            max_output_tokens: Some(32),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider streams")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .find_map(Result::err)
+        .expect("missing terminal signal is an error");
+
+    assert_eq!(error.record.code, "provider_stream_incomplete");
+}
+
+#[tokio::test]
+async fn openai_stream_preserves_tool_call_when_finish_reason_is_stop() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_stop\",\"function\":{\"name\":\"read_task\",\"arguments\":\"{\\\"id\\\":\\\"task_1\\\"}\"}}]},\"finish_reason\":\"stop\"}]}\n\n",
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let events = provider
+        .stream(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "gpt-stream-test".to_owned(),
+            messages: vec![user_message("read task")],
+            temperature: None,
+            max_output_tokens: Some(32),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider streams")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream events ok");
+
+    let tool_end = events
+        .iter()
+        .find(|event| matches!(event.kind, LlmEventKind::ToolCallEnd))
+        .expect("tool call end");
+    assert_eq!(tool_end.tool_call_id.as_deref(), Some("call_stop"));
+    assert_eq!(tool_end.tool_input, Some(json!({"id": "task_1"})));
+    let response = events
+        .last()
+        .and_then(|event| event.response.as_ref())
+        .expect("finished response");
+    assert_eq!(response.finish_reason, LlmFinishReason::Stop);
+}

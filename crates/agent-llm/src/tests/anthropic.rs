@@ -410,3 +410,118 @@ async fn anthropic_provider_preserves_multimodal_content_tools_and_raw_blocks() 
         "Coffee"
     );
 }
+
+#[tokio::test]
+async fn anthropic_stream_without_terminal_signal_is_reported_as_incomplete() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/messages",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                concat!(
+                    "event: message_start\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+                    "event: content_block_start\n",
+                    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"partial\"}}\n\n"
+                ),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider = AnthropicProvider::new(
+        "anthropic",
+        format!("http://{addr}"),
+        "test-key",
+        "2023-06-01",
+    )
+    .expect("provider builds");
+    let error = provider
+        .stream(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "anthropic".to_owned(),
+            model: "claude-stream-test".to_owned(),
+            messages: vec![user_message("ping")],
+            temperature: None,
+            max_output_tokens: Some(64),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider streams")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .find_map(Result::err)
+        .expect("missing terminal signal is an error");
+
+    assert_eq!(error.record.code, "provider_stream_incomplete");
+}
+
+#[tokio::test]
+async fn anthropic_stream_accepts_stop_reason_without_message_stop() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/messages",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                concat!(
+                    "event: message_start\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+                    "event: content_block_start\n",
+                    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"done\"}}\n\n",
+                    "event: message_delta\n",
+                    "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"
+                ),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider = AnthropicProvider::new(
+        "anthropic",
+        format!("http://{addr}"),
+        "test-key",
+        "2023-06-01",
+    )
+    .expect("provider builds");
+    let events = provider
+        .stream(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "anthropic".to_owned(),
+            model: "claude-stream-test".to_owned(),
+            messages: vec![user_message("ping")],
+            temperature: None,
+            max_output_tokens: Some(64),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider streams")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stop reason is a terminal signal");
+
+    let response = events
+        .last()
+        .and_then(|event| event.response.as_ref())
+        .expect("finished response");
+    assert_eq!(response.content, "done");
+    assert_eq!(response.finish_reason, LlmFinishReason::Stop);
+}
