@@ -125,6 +125,57 @@ async fn openai_compatible_provider_sends_json_schema_response_format() {
 }
 
 #[tokio::test]
+async fn openai_structured_completion_recovers_valid_reasoning_json() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            assert_eq!(body["response_format"]["type"], "json_object");
+            Json(json!({
+                "choices": [{
+                    "message": {
+                        "content": null,
+                        "reasoning_content": "{\"title\":\"Recovered\"}"
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let response = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "reasoning-test".to_owned(),
+            messages: vec![user_message("return json")],
+            temperature: None,
+            max_output_tokens: Some(64),
+            tools: vec![],
+            response_format: Some(LlmResponseFormat::JsonObject),
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider recovers structured output");
+
+    assert_eq!(response.content, "{\"title\":\"Recovered\"}");
+    assert_eq!(response.object, Some(json!({"title": "Recovered"})));
+    assert_eq!(
+        response.metadata["used_structured_reasoning_fallback"],
+        true
+    );
+}
+
+#[tokio::test]
 async fn openai_compatible_provider_streams_sse_text_and_usage() {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await

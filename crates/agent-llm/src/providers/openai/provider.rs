@@ -124,10 +124,22 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 json!({}),
             )
         })?;
-        let content = choice
-            .message
-            .and_then(|message| message.content)
-            .unwrap_or_default();
+        let (content, used_structured_reasoning_fallback) = match choice.message {
+            Some(message) => {
+                let content = message.content.unwrap_or_default();
+                if content.trim().is_empty() && request.response_format.is_some() {
+                    let fallback = message
+                        .reasoning_content
+                        .or(message.reasoning)
+                        .unwrap_or_default();
+                    let used_fallback = !fallback.trim().is_empty();
+                    (fallback, used_fallback)
+                } else {
+                    (content, false)
+                }
+            }
+            None => (String::new(), false),
+        };
         let finish_reason = openai_finish_reason(choice.finish_reason.as_deref());
         let usage = decoded.usage.map(|usage| LlmUsage {
             input_tokens: usage.prompt_tokens,
@@ -154,7 +166,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
             finish_reason,
             object,
             usage,
-            metadata: json!({"api": "openai_chat_completions"}),
+            metadata: json!({
+                "api": "openai_chat_completions",
+                "used_structured_reasoning_fallback": used_structured_reasoning_fallback,
+            }),
         })
     }
 
