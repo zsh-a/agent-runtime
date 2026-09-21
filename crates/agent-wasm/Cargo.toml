@@ -24,6 +24,7 @@ wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
+tokio-util.workspace = true
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 console_error_panic_hook.workspace = true

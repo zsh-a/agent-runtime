@@ -15,18 +15,36 @@
 
 use std::sync::Arc;
 
-use agent_chat::{ChatResumeRequest, ChatTurnEvent, ChatTurnRequest, ChatTurnRunner};
+use agent_chat::{
+    ChatResumeRequest, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner,
+};
 use agent_core::{
     AgentError, AgentStateStore, RunId, RunScope, ToolContext, ToolError, ToolRegistry, ToolSpec,
     UserContext,
 };
+use agent_core::spawn_detached;
 use agent_llm::OpenAiCompatibleProvider;
 use agent_runtime::BasicAgentServices;
 use agent_store::InMemoryStateStore;
 use futures::StreamExt;
+use js_sys::Function;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
+
+#[wasm_bindgen(typescript_custom_section)]
+const CANCEL_TYPES: &str = r#"
+/**
+ * Cancels an in-flight turn.
+ *
+ * Replaces the underlying token, so the next `turn` or `resume` is not
+ * cancelled by this call. Idempotent within a turn.
+ */
+export interface JsTurnHandle {
+  readonly cancel: () => void;
+}
+"#;
 
 #[wasm_bindgen(typescript_custom_section)]
 const TOOL_TYPES: &str = r#"
@@ -136,60 +154,112 @@ impl AgentRuntime {
         })
     }
 
-    /// Run a turn from a `ChatTurnRequest` JSON string to its terminal event.
+    /// Run a turn from a `ChatTurnRequest` JSON string, pushing each event to
+    /// `on_event` as it arrives.
     ///
-    /// Resolves with every `ChatTurnEvent` as a JSON array. Under client tool
-    /// execution the turn ends with a `done` event whose metadata is
-    /// `requires_tool_results`; the caller then executes the emitted tool calls
-    /// and continues through [`AgentRuntime::resume`].
-    pub fn turn(&self, request_json: String) -> js_sys::Promise {
-        let request: ChatTurnRequest = match serde_json::from_str(&request_json) {
-            Ok(request) => request,
-            Err(error) => {
-                return js_sys::Promise::reject(&JsValue::from_str(&format!(
-                    "invalid ChatTurnRequest: {error}"
-                )));
-            }
-        };
-        let runner = self.runner.clone();
-        future_to_promise(async move {
-            collect(runner.stream(request))
-                .await
-                .map(|text| JsValue::from_str(&text))
-        })
+    /// `on_event` receives one JSON-serialised `ChatTurnEvent` per call, ending
+    /// with `done` or `error`. A failed turn is delivered as an `error` event
+    /// rather than a rejection, so the host renders it where it called in; the
+    /// returned handle rejects only a malformed request.
+    ///
+    /// Under client tool execution the turn ends with a `done` event whose
+    /// metadata is `requires_tool_results`; the caller then executes the emitted
+    /// tool calls and continues through [`AgentRuntime::stream_resume`].
+    pub fn stream_turn(
+        &self,
+        request_json: String,
+        on_event: Function,
+    ) -> Result<JsTurnHandle, JsValue> {
+        let request: ChatTurnRequest = serde_json::from_str(&request_json)
+            .map_err(|error| JsValue::from_str(&format!("invalid ChatTurnRequest: {error}")))?;
+        let cancellation = CancellationToken::new();
+        let stream = self
+            .runner
+            .stream_with_cancellation(request, cancellation.clone());
+        Ok(pump(on_event, stream, cancellation))
     }
 
     /// Resume a suspended turn with the results of the tools the host executed.
-    pub fn resume(&self, request_json: String) -> js_sys::Promise {
-        let request: ChatResumeRequest = match serde_json::from_str(&request_json) {
-            Ok(request) => request,
-            Err(error) => {
-                return js_sys::Promise::reject(&JsValue::from_str(&format!(
-                    "invalid ChatResumeRequest: {error}"
-                )));
-            }
-        };
-        let runner = self.runner.clone();
-        future_to_promise(async move {
-            collect(runner.resume(request))
-                .await
-                .map(|text| JsValue::from_str(&text))
-        })
+    ///
+    /// See [`AgentRuntime::stream_turn`] for the event contract.
+    pub fn stream_resume(
+        &self,
+        request_json: String,
+        on_event: Function,
+    ) -> Result<JsTurnHandle, JsValue> {
+        let request: ChatResumeRequest = serde_json::from_str(&request_json)
+            .map_err(|error| JsValue::from_str(&format!("invalid ChatResumeRequest: {error}")))?;
+        let cancellation = CancellationToken::new();
+        let stream = self
+            .runner
+            .resume_with_cancellation(request, cancellation.clone());
+        Ok(pump(on_event, stream, cancellation))
     }
 }
 
-/// Drain an event stream into a JSON array, turning the first error into a
-/// rejected promise so JavaScript sees the failure where it called in.
-async fn collect(stream: agent_chat::ChatEventStream) -> Result<String, JsValue> {
-    let mut events: Vec<ChatTurnEvent> = Vec::new();
-    let mut stream = std::pin::pin!(stream);
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(event) => events.push(event),
-            Err(error) => return Err(JsValue::from_str(&error.to_string())),
-        }
+/// Cancels an in-flight turn.
+///
+/// Dropping the handle does not cancel: the turn owns its own token, and the
+/// host decides when to stop it.
+#[wasm_bindgen]
+pub struct JsTurnHandle {
+    cancellation: CancellationToken,
+}
+
+#[wasm_bindgen]
+impl JsTurnHandle {
+    /// Cancel the turn. Idempotent, and safe after the turn already finished.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
     }
-    serde_json::to_string(&events).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+/// Forward a turn's events to JavaScript until it ends.
+///
+/// Streaming is push-based on purpose: a `ReadableStream` would tie the turn to
+/// the host's read cadence, whereas a callback lets the host render each delta
+/// as it arrives and drop nothing if it stops reading.
+fn pump(
+    on_event: Function,
+    stream: agent_chat::ChatEventStream,
+    cancellation: CancellationToken,
+) -> JsTurnHandle {
+    spawn_detached(async move {
+        let mut stream = std::pin::pin!(stream);
+        while let Some(event) = stream.next().await {
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => {
+                    emit_error(&on_event, &error.to_string());
+                    return;
+                }
+            };
+            // `done` and `error` are terminal; stop rather than await a stream
+            // that will not yield again.
+            let terminal = matches!(
+                event.kind,
+                ChatTurnEventKind::Done | ChatTurnEventKind::Error
+            );
+            let Ok(json) = serde_json::to_string(&event) else {
+                emit_error(&on_event, "failed to serialise a turn event");
+                return;
+            };
+            let _ = on_event.call1(&JsValue::NULL, &JsValue::from_str(&json));
+            if terminal {
+                return;
+            }
+        }
+    });
+    JsTurnHandle { cancellation }
+}
+
+/// Report a failure through the same channel as a normal event.
+///
+/// An error the host cannot observe would leave the UI waiting forever, so this
+/// fires even if the callback itself throws (the throw is the host's problem).
+fn emit_error(on_event: &Function, message: &str) {
+    let payload = serde_json::json!({ "kind": "error", "content": message, "round": 0 });
+    let _ = on_event.call1(&JsValue::NULL, &JsValue::from_str(&payload.to_string()));
 }
 
 fn js_tool_entry(tool: JsTool) -> Result<JsToolEntry, JsValue> {
