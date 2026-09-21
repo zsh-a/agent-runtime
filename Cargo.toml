@@ -8,6 +8,7 @@ members = [
   "crates/agent-llm",
   "crates/agent-chat",
   "crates/agent-cli",
+  "crates/agent-wasm",
 ]
 
 [workspace.package]
@@ -23,6 +24,7 @@ agent-llm = { path = "crates/agent-llm" }
 agent-runtime = { path = "crates/agent-runtime" }
 agent-store = { path = "crates/agent-store" }
 agent-tools = { path = "crates/agent-tools" }
+agent-wasm = { path = "crates/agent-wasm" }
 anyhow = "1.0.102"
 async-trait = "0.1.89"
 axum = "0.8.9"
@@ -52,6 +54,10 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 toml = "1.1.2"
 unicode-width = "0.2.2"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
 uuid = { version = "1.23.4", features = ["serde", "v7"] }
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
 walkdir = "2.5.0"

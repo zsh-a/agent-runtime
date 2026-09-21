@@ -6,7 +6,6 @@ use agent_core::{
     ProposalEnvelope, ProposalId, RunId, RunScope, SessionId, SessionRecord, StepRecord,
     StoreError, ThreadId, ThreadRecord,
 };
-use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::util::{same_scope, sort_and_limit_runs};
@@ -22,7 +21,8 @@ impl InMemoryRunStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentRunStore for InMemoryRunStore {
     async fn create_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
         let mut runs = self.runs.write().await;
@@ -132,7 +132,8 @@ impl InMemoryStateStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentStateStore for InMemoryStateStore {
     async fn load(
         &self,
@@ -174,7 +175,8 @@ impl InMemoryProposalStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentProposalStore for InMemoryProposalStore {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError> {
         let mut proposals = self.proposals.write().await;
@@ -248,7 +250,8 @@ impl InMemorySessionStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentSessionStore for InMemorySessionStore {
     async fn create_session(&self, session: SessionRecord) -> Result<(), StoreError> {
         self.sessions

@@ -15,13 +15,18 @@ testkit = []
 agent-core.workspace = true
 async-trait.workspace = true
 blake3.workspace = true
-camino.workspace = true
-fs-err.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, optional = true }
 time.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "process", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# The filesystem backends are native-only; the in-memory backend is what runs in
+# a browser, so their dependencies stay off wasm builds.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+camino.workspace = true
+fs-err.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "process", "rt", "rt-multi-thread"] }

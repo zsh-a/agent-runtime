@@ -1,0 +1,32 @@
+[package]
+name = "agent-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Browser entry point for the Agent Runtime."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+agent-core.workspace = true
+agent-llm.workspace = true
+agent-chat.workspace = true
+agent-runtime.workspace = true
+agent-store.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+console_error_panic_hook.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

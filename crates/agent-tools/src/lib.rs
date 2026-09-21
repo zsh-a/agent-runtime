@@ -1,3 +1,10 @@
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+compile_error!(
+    "agent-tools is a host-side crate (subprocess, filesystem, MCP stdio) and has no \
+     wasm target; browser hosts supply their own tools through ChatTurnRequest.tools. \
+     Exclude it from wasm builds by targeting the wasm-capable crates directly."
+);
+
 mod error;
 mod http;
 mod manifest;
