@@ -300,24 +300,21 @@ impl AgentSessionStore for SqliteStore {
                 .iter()
                 .filter_map(checkpoint_from_step)
                 .max_by_key(|checkpoint| checkpoint.archive_through_seq);
-            if let Some(existing) = &current_checkpoint {
-                if existing.checkpoint_id == checkpoint.checkpoint_id {
-                    let event = events
-                        .iter()
-                        .find(|event| {
-                            event.kind == ChatTranscriptEventKind::ContextCheckpointed
-                                && event.event_id
-                                    == format!("checkpoint:{}", checkpoint.checkpoint_id)
-                        })
-                        .cloned()
-                        .ok_or_else(|| {
-                            StoreError::new("checkpoint exists without checkpoint event")
-                        })?;
-                    return Ok(Some(ContextCheckpointCommit {
-                        checkpoint: existing.clone(),
-                        event,
-                    }));
-                }
+            if let Some(existing) = &current_checkpoint
+                && existing.checkpoint_id == checkpoint.checkpoint_id
+            {
+                let event = events
+                    .iter()
+                    .find(|event| {
+                        event.kind == ChatTranscriptEventKind::ContextCheckpointed
+                            && event.event_id == format!("checkpoint:{}", checkpoint.checkpoint_id)
+                    })
+                    .cloned()
+                    .ok_or_else(|| StoreError::new("checkpoint exists without checkpoint event"))?;
+                return Ok(Some(ContextCheckpointCommit {
+                    checkpoint: existing.clone(),
+                    event,
+                }));
             }
             let current_sequence = events.last().map(|event| event.sequence).unwrap_or(0);
             if current_sequence != expected_sequence {

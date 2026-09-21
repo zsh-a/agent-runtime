@@ -409,26 +409,26 @@ impl AgentSessionStore for InMemorySessionStore {
         let mut logs = self.chat_logs.write().await;
         let thread_id = checkpoint.thread_id.clone();
         let log = logs.entry(thread_id.0.clone()).or_default();
-        if let Some(existing) = &log.checkpoint {
-            if existing.checkpoint_id == checkpoint.checkpoint_id {
-                let event = log
-                    .events
-                    .iter()
-                    .find(|event| {
-                        event.kind == ChatTranscriptEventKind::ContextCheckpointed
-                            && event
-                                .payload
-                                .get("checkpoint_id")
-                                .and_then(serde_json::Value::as_str)
-                                == Some(checkpoint.checkpoint_id.as_str())
-                    })
-                    .cloned()
-                    .ok_or_else(|| StoreError::new("checkpoint exists without checkpoint event"))?;
-                return Ok(Some(ContextCheckpointCommit {
-                    checkpoint: existing.clone(),
-                    event,
-                }));
-            }
+        if let Some(existing) = &log.checkpoint
+            && existing.checkpoint_id == checkpoint.checkpoint_id
+        {
+            let event = log
+                .events
+                .iter()
+                .find(|event| {
+                    event.kind == ChatTranscriptEventKind::ContextCheckpointed
+                        && event
+                            .payload
+                            .get("checkpoint_id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(checkpoint.checkpoint_id.as_str())
+                })
+                .cloned()
+                .ok_or_else(|| StoreError::new("checkpoint exists without checkpoint event"))?;
+            return Ok(Some(ContextCheckpointCommit {
+                checkpoint: existing.clone(),
+                event,
+            }));
         }
         let current_sequence = log.events.last().map(|event| event.sequence).unwrap_or(0);
         if current_sequence != expected_sequence {
