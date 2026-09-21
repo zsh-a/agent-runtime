@@ -1,7 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
 use agent_core::{AgentLockStore, RunLease, RunScope, StoreError};
-use async_trait::async_trait;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
@@ -10,7 +9,8 @@ pub struct InMemoryLockStore {
     leases: Mutex<HashMap<String, RunLease>>,
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentLockStore for InMemoryLockStore {
     async fn acquire(
         &self,

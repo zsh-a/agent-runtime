@@ -1,6 +1,7 @@
 use super::*;
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl LlmProvider for AnthropicProvider {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         request.validate_protocol()?;

@@ -43,7 +43,7 @@ impl ChatTurnRunner {
         let (sender, receiver) = mpsc::channel(64);
         let provider = self.provider.clone();
         let services = self.services.clone();
-        tokio::spawn(async move {
+        agent_core::spawn_detached(async move {
             run_chat_turn(provider, services, request, sender, cancellation).await;
         });
         Box::pin(stream::unfold(receiver, |mut receiver| async move {
@@ -63,7 +63,7 @@ impl ChatTurnRunner {
         let (sender, receiver) = mpsc::channel(64);
         let provider = self.provider.clone();
         let services = self.services.clone();
-        tokio::spawn(async move {
+        agent_core::spawn_detached(async move {
             run_chat_resume(provider, services, request, sender, cancellation).await;
         });
         Box::pin(stream::unfold(receiver, |mut receiver| async move {

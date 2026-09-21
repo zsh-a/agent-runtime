@@ -6,7 +6,6 @@ use agent_core::{
     ProposalEnvelope, RunId, RunScope, RunWorkflow, SubagentRequest, SubagentRunner, ToolCaller,
     ToolContext, ToolError, ToolRegistry, TraceEvent, TraceSink, UserContext,
 };
-use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -75,7 +74,8 @@ impl BasicAgentServices {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl ToolCaller for BasicAgentServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
         self.tools
@@ -94,14 +94,16 @@ impl ToolCaller for BasicAgentServices {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentEventEmitter for BasicAgentServices {
     async fn emit_event(&self, _event: AgentEvent) -> Result<(), AgentError> {
         Ok(())
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentStateAccess for BasicAgentServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         self.state_store
@@ -118,16 +120,20 @@ impl AgentStateAccess for BasicAgentServices {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl SubagentRunner for BasicAgentServices {}
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl ProposalCreator for BasicAgentServices {}
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl ArtifactPublisher for BasicAgentServices {}
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl ToolCaller for TracedAgentServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
         let started_at = std::time::Instant::now();
@@ -301,7 +307,8 @@ impl ToolCaller for TracedAgentServices {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl SubagentRunner for TracedAgentServices {
     async fn run_subagent(&self, request: SubagentRequest) -> Result<Value, ToolError> {
         self.run_subagent_with_cancellation(
@@ -341,7 +348,8 @@ impl SubagentRunner for TracedAgentServices {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentEventEmitter for TracedAgentServices {
     async fn emit_event(&self, event: AgentEvent) -> Result<(), AgentError> {
         debug!(
@@ -365,7 +373,8 @@ impl AgentEventEmitter for TracedAgentServices {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentStateAccess for TracedAgentServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         let started_at = std::time::Instant::now();
@@ -519,7 +528,8 @@ impl AgentStateAccess for TracedAgentServices {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl ProposalCreator for TracedAgentServices {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), AgentError> {
         let started_at = std::time::Instant::now();
@@ -629,7 +639,8 @@ impl ProposalCreator for TracedAgentServices {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl ArtifactPublisher for TracedAgentServices {
     async fn publish_artifact(
         &self,
@@ -663,7 +674,7 @@ fn bridge_cancellation_to_tokio(
     }
     let child = parent.child_token();
     let child_for_task = child.clone();
-    tokio::spawn(async move {
+    agent_core::spawn_task(async move {
         cancellation.cancelled().await;
         child_for_task.cancel();
     });

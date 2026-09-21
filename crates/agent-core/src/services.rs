@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::sync::Arc;
 
 
 use crate::bounds::{MaybeBoxFuture, MaybeSend, MaybeSync};

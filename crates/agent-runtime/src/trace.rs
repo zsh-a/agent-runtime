@@ -1,5 +1,4 @@
 use agent_core::{AgentError, TraceEvent, TraceSink};
-use async_trait::async_trait;
 use tokio::sync::{Mutex, broadcast};
 
 #[derive(Default)]
@@ -49,7 +48,8 @@ impl MemoryTraceSink {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl TraceSink for MemoryTraceSink {
     async fn emit(&self, event: TraceEvent) -> Result<(), AgentError> {
         {

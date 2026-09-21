@@ -1,14 +1,12 @@
-use std::pin::Pin;
+use agent_core::bounds::{MaybeBoxStream, MaybeSend, MaybeSync};
 
 use agent_core::{PROTOCOL_VERSION, ToolSpec};
-use async_trait::async_trait;
-use futures::Stream;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
-pub type LlmEventStream = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send>>;
+pub type LlmEventStream = MaybeBoxStream<'static, Result<LlmEvent, LlmError>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LlmRequest {
@@ -211,8 +209,9 @@ impl LlmError {
     }
 }
 
-#[async_trait]
-pub trait LlmProvider: Send + Sync {
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+pub trait LlmProvider: MaybeSend + MaybeSync {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError>;
     async fn stream(&self, request: LlmRequest) -> Result<LlmEventStream, LlmError>;
 }

@@ -1,5 +1,4 @@
 use agent_core::PROTOCOL_VERSION;
-use async_trait::async_trait;
 use futures::stream;
 use serde_json::{Value, json};
 use tracing::{debug, info};
@@ -71,7 +70,8 @@ impl MockLlmProvider {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl LlmProvider for MockLlmProvider {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         request.validate_protocol()?;

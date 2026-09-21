@@ -22,3 +22,8 @@ tracing.workspace = true
 [dev-dependencies]
 agent-store = { workspace = true, features = ["sqlite"] }
 tempfile.workspace = true
+
+# The process hook shells out to a local binary, so its tokio features are
+# native-only; declaring them here keeps mio out of wasm builds.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+tokio = { workspace = true, features = ["fs", "io-util", "process"] }

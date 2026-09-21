@@ -11,13 +11,13 @@ agent-core.workspace = true
 blake3.workspace = true
 camino.workspace = true
 fs-err.workspace = true
-jsonschema = { workspace = true, features = ["resolve-http", "resolve-file"] }
+jsonschema = { workspace = true, features = ["resolve-http", "resolve-file", "tls-ring"] }
 miette.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "process", "rt", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]

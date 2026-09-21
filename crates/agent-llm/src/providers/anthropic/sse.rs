@@ -6,7 +6,7 @@ impl AnthropicSseState {
         model: String,
         anthropic_version: String,
         response_format: Option<LlmResponseFormat>,
-        chunks: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+        chunks: agent_core::bounds::MaybeBoxStream<'static, Result<Bytes, reqwest::Error>>,
     ) -> Self {
         let mut pending = VecDeque::new();
         pending.push_back(Ok(LlmEvent {

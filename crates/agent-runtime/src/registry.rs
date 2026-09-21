@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use agent_core::{Agent, AgentError, AgentRegistry, AgentSpec};
-use async_trait::async_trait;
 
 pub struct InMemoryAgentRegistry {
     agents: HashMap<String, Arc<dyn Agent>>,
@@ -22,7 +21,8 @@ impl InMemoryAgentRegistry {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentRegistry for InMemoryAgentRegistry {
     async fn list_agents(&self) -> Result<Vec<AgentSpec>, AgentError> {
         Ok(self.agents.values().map(|agent| agent.spec()).collect())

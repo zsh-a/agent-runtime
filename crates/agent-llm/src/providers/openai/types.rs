@@ -148,7 +148,7 @@ pub(super) struct OpenAiErrorBody {
 pub(super) struct OpenAiSseState {
     pub(super) provider: String,
     pub(super) model: String,
-    pub(super) chunks: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+    pub(super) chunks: agent_core::bounds::MaybeBoxStream<'static, Result<Bytes, reqwest::Error>>,
     pub(super) buffer: String,
     pub(super) pending: VecDeque<Result<LlmEvent, LlmError>>,
     pub(super) content: String,

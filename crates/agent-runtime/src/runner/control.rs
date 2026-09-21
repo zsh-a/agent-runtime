@@ -7,9 +7,9 @@ pub(super) fn spawn_lease_renewer(
     lease_kind: &'static str,
     subject_id: String,
     cancellation: Option<CancellationToken>,
-) -> JoinHandle<()> {
+) -> agent_core::DetachedTask {
     let interval_duration = lease_renewal_interval(ttl);
-    tokio::spawn(async move {
+    agent_core::spawn_task(async move {
         let mut interval = tokio::time::interval(interval_duration);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
@@ -56,10 +56,18 @@ pub(super) fn spawn_lease_renewer(
     })
 }
 
-pub(super) async fn stop_lease_renewer(handle: JoinHandle<()>) {
+/// Native awaits the aborted task so the renewer cannot outlive its run.
+/// wasm tasks are detached with no handle, and the renewer already exits on
+/// the cancellation token, so there is nothing to await.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(super) async fn stop_lease_renewer(handle: agent_core::DetachedTask) {
     handle.abort();
     let _ = handle.await;
 }
+
+/// See the native definition above.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(super) async fn stop_lease_renewer(_handle: agent_core::DetachedTask) {}
 
 fn lease_renewal_interval(ttl: Duration) -> Duration {
     let interval_ms = (ttl.as_millis() / 3).max(1).min(u64::MAX as u128) as u64;

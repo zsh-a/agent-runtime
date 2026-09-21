@@ -16,5 +16,11 @@ thiserror.workspace = true
 time.workspace = true
 uuid = { workspace = true, features = ["js"] }
 
+# agent-core itself is runtime-agnostic; the native spawn helper needs tokio,
+# and wasm uses wasm-bindgen-futures instead.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+tokio = { workspace = true }
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { workspace = true }
+wasm-bindgen-futures = "0.4"

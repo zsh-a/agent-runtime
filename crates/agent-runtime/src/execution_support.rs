@@ -6,7 +6,6 @@ use agent_core::{
 };
 use serde_json::json;
 use time::OffsetDateTime;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -29,8 +28,8 @@ pub(super) fn spawn_persisted_cancellation_watcher(
     run_id: RunId,
     agent_id: String,
     cancellation: CancellationToken,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> agent_core::DetachedTask {
+    agent_core::spawn_task(async move {
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,

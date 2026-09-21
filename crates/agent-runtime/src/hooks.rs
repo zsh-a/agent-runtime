@@ -1,12 +1,14 @@
-use std::{future::Future, pin::Pin, process::Stdio, sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use std::process::Stdio;
 
 use agent_core::{
     AgentError, HookEffect, HookEvent, HookEventName, HookInvocationStatus, HookKind, HookSpec,
     PROTOCOL_VERSION, PolicyDecision, PolicyDecisionKind, RunId, TraceEvent, TraceSink,
 };
-use async_trait::async_trait;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use tokio::{io::AsyncWriteExt, process::Command as TokioCommand};
 
 #[derive(Debug, Clone)]
@@ -17,7 +19,8 @@ pub struct HookInvocation {
     pub input: Value,
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 pub trait HookHandler: Send + Sync {
     async fn handle(&self, invocation: HookInvocation) -> Result<Value, AgentError>;
 }
@@ -32,7 +35,8 @@ impl<F> FnHook<F> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl<F> HookHandler for FnHook<F>
 where
     F: Send
@@ -56,6 +60,7 @@ impl HookRegistration {
         Self { spec, handler }
     }
 
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn process(spec: HookSpec) -> Result<Self, AgentError> {
         let Some(command) = spec.command.clone() else {
             return Err(AgentError::validation(format!(
@@ -68,6 +73,16 @@ impl HookRegistration {
             spec,
             handler: Arc::new(ProcessHook { command, timeout }),
         })
+    }
+
+    /// Process hooks shell out to a local binary, which a browser cannot do;
+    /// reject the spec instead of silently registering a hook that never fires.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    pub fn process(spec: HookSpec) -> Result<Self, AgentError> {
+        Err(AgentError::validation(format!(
+            "process hook '{}' is unavailable without a local process host",
+            spec.name
+        )))
     }
 }
 
@@ -269,12 +284,15 @@ fn auditable_hook_output(event: HookEventName, output: &Value) -> Value {
     output.clone()
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 struct ProcessHook {
     command: Vec<String>,
     timeout: Duration,
 }
 
-#[async_trait]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl HookHandler for ProcessHook {
     async fn handle(&self, invocation: HookInvocation) -> Result<Value, AgentError> {
         let Some((program, args)) = self.command.split_first() else {

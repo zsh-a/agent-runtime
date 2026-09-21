@@ -95,7 +95,7 @@ impl AgentRunner {
         });
         let mut node_results: HashMap<String, WorkflowRunNodeResult> = HashMap::new();
         let mut pending: HashSet<usize> = order.iter().copied().collect();
-        let mut running = JoinSet::new();
+        let mut running = agent_core::task_group();
         let mut active_agent_ids = HashSet::new();
 
         while !pending.is_empty() || !running.is_empty() {
