@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-
 use crate::bounds::{MaybeBoxFuture, MaybeSend, MaybeSync};
 use futures::{future::Either, pin_mut};
 use schemars::JsonSchema;
@@ -121,14 +120,20 @@ pub struct AgentContext {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 pub trait Agent: MaybeSend + MaybeSync {
     fn spec(&self) -> AgentSpec;
     async fn run(&self, ctx: AgentContext) -> Result<AgentRunResult, AgentError>;
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 pub trait ToolCaller: MaybeSend + MaybeSync {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError>;
 
@@ -153,7 +158,10 @@ pub trait ToolCaller: MaybeSend + MaybeSync {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 pub trait SubagentRunner: MaybeSend + MaybeSync {
     async fn run_subagent(&self, request: SubagentRequest) -> Result<Value, ToolError> {
         let _ = request;
@@ -183,20 +191,29 @@ pub trait SubagentRunner: MaybeSend + MaybeSync {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 pub trait AgentEventEmitter: MaybeSend + MaybeSync {
     async fn emit_event(&self, event: AgentEvent) -> Result<(), AgentError>;
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 pub trait AgentStateAccess: MaybeSend + MaybeSync {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError>;
     async fn save_state(&self, key: &str, value: Value) -> Result<(), AgentError>;
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 pub trait ProposalCreator: MaybeSend + MaybeSync {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), AgentError> {
         let _ = proposal;
@@ -207,7 +224,10 @@ pub trait ProposalCreator: MaybeSend + MaybeSync {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 pub trait ArtifactPublisher: MaybeSend + MaybeSync {
     async fn publish_artifact(
         &self,
@@ -261,13 +281,19 @@ impl AgentServicesFactory for StaticAgentServicesFactory {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 pub trait TraceSink: MaybeSend + MaybeSync {
     async fn emit(&self, event: TraceEvent) -> Result<(), AgentError>;
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 pub trait ToolRegistry: MaybeSend + MaybeSync {
     async fn list_tools(&self) -> Result<Vec<ToolSpec>, ToolError>;
     async fn call(&self, name: &str, input: Value, ctx: ToolContext) -> Result<Value, ToolError>;

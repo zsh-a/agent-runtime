@@ -22,7 +22,10 @@ impl InMemoryRunStore {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentRunStore for InMemoryRunStore {
     async fn create_run(&self, run: AgentRunRecord) -> Result<(), StoreError> {
         let mut runs = self.runs.write().await;
@@ -133,7 +136,10 @@ impl InMemoryStateStore {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentStateStore for InMemoryStateStore {
     async fn load(
         &self,
@@ -176,7 +182,10 @@ impl InMemoryProposalStore {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentProposalStore for InMemoryProposalStore {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError> {
         let mut proposals = self.proposals.write().await;
@@ -251,7 +260,10 @@ impl InMemorySessionStore {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentSessionStore for InMemorySessionStore {
     async fn create_session(&self, session: SessionRecord) -> Result<(), StoreError> {
         self.sessions

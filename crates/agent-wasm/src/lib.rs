@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use agent_chat::{ChatResumeRequest, ChatTurnEvent, ChatTurnRequest, ChatTurnRunner};
 use agent_core::{
-    AgentError, AgentStateStore, RunId, RunScope, ToolContext, ToolError, ToolRegistry, ToolSpec, UserContext,
+    AgentError, AgentStateStore, RunId, RunScope, ToolContext, ToolError, ToolRegistry, ToolSpec,
+    UserContext,
 };
 use agent_llm::OpenAiCompatibleProvider;
 use agent_runtime::BasicAgentServices;
@@ -54,7 +55,10 @@ struct JsToolEntry {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl ToolRegistry for JsToolRegistry {
     async fn list_tools(&self) -> Result<Vec<ToolSpec>, ToolError> {
         Ok(self.tools.iter().map(|entry| entry.spec.clone()).collect())
@@ -66,8 +70,7 @@ impl ToolRegistry for JsToolRegistry {
             .iter()
             .find(|entry| entry.spec.name == name)
             .ok_or_else(|| tool_validation(format!("unknown tool: {name}")))?;
-        let payload =
-            serde_json::to_string(&input).map_err(|e| tool_validation(e.to_string()))?;
+        let payload = serde_json::to_string(&input).map_err(|e| tool_validation(e.to_string()))?;
         let result = entry
             .call
             .call1(&JsValue::NULL, &JsValue::from_str(&payload))
@@ -142,13 +145,17 @@ impl AgentRuntime {
     pub fn turn(&self, request_json: String) -> js_sys::Promise {
         let request: ChatTurnRequest = match serde_json::from_str(&request_json) {
             Ok(request) => request,
-            Err(error) => return js_sys::Promise::reject(&JsValue::from_str(&format!(
-                "invalid ChatTurnRequest: {error}"
-            ))),
+            Err(error) => {
+                return js_sys::Promise::reject(&JsValue::from_str(&format!(
+                    "invalid ChatTurnRequest: {error}"
+                )));
+            }
         };
         let runner = self.runner.clone();
         future_to_promise(async move {
-            collect(runner.stream(request)).await.map(|text| JsValue::from_str(&text))
+            collect(runner.stream(request))
+                .await
+                .map(|text| JsValue::from_str(&text))
         })
     }
 
@@ -156,22 +163,24 @@ impl AgentRuntime {
     pub fn resume(&self, request_json: String) -> js_sys::Promise {
         let request: ChatResumeRequest = match serde_json::from_str(&request_json) {
             Ok(request) => request,
-            Err(error) => return js_sys::Promise::reject(&JsValue::from_str(&format!(
-                "invalid ChatResumeRequest: {error}"
-            ))),
+            Err(error) => {
+                return js_sys::Promise::reject(&JsValue::from_str(&format!(
+                    "invalid ChatResumeRequest: {error}"
+                )));
+            }
         };
         let runner = self.runner.clone();
         future_to_promise(async move {
-            collect(runner.resume(request)).await.map(|text| JsValue::from_str(&text))
+            collect(runner.resume(request))
+                .await
+                .map(|text| JsValue::from_str(&text))
         })
     }
 }
 
 /// Drain an event stream into a JSON array, turning the first error into a
 /// rejected promise so JavaScript sees the failure where it called in.
-async fn collect(
-    stream: agent_chat::ChatEventStream,
-) -> Result<String, JsValue> {
+async fn collect(stream: agent_chat::ChatEventStream) -> Result<String, JsValue> {
     let mut events: Vec<ChatTurnEvent> = Vec::new();
     let mut stream = std::pin::pin!(stream);
     while let Some(event) = stream.next().await {

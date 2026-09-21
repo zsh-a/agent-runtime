@@ -10,7 +10,10 @@ pub struct InMemoryLockStore {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentLockStore for InMemoryLockStore {
     async fn acquire(
         &self,

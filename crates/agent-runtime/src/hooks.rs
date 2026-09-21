@@ -1,6 +1,6 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::process::Stdio;
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use agent_core::{
     AgentError, HookEffect, HookEvent, HookEventName, HookInvocationStatus, HookKind, HookSpec,
@@ -20,7 +20,10 @@ pub struct HookInvocation {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 pub trait HookHandler: Send + Sync {
     async fn handle(&self, invocation: HookInvocation) -> Result<Value, AgentError>;
 }
@@ -36,7 +39,10 @@ impl<F> FnHook<F> {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl<F> HookHandler for FnHook<F>
 where
     F: Send
@@ -198,7 +204,7 @@ impl HookManager {
         };
         let result = hook.handler.handle(invocation).await;
         let finished_at = OffsetDateTime::now_utc();
-        let duration_ms = u64::try_from(timer.elapsed_ms()).unwrap_or(u64::MAX);
+        let duration_ms = timer.elapsed_ms();
         let trace_input = auditable_hook_input(event, &input);
         let event_record = match &result {
             Ok(output) => HookEvent {
@@ -292,7 +298,10 @@ struct ProcessHook {
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl HookHandler for ProcessHook {
     async fn handle(&self, invocation: HookInvocation) -> Result<Value, AgentError> {
         let Some((program, args)) = self.command.split_first() else {

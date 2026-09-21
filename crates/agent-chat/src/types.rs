@@ -1,4 +1,3 @@
-
 use agent_core::{
     CompactionRecord, ContextBlock, ContextPolicy, ContextSnapshot, InteractionEnvelope,
     InteractionResponse, PROTOCOL_VERSION, ToolOutcome, ToolSpec, infer_tool_outcome,
@@ -10,7 +9,8 @@ use serde_json::Value;
 
 use crate::ChatError;
 
-pub type ChatEventStream = agent_core::bounds::MaybeBoxStream<'static, Result<ChatTurnEvent, ChatError>>;
+pub type ChatEventStream =
+    agent_core::bounds::MaybeBoxStream<'static, Result<ChatTurnEvent, ChatError>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ChatTurnRequest {

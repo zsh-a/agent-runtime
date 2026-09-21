@@ -31,16 +31,14 @@ impl OllamaProvider {
         let builder = reqwest::Client::builder();
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let builder = builder.timeout(Duration::from_secs(120));
-        let client = builder
-            .build()
-            .map_err(|err| {
-                LlmError::provider(
-                    "http_client_build_failed",
-                    err.to_string(),
-                    false,
-                    json!({}),
-                )
-            })?;
+        let client = builder.build().map_err(|err| {
+            LlmError::provider(
+                "http_client_build_failed",
+                err.to_string(),
+                false,
+                json!({}),
+            )
+        })?;
         Ok(Self {
             provider: provider.into(),
             base_url,
@@ -99,7 +97,10 @@ struct OllamaMessageResponse {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl LlmProvider for OllamaProvider {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         request.validate_protocol()?;

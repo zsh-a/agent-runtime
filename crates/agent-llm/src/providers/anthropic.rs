@@ -51,16 +51,14 @@ impl AnthropicProvider {
         let builder = reqwest::Client::builder();
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let builder = builder.timeout(Duration::from_secs(60));
-        let client = builder
-            .build()
-            .map_err(|err| {
-                LlmError::provider(
-                    "http_client_build_failed",
-                    err.to_string(),
-                    false,
-                    json!({}),
-                )
-            })?;
+        let client = builder.build().map_err(|err| {
+            LlmError::provider(
+                "http_client_build_failed",
+                err.to_string(),
+                false,
+                json!({}),
+            )
+        })?;
         Ok(Self {
             provider: provider.into(),
             base_url,

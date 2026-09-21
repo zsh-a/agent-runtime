@@ -162,7 +162,9 @@ impl std::error::Error for TaskJoinError {}
 /// polling on the single thread.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub struct TaskGroup<T> {
-    pending: std::rc::Rc<std::cell::RefCell<Vec<Pin<Box<dyn std::future::Future<Output = T> + 'static>>>>>,
+    pending: std::rc::Rc<
+        std::cell::RefCell<Vec<Pin<Box<dyn std::future::Future<Output = T> + 'static>>>>,
+    >,
 }
 
 /// See the wasm `TaskGroup`.
@@ -248,7 +250,9 @@ impl Clock {
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn web_time_now_ms() -> f64 {
     // `performance.now()` is always present on the browsers we target.
-    global_performance().map(|performance| performance.now()).unwrap_or(0.0)
+    global_performance()
+        .map(|performance| performance.now())
+        .unwrap_or(0.0)
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -277,7 +281,10 @@ pub async fn sleep(duration: std::time::Duration) {
 /// against [`sleep`] using `select`, because `tokio::time::timeout` needs the
 /// unavailable time driver.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub async fn timeout<F: std::future::Future>(duration: std::time::Duration, future: F) -> Option<F::Output> {
+pub async fn timeout<F: std::future::Future>(
+    duration: std::time::Duration,
+    future: F,
+) -> Option<F::Output> {
     tokio::time::timeout(duration, future).await.ok()
 }
 

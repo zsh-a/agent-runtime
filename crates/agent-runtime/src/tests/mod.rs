@@ -27,7 +27,10 @@ use super::*;
 struct EchoAgent;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for EchoAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -56,7 +59,10 @@ impl Agent for EchoAgent {
 struct ParentAgent;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for ParentAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -99,7 +105,10 @@ impl Agent for ParentAgent {
 struct ToolAgent;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for ToolAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -135,7 +144,10 @@ impl Agent for ToolAgent {
 struct ArtifactAgent;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for ArtifactAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -179,7 +191,10 @@ impl Agent for ArtifactAgent {
 struct UsageAgent;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for UsageAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -236,7 +251,10 @@ mod workflow;
 struct StateAgent;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for StateAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -271,7 +289,10 @@ struct FlakyAgent {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for FlakyAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -312,7 +333,10 @@ impl Agent for FlakyAgent {
 struct BlockingAgent;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for BlockingAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -347,7 +371,10 @@ struct CountingAgent {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for CountingAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -410,7 +437,10 @@ impl SlowAgent {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for SlowAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -447,7 +477,10 @@ impl Agent for SlowAgent {
 struct LeaseProbeAgent;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl Agent for LeaseProbeAgent {
     fn spec(&self) -> AgentSpec {
         AgentSpec {
@@ -594,7 +627,10 @@ struct CountingLockStore {
 struct LosingLockStore;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentLockStore for LosingLockStore {
     async fn acquire(
         &self,
@@ -630,7 +666,10 @@ impl CountingLockStore {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentLockStore for CountingLockStore {
     async fn acquire(
         &self,
@@ -665,7 +704,10 @@ impl AgentLockStore for CountingLockStore {
 struct FailingUpdateRunStore;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentRunStore for FailingUpdateRunStore {
     async fn create_run(&self, _run: AgentRunRecord) -> Result<(), StoreError> {
         Ok(())
@@ -714,7 +756,10 @@ struct AllowHook;
 struct FailingHook;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl crate::hooks::HookHandler for FailingHook {
     async fn handle(&self, _invocation: crate::hooks::HookInvocation) -> Result<Value, AgentError> {
         Err(AgentError::internal("policy backend unavailable"))
@@ -722,7 +767,10 @@ impl crate::hooks::HookHandler for FailingHook {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl crate::hooks::HookHandler for AllowHook {
     async fn handle(&self, invocation: crate::hooks::HookInvocation) -> Result<Value, AgentError> {
         Ok(json!({
@@ -735,7 +783,10 @@ impl crate::hooks::HookHandler for AllowHook {
 struct DenyHook;
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl crate::hooks::HookHandler for DenyHook {
     async fn handle(&self, _invocation: crate::hooks::HookInvocation) -> Result<Value, AgentError> {
         serde_json::to_value(PolicyDecision::deny("state writes disabled for test"))
@@ -748,7 +799,10 @@ struct NoopServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl ToolCaller for NoopServices {
     async fn call_tool(&self, _name: &str, _input: Value) -> Result<Value, ToolError> {
         Ok(json!({}))
@@ -756,7 +810,10 @@ impl ToolCaller for NoopServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentEventEmitter for NoopServices {
     async fn emit_event(&self, _event: AgentEvent) -> Result<(), AgentError> {
         Ok(())
@@ -764,7 +821,10 @@ impl AgentEventEmitter for NoopServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentStateAccess for NoopServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         self.state_store
@@ -782,15 +842,24 @@ impl AgentStateAccess for NoopServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl ProposalCreator for NoopServices {}
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl SubagentRunner for NoopServices {}
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl ArtifactPublisher for NoopServices {
     async fn publish_artifact(
         &self,

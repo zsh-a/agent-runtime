@@ -1,7 +1,10 @@
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod file;
 mod memory;
-#[cfg(all(not(all(target_arch = "wasm32", target_os = "unknown")), feature = "sqlite"))]
+#[cfg(all(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    feature = "sqlite"
+))]
 mod sqlite;
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
@@ -15,7 +18,10 @@ pub use file::{
 pub use memory::{
     InMemoryProposalStore, InMemoryRunStore, InMemorySessionStore, InMemoryStateStore,
 };
-#[cfg(all(not(all(target_arch = "wasm32", target_os = "unknown")), feature = "sqlite"))]
+#[cfg(all(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    feature = "sqlite"
+))]
 pub use sqlite::SqliteStore;
 
 #[cfg(test)]

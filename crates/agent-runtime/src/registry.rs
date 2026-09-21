@@ -22,7 +22,10 @@ impl InMemoryAgentRegistry {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentRegistry for InMemoryAgentRegistry {
     async fn list_agents(&self) -> Result<Vec<AgentSpec>, AgentError> {
         Ok(self.agents.values().map(|agent| agent.spec()).collect())

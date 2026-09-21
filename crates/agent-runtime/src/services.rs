@@ -75,7 +75,10 @@ impl BasicAgentServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl ToolCaller for BasicAgentServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
         self.tools
@@ -95,7 +98,10 @@ impl ToolCaller for BasicAgentServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentEventEmitter for BasicAgentServices {
     async fn emit_event(&self, _event: AgentEvent) -> Result<(), AgentError> {
         Ok(())
@@ -103,7 +109,10 @@ impl AgentEventEmitter for BasicAgentServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentStateAccess for BasicAgentServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         self.state_store
@@ -121,19 +130,31 @@ impl AgentStateAccess for BasicAgentServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl SubagentRunner for BasicAgentServices {}
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl ProposalCreator for BasicAgentServices {}
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl ArtifactPublisher for BasicAgentServices {}
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl ToolCaller for TracedAgentServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
         let started_at = agent_core::Clock::now();
@@ -308,7 +329,10 @@ impl ToolCaller for TracedAgentServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl SubagentRunner for TracedAgentServices {
     async fn run_subagent(&self, request: SubagentRequest) -> Result<Value, ToolError> {
         self.run_subagent_with_cancellation(
@@ -349,7 +373,10 @@ impl SubagentRunner for TracedAgentServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentEventEmitter for TracedAgentServices {
     async fn emit_event(&self, event: AgentEvent) -> Result<(), AgentError> {
         debug!(
@@ -374,7 +401,10 @@ impl AgentEventEmitter for TracedAgentServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl AgentStateAccess for TracedAgentServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
         let started_at = agent_core::Clock::now();
@@ -529,7 +559,10 @@ impl AgentStateAccess for TracedAgentServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl ProposalCreator for TracedAgentServices {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), AgentError> {
         let started_at = agent_core::Clock::now();
@@ -640,7 +673,10 @@ impl ProposalCreator for TracedAgentServices {
 }
 
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
-#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
 impl ArtifactPublisher for TracedAgentServices {
     async fn publish_artifact(
         &self,
