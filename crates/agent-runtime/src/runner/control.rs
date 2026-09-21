@@ -10,11 +10,8 @@ pub(super) fn spawn_lease_renewer(
 ) -> agent_core::DetachedTask {
     let interval_duration = lease_renewal_interval(ttl);
     agent_core::spawn_task(async move {
-        let mut interval = tokio::time::interval(interval_duration);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
         loop {
-            interval.tick().await;
+            agent_core::sleep(interval_duration).await;
             match lock_store.renew(&lease, ttl).await {
                 Ok(true) => {
                     debug!(

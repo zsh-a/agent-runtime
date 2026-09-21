@@ -250,7 +250,7 @@ impl AgentRunner {
                             AgentError::cancelled("agent run cancelled during retry backoff"),
                         ));
                     }
-                    _ = tokio::time::sleep(self.policy.retry_backoff) => {}
+                    _ = agent_core::sleep(self.policy.retry_backoff) => {}
                 }
             }
             attempt = next_attempt;
@@ -323,13 +323,13 @@ impl AgentRunner {
                     AgentError::cancelled("agent run cancelled"),
                 )
             }
-            outcome = tokio::time::timeout(self.policy.timeout, run_future) => match outcome {
-                Ok(Ok(mut result)) => {
+            outcome = agent_core::timeout(self.policy.timeout, run_future) => match outcome {
+                Some(Ok(mut result)) => {
                     result.run_id = run_id.clone();
                     result.agent_id = spec.id.clone();
                     result
                 }
-                Ok(Err(err)) => {
+                Some(Err(err)) => {
                     warn!(
                         run_id = %run_id.0,
                         agent_id = %spec.id,
@@ -353,7 +353,7 @@ impl AgentRunner {
                     }
                     failure_result(run_id.clone(), &spec.id, started_at, err)
                 }
-                Err(_) => {
+                None => {
                     warn!(
                         run_id = %run_id.0,
                         agent_id = %spec.id,

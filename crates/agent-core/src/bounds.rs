@@ -255,3 +255,44 @@ fn web_time_now_ms() -> f64 {
 fn global_performance() -> Option<web_sys::Performance> {
     web_sys::window().and_then(|window| window.performance())
 }
+
+/// Sleep for a duration, using the target's timer.
+///
+/// `tokio::time` has no driver on `wasm32-unknown-unknown` and panics on first
+/// use, so the retry backoff and cancellation poll go through this instead.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub async fn sleep(duration: std::time::Duration) {
+    tokio::time::sleep(duration).await;
+}
+
+/// See [`sleep`]; the browser supplies the timer.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub async fn sleep(duration: std::time::Duration) {
+    gloo_timers::future::TimeoutFuture::new(duration.as_millis() as u32).await;
+}
+
+/// Await a future with a deadline.
+///
+/// Returns `None` if the deadline passes first. On wasm the timeout is raced
+/// against [`sleep`] using `select`, because `tokio::time::timeout` needs the
+/// unavailable time driver.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub async fn timeout<F: std::future::Future>(duration: std::time::Duration, future: F) -> Option<F::Output> {
+    tokio::time::timeout(duration, future).await.ok()
+}
+
+/// See [`timeout`]; raced against [`sleep`] because the tokio time driver is
+/// unavailable on wasm.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub async fn timeout<F: std::future::Future>(
+    duration: std::time::Duration,
+    future: F,
+) -> Option<F::Output> {
+    let timer = sleep(duration);
+    futures::pin_mut!(future);
+    futures::pin_mut!(timer);
+    match futures::future::select(future, timer).await {
+        futures::future::Either::Left((output, _)) => Some(output),
+        futures::future::Either::Right((_, _)) => None,
+    }
+}

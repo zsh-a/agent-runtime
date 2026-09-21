@@ -16,7 +16,7 @@ pub mod trace;
 
 pub use bounds::{
     Clock, DetachedTask, MaybeBoxFuture, MaybeBoxStream, MaybeSend, MaybeSync, TaskGroup,
-    TaskJoinError, spawn_detached, spawn_task, task_group,
+    TaskJoinError, sleep, spawn_detached, spawn_task, task_group, timeout,
 };
 pub use catalog::{
     AgentRuntimeCatalog, PromptBlockSpec, PromptManifest, PromptManifestBlock, ToolRisk, ToolSpec,

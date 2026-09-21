@@ -33,7 +33,7 @@ pub(super) fn spawn_persisted_cancellation_watcher(
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,
-                _ = tokio::time::sleep(STORE_CANCELLATION_POLL_INTERVAL) => {
+                _ = agent_core::sleep(STORE_CANCELLATION_POLL_INTERVAL) => {
                     match run_store.get_run(&run_id).await {
                         Ok(Some(record)) if record.cancellation_requested() => {
                             warn!(
