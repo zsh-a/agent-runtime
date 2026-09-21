@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
-use async_trait::async_trait;
+
+use crate::bounds::{MaybeSend, MaybeSync};
 use serde_json::Value;
 
 use crate::{
@@ -10,14 +11,16 @@ use crate::{
     WorkflowRunResult,
 };
 
-#[async_trait]
-pub trait AgentRegistry: Send + Sync {
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+pub trait AgentRegistry: MaybeSend + MaybeSync {
     async fn list_agents(&self) -> Result<Vec<AgentSpec>, AgentError>;
     async fn get_agent(&self, id: &str) -> Result<Option<Arc<dyn Agent>>, AgentError>;
 }
 
-#[async_trait]
-pub trait AgentRunStore: Send + Sync {
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+pub trait AgentRunStore: MaybeSend + MaybeSync {
     async fn create_run(&self, run: AgentRunRecord) -> Result<(), StoreError>;
     /// Atomically update a run when its stored version matches
     /// `expected_version`. The supplied record must use the next version.
@@ -69,8 +72,9 @@ pub struct RunEventRecord {
     pub event: TraceEvent,
 }
 
-#[async_trait]
-pub trait AgentRunEventStore: Send + Sync {
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+pub trait AgentRunEventStore: MaybeSend + MaybeSync {
     async fn append_run_event(&self, run_id: &RunId, event: TraceEvent) -> Result<(), StoreError>;
     async fn replace_run_events(
         &self,
@@ -84,8 +88,9 @@ pub trait AgentRunEventStore: Send + Sync {
     ) -> Result<Option<Vec<RunEventRecord>>, StoreError>;
 }
 
-#[async_trait]
-pub trait AgentTraceStore: Send + Sync {
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+pub trait AgentTraceStore: MaybeSend + MaybeSync {
     async fn write_trace(&self, trace: AgentTrace) -> Result<(), StoreError>;
     async fn read_trace(&self, run_id: &RunId) -> Result<Option<AgentTrace>, StoreError>;
     async fn write_workflow_traces(&self, result: &WorkflowRunResult) -> Result<usize, StoreError> {
@@ -108,8 +113,9 @@ pub trait AgentTraceStore: Send + Sync {
     }
 }
 
-#[async_trait]
-pub trait AgentLockStore: Send + Sync {
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+pub trait AgentLockStore: MaybeSend + MaybeSync {
     async fn acquire(
         &self,
         key: &str,
@@ -120,8 +126,9 @@ pub trait AgentLockStore: Send + Sync {
     async fn release(&self, lease: RunLease) -> Result<(), StoreError>;
 }
 
-#[async_trait]
-pub trait AgentStateStore: Send + Sync {
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+pub trait AgentStateStore: MaybeSend + MaybeSync {
     async fn load(
         &self,
         agent_id: &str,
@@ -137,8 +144,9 @@ pub trait AgentStateStore: Send + Sync {
     ) -> Result<(), StoreError>;
 }
 
-#[async_trait]
-pub trait AgentSessionStore: Send + Sync {
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+pub trait AgentSessionStore: MaybeSend + MaybeSync {
     async fn create_session(&self, session: SessionRecord) -> Result<(), StoreError>;
     async fn list_sessions(&self) -> Result<Vec<SessionRecord>, StoreError>;
     async fn get_session(
@@ -181,8 +189,9 @@ pub trait AgentSessionStore: Send + Sync {
     ) -> Result<Option<ContextCheckpointCommit>, StoreError>;
 }
 
-#[async_trait]
-pub trait AgentProposalStore: Send + Sync {
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
+pub trait AgentProposalStore: MaybeSend + MaybeSync {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), StoreError>;
     async fn update_proposal(
         &self,

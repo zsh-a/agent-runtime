@@ -11,7 +11,7 @@ agent-core.workspace = true
 blake3.workspace = true
 camino.workspace = true
 fs-err.workspace = true
-jsonschema.workspace = true
+jsonschema = { workspace = true, features = ["resolve-http", "resolve-file"] }
 miette.workspace = true
 reqwest.workspace = true
 serde.workspace = true

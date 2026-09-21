@@ -1,3 +1,4 @@
+pub mod bounds;
 pub mod catalog;
 pub mod context;
 pub mod embedded;
@@ -13,6 +14,7 @@ pub mod stores;
 pub mod tool;
 pub mod trace;
 
+pub use bounds::{MaybeBoxFuture, MaybeBoxStream, MaybeSend, MaybeSync};
 pub use catalog::{
     AgentRuntimeCatalog, PromptBlockSpec, PromptManifest, PromptManifestBlock, ToolRisk, ToolSpec,
 };
