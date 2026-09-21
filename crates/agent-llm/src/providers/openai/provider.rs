@@ -1,5 +1,22 @@
 use super::*;
 
+/// Local OpenAI-compatible servers (Ollama, LM Studio, llama.cpp) accept requests
+/// with no credential. Sending `Authorization: Bearer ` with an empty value is not
+/// equivalent, so the header is omitted entirely when no key is configured.
+trait OptionalBearerAuth {
+    fn bearer_auth_optional(self, api_key: &str) -> Self;
+}
+
+impl OptionalBearerAuth for reqwest::RequestBuilder {
+    fn bearer_auth_optional(self, api_key: &str) -> Self {
+        if api_key.is_empty() {
+            self
+        } else {
+            self.bearer_auth(api_key)
+        }
+    }
+}
+
 #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
 #[cfg_attr(
     not(all(target_arch = "wasm32", target_os = "unknown")),
@@ -46,7 +63,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let response = self
             .client
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth_optional(&self.api_key)
             .json(&payload)
             .send()
             .await
@@ -219,7 +236,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let response = self
             .client
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth_optional(&self.api_key)
             .json(&payload)
             .send()
             .await

@@ -38,11 +38,6 @@ impl OpenAiCompatibleProvider {
                 "OpenAI-compatible base URL is required",
             ));
         }
-        if api_key.is_empty() {
-            return Err(LlmError::validation(
-                "OpenAI-compatible API key is required",
-            ));
-        }
         // The wasm fetch backend has no request timeout builder; the browser
         // applies its own. Native keeps an explicit deadline.
         let builder = reqwest::Client::builder();
