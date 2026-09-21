@@ -24,3 +24,4 @@ tokio = { workspace = true }
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { workspace = true }
 wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Performance", "Window"] }

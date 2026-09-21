@@ -10,7 +10,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 "llm request requires at least one message",
             ));
         }
-        let started_at = std::time::Instant::now();
+        let started_at = agent_core::Clock::now();
         let url = self.completions_url();
         info!(
             provider = %self.provider,
@@ -64,7 +64,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             model = %request.model,
             status = %status,
             body_bytes = body.len(),
-            duration_ms = started_at.elapsed().as_millis(),
+            duration_ms = started_at.elapsed_ms(),
             "OpenAI-compatible completion response received",
         );
         if !status.is_success() {
@@ -80,7 +80,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 status = %status,
                 retryable = status.is_server_error() || status.as_u16() == 429,
                 body_preview = %truncate_for_log(&body),
-                duration_ms = started_at.elapsed().as_millis(),
+                duration_ms = started_at.elapsed_ms(),
                 "OpenAI-compatible completion failed with non-success status",
             );
             if status.as_u16() == 429 {
@@ -107,7 +107,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 provider = %self.provider,
                 model = %request.model,
                 error_type = error.r#type.as_deref().unwrap_or("provider_error"),
-                duration_ms = started_at.elapsed().as_millis(),
+                duration_ms = started_at.elapsed_ms(),
                 "OpenAI-compatible completion returned provider error",
             );
             return Err(LlmError::provider(
@@ -156,7 +156,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             output_tokens = usage.as_ref().map(|usage| usage.output_tokens).unwrap_or(0),
             total_tokens = usage.as_ref().map(|usage| usage.total_tokens).unwrap_or(0),
             content_chars = content.chars().count(),
-            duration_ms = started_at.elapsed().as_millis(),
+            duration_ms = started_at.elapsed_ms(),
             "OpenAI-compatible completion completed",
         );
         Ok(LlmResponse {
@@ -181,7 +181,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 "llm request requires at least one message",
             ));
         }
-        let started_at = std::time::Instant::now();
+        let started_at = agent_core::Clock::now();
         let url = self.completions_url();
         info!(
             provider = %self.provider,
@@ -228,7 +228,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             provider = %self.provider,
             model = %request.model,
             status = %status,
-            duration_ms = started_at.elapsed().as_millis(),
+            duration_ms = started_at.elapsed_ms(),
             "OpenAI-compatible stream response headers received",
         );
         if !status.is_success() {
@@ -252,7 +252,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 status = %status,
                 retryable = status.is_server_error() || status.as_u16() == 429,
                 body_preview = %truncate_for_log(&body),
-                duration_ms = started_at.elapsed().as_millis(),
+                duration_ms = started_at.elapsed_ms(),
                 "OpenAI-compatible stream failed with non-success status",
             );
             if status.as_u16() == 429 {

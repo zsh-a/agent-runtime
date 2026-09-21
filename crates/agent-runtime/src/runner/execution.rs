@@ -9,7 +9,7 @@ impl AgentRunner {
     ) -> Result<RunOutcome, AgentError> {
         agent_core::validate_protocol_version(&request.protocol_version)
             .map_err(AgentError::validation)?;
-        let run_timer = std::time::Instant::now();
+        let run_timer = agent_core::Clock::now();
         let _permit = if self.is_nested {
             self.subagent_concurrency
                 .clone()
@@ -117,7 +117,7 @@ impl AgentRunner {
             info!(
                 run_id = %run_id.0,
                 agent_id = %spec.id,
-                duration_ms = run_timer.elapsed().as_millis(),
+                duration_ms = run_timer.elapsed_ms(),
                 "agent run skipped",
             );
             trace
@@ -327,7 +327,7 @@ impl AgentRunner {
                 agent_id = %result.agent_id,
                 status = ?result.status,
                 error_code = error_code.unwrap_or("none"),
-                duration_ms = run_timer.elapsed().as_millis(),
+                duration_ms = run_timer.elapsed_ms(),
                 "agent run finished",
             );
 

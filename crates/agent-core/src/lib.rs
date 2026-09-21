@@ -14,7 +14,10 @@ pub mod stores;
 pub mod tool;
 pub mod trace;
 
-pub use bounds::{MaybeBoxFuture, MaybeBoxStream, MaybeSend, MaybeSync, spawn_detached, spawn_task, DetachedTask, TaskGroup, TaskJoinError, task_group};
+pub use bounds::{
+    Clock, DetachedTask, MaybeBoxFuture, MaybeBoxStream, MaybeSend, MaybeSync, TaskGroup,
+    TaskJoinError, spawn_detached, spawn_task, task_group,
+};
 pub use catalog::{
     AgentRuntimeCatalog, PromptBlockSpec, PromptManifest, PromptManifestBlock, ToolRisk, ToolSpec,
 };

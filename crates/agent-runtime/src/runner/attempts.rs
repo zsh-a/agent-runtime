@@ -85,7 +85,7 @@ impl AgentRunner {
                 "starting run attempt",
             );
 
-            let attempt_timer = std::time::Instant::now();
+            let attempt_timer = agent_core::Clock::now();
             let step_input = json!({
                 "run_id": run_id.0.clone(),
                 "agent_id": spec.id.clone(),
@@ -159,7 +159,7 @@ impl AgentRunner {
                     .as_ref()
                     .map(|error| error.code.as_str())
                     .unwrap_or("none"),
-                duration_ms = attempt_timer.elapsed().as_millis(),
+                duration_ms = attempt_timer.elapsed_ms(),
                 "run attempt finished",
             );
             if step_started {
@@ -177,7 +177,7 @@ impl AgentRunner {
                             "retryable": retryable,
                             "error": result.error.clone(),
                             "output": result.output.clone(),
-                            "duration_ms": attempt_timer.elapsed().as_millis(),
+                            "duration_ms": attempt_timer.elapsed_ms(),
                         }),
                         trace.as_ref(),
                     )
@@ -268,7 +268,7 @@ impl AgentRunner {
         trace: Arc<MemoryTraceSink>,
         cancellation: CancellationToken,
         attempt: u32,
-        attempt_timer: std::time::Instant,
+        attempt_timer: agent_core::Clock,
     ) -> Result<AgentRunResult, AgentError> {
         let ctx = AgentContext {
             run_id: run_id.clone(),
@@ -304,7 +304,7 @@ impl AgentRunner {
                     run_id = %run_id.0,
                     agent_id = %spec.id,
                     attempt,
-                    duration_ms = attempt_timer.elapsed().as_millis(),
+                    duration_ms = attempt_timer.elapsed_ms(),
                     "run attempt cancelled",
                 );
                 emit_cancellation_events(
@@ -337,7 +337,7 @@ impl AgentRunner {
                         error_code = %err.record.code,
                         error_kind = ?err.record.kind,
                         retryable = err.record.retryable,
-                        duration_ms = attempt_timer.elapsed().as_millis(),
+                        duration_ms = attempt_timer.elapsed_ms(),
                         "run attempt returned an agent error",
                     );
                     if matches!(err.record.kind, agent_core::AgentErrorKind::Cancelled) {
@@ -359,7 +359,7 @@ impl AgentRunner {
                         agent_id = %spec.id,
                         attempt,
                         timeout_ms = self.policy.timeout.as_millis(),
-                        duration_ms = attempt_timer.elapsed().as_millis(),
+                        duration_ms = attempt_timer.elapsed_ms(),
                         "run attempt timed out",
                     );
                     failure_result(

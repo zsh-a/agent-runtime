@@ -189,7 +189,7 @@ impl HookManager {
         trace: &dyn TraceSink,
     ) -> Result<Value, AgentError> {
         let started_at = OffsetDateTime::now_utc();
-        let timer = std::time::Instant::now();
+        let timer = agent_core::Clock::now();
         let invocation = HookInvocation {
             event,
             run_id: run_id.clone(),
@@ -198,7 +198,7 @@ impl HookManager {
         };
         let result = hook.handler.handle(invocation).await;
         let finished_at = OffsetDateTime::now_utc();
-        let duration_ms = u64::try_from(timer.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let duration_ms = u64::try_from(timer.elapsed_ms()).unwrap_or(u64::MAX);
         let trace_input = auditable_hook_input(event, &input);
         let event_record = match &result {
             Ok(output) => HookEvent {

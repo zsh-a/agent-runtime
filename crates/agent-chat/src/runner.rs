@@ -91,7 +91,7 @@ async fn run_chat_turn(
         .await;
         return;
     }
-    let turn_timer = std::time::Instant::now();
+    let turn_timer = agent_core::Clock::now();
     info!(
         turn_id = request.turn_id.as_deref().unwrap_or("none"),
         session_id = request.session_id.as_deref().unwrap_or("none"),
@@ -161,7 +161,7 @@ async fn run_chat_resume(
         send_error(&sender, request.state.round, error).await;
         return;
     }
-    let turn_timer = std::time::Instant::now();
+    let turn_timer = agent_core::Clock::now();
     let pending_calls = request.state.pending_tool_calls.clone();
     let pending_interaction = request.state.pending_interaction.clone();
     let previous_round = request.state.round;
@@ -267,7 +267,7 @@ async fn run_chat_state(
     services: Arc<dyn AgentServices>,
     mut state: ChatTurnState,
     sender: mpsc::Sender<Result<ChatTurnEvent, ChatError>>,
-    turn_timer: std::time::Instant,
+    turn_timer: agent_core::Clock,
     cancellation: CancellationToken,
 ) {
     loop {
@@ -475,7 +475,7 @@ async fn run_chat_state(
                 info!(
                     round,
                     stop_reason = %stop_reason,
-                    duration_ms = turn_timer.elapsed().as_millis(),
+                    duration_ms = turn_timer.elapsed_ms(),
                     "chat turn completed",
                 );
                 send_done(&sender, round, &stop_reason).await;
@@ -507,7 +507,7 @@ async fn run_chat_state(
 
         let mut results = Vec::new();
         for tool_call in tool_calls {
-            let tool_timer = std::time::Instant::now();
+            let tool_timer = agent_core::Clock::now();
             debug!(
                 turn_id = pending_state.turn_id.as_deref().unwrap_or("none"),
                 round,
@@ -535,7 +535,7 @@ async fn run_chat_state(
                         tool_call_id = %tool_call.id,
                         tool_name = %tool_call.name,
                         output_bytes = serialized_value_len(&output),
-                        duration_ms = tool_timer.elapsed().as_millis(),
+                        duration_ms = tool_timer.elapsed_ms(),
                         "chat tool completed",
                     );
                     ToolOutput {
@@ -551,7 +551,7 @@ async fn run_chat_state(
                         tool_name = %tool_call.name,
                         error_code = %error.record.code,
                         retryable = error.record.retryable,
-                        duration_ms = tool_timer.elapsed().as_millis(),
+                        duration_ms = tool_timer.elapsed_ms(),
                         "chat tool failed",
                     );
                     ToolOutput {

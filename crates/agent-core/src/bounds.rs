@@ -201,3 +201,57 @@ impl<T: 'static> TaskGroup<T> {
         self.pending.borrow().is_empty()
     }
 }
+
+/// A monotonic clock reading.
+///
+/// `std::time::Instant` panics on `wasm32-unknown-unknown` ("time not
+/// implemented on this platform"), so durations must come from the host clock.
+/// Natively this is a thin wrapper over `Instant`; on wasm it reads
+/// `performance.now()` and starts at process load, which is all the runtime
+/// uses it for (elapsed-time metrics in traces and logs).
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[derive(Debug, Clone, Copy)]
+pub struct Clock(tokio::time::Instant);
+
+/// See [`Clock`].
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[derive(Debug, Clone, Copy)]
+pub struct Clock(f64);
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+impl Clock {
+    /// Current reading.
+    pub fn now() -> Self {
+        Clock(tokio::time::Instant::now())
+    }
+
+    /// Milliseconds since this reading.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.0.elapsed().as_millis() as u64
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl Clock {
+    /// Current reading, from the host performance clock.
+    pub fn now() -> Self {
+        Clock(web_time_now_ms())
+    }
+
+    /// Milliseconds since this reading.
+    pub fn elapsed_ms(&self) -> u64 {
+        (web_time_now_ms() - self.0).max(0.0) as u64
+    }
+}
+
+/// Milliseconds from the page's monotonic clock.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn web_time_now_ms() -> f64 {
+    // `performance.now()` is always present on the browsers we target.
+    global_performance().map(|performance| performance.now()).unwrap_or(0.0)
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn global_performance() -> Option<web_sys::Performance> {
+    web_sys::window().and_then(|window| window.performance())
+}

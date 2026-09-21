@@ -136,7 +136,7 @@ impl ArtifactPublisher for BasicAgentServices {}
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl ToolCaller for TracedAgentServices {
     async fn call_tool(&self, name: &str, input: Value) -> Result<Value, ToolError> {
-        let started_at = std::time::Instant::now();
+        let started_at = agent_core::Clock::now();
         let input_hash = state_value_hash(&input);
         let input_bytes = serialized_value_len(&input);
         let policy_input = json!({
@@ -191,7 +191,7 @@ impl ToolCaller for TracedAgentServices {
             Ok(output) => {
                 let output_hash = state_value_hash(&output);
                 let output_bytes = serialized_value_len(&output);
-                let duration_ms = started_at.elapsed().as_millis();
+                let duration_ms = started_at.elapsed_ms();
                 self.trace
                     .emit(TraceEvent::new(
                         "tool_call",
@@ -241,7 +241,7 @@ impl ToolCaller for TracedAgentServices {
                 Ok(output)
             }
             Err(error) => {
-                let duration_ms = started_at.elapsed().as_millis();
+                let duration_ms = started_at.elapsed_ms();
                 self.trace
                     .emit(TraceEvent::new(
                         "tool_call_failed",
@@ -377,14 +377,14 @@ impl AgentEventEmitter for TracedAgentServices {
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl AgentStateAccess for TracedAgentServices {
     async fn load_state(&self, key: &str) -> Result<Option<Value>, AgentError> {
-        let started_at = std::time::Instant::now();
+        let started_at = agent_core::Clock::now();
         match self.inner.load_state(key).await {
             Ok(value) => {
                 let mut payload = json!({
                     "run_id": self.run_id.0.clone(),
                     "agent_id": self.agent_id.clone(),
                     "key": key,
-                    "duration_ms": started_at.elapsed().as_millis(),
+                    "duration_ms": started_at.elapsed_ms(),
                     "status": "completed",
                     "found": value.is_some(),
                 });
@@ -404,7 +404,7 @@ impl AgentStateAccess for TracedAgentServices {
                             "run_id": self.run_id.0.clone(),
                             "agent_id": self.agent_id.clone(),
                             "key": key,
-                            "duration_ms": started_at.elapsed().as_millis(),
+                            "duration_ms": started_at.elapsed_ms(),
                             "status": "failed",
                             "error": error.record.clone(),
                         }),
@@ -416,7 +416,7 @@ impl AgentStateAccess for TracedAgentServices {
     }
 
     async fn save_state(&self, key: &str, value: Value) -> Result<(), AgentError> {
-        let started_at = std::time::Instant::now();
+        let started_at = agent_core::Clock::now();
         let value_hash = state_value_hash(&value);
         let policy_input = json!({
             "run_id": self.run_id.0.clone(),
@@ -466,7 +466,7 @@ impl AgentStateAccess for TracedAgentServices {
                             "run_id": self.run_id.0.clone(),
                             "agent_id": self.agent_id.clone(),
                             "key": key,
-                            "duration_ms": started_at.elapsed().as_millis(),
+                            "duration_ms": started_at.elapsed_ms(),
                             "status": "completed",
                             "value_hash": value_hash,
                         }),
@@ -483,7 +483,7 @@ impl AgentStateAccess for TracedAgentServices {
                             "key": key,
                             "status": "completed",
                             "value_hash": value_hash,
-                            "duration_ms": started_at.elapsed().as_millis(),
+                            "duration_ms": started_at.elapsed_ms(),
                         }),
                         self.trace.as_ref(),
                     )
@@ -498,7 +498,7 @@ impl AgentStateAccess for TracedAgentServices {
                             "run_id": self.run_id.0.clone(),
                             "agent_id": self.agent_id.clone(),
                             "key": key,
-                            "duration_ms": started_at.elapsed().as_millis(),
+                            "duration_ms": started_at.elapsed_ms(),
                             "status": "failed",
                             "value_hash": value_hash,
                             "error": error.record.clone(),
@@ -517,7 +517,7 @@ impl AgentStateAccess for TracedAgentServices {
                             "status": "failed",
                             "value_hash": value_hash,
                             "error": error.record.clone(),
-                            "duration_ms": started_at.elapsed().as_millis(),
+                            "duration_ms": started_at.elapsed_ms(),
                         }),
                         self.trace.as_ref(),
                     )
@@ -532,7 +532,7 @@ impl AgentStateAccess for TracedAgentServices {
 #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), async_trait::async_trait)]
 impl ProposalCreator for TracedAgentServices {
     async fn create_proposal(&self, proposal: ProposalEnvelope) -> Result<(), AgentError> {
-        let started_at = std::time::Instant::now();
+        let started_at = agent_core::Clock::now();
         let policy_input = json!({
             "run_id": self.run_id.0.clone(),
             "agent_id": self.agent_id.clone(),
@@ -582,7 +582,7 @@ impl ProposalCreator for TracedAgentServices {
                             "kind": proposal.kind,
                             "summary": proposal.summary,
                             "status": proposal.status,
-                            "duration_ms": started_at.elapsed().as_millis(),
+                            "duration_ms": started_at.elapsed_ms(),
                         }),
                     ))
                     .await?;
@@ -596,7 +596,7 @@ impl ProposalCreator for TracedAgentServices {
                             "agent_id": self.agent_id.clone(),
                             "proposal_id": proposal.proposal_id.0,
                             "status": "completed",
-                            "duration_ms": started_at.elapsed().as_millis(),
+                            "duration_ms": started_at.elapsed_ms(),
                         }),
                         self.trace.as_ref(),
                     )
@@ -612,7 +612,7 @@ impl ProposalCreator for TracedAgentServices {
                             "agent_id": self.agent_id.clone(),
                             "kind": proposal.kind,
                             "summary": proposal.summary,
-                            "duration_ms": started_at.elapsed().as_millis(),
+                            "duration_ms": started_at.elapsed_ms(),
                             "error": error.record.clone(),
                         }),
                     ))
@@ -628,7 +628,7 @@ impl ProposalCreator for TracedAgentServices {
                             "proposal_id": proposal.proposal_id.0,
                             "status": "failed",
                             "error": error.record.clone(),
-                            "duration_ms": started_at.elapsed().as_millis(),
+                            "duration_ms": started_at.elapsed_ms(),
                         }),
                         self.trace.as_ref(),
                     )
@@ -646,7 +646,7 @@ impl ArtifactPublisher for TracedAgentServices {
         &self,
         request: ArtifactPublishRequest,
     ) -> Result<agent_core::ArtifactRef, AgentError> {
-        let started_at = std::time::Instant::now();
+        let started_at = agent_core::Clock::now();
         let artifact = self.inner.publish_artifact(request).await?;
         self.trace
             .emit(TraceEvent::new(
@@ -655,7 +655,7 @@ impl ArtifactPublisher for TracedAgentServices {
                     "run_id": self.run_id.0.clone(),
                     "agent_id": self.agent_id.clone(),
                     "artifact_ref": artifact.clone(),
-                    "duration_ms": started_at.elapsed().as_millis(),
+                    "duration_ms": started_at.elapsed_ms(),
                     "status": "completed",
                 }),
             ))

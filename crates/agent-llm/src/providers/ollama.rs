@@ -108,7 +108,7 @@ impl LlmProvider for OllamaProvider {
                 "llm request requires at least one message",
             ));
         }
-        let started_at = std::time::Instant::now();
+        let started_at = agent_core::Clock::now();
         let url = self.chat_url();
         info!(
             provider = %self.provider,
@@ -158,7 +158,7 @@ impl LlmProvider for OllamaProvider {
             model = %request.model,
             status = %status,
             body_bytes = body.len(),
-            duration_ms = started_at.elapsed().as_millis(),
+            duration_ms = started_at.elapsed_ms(),
             "Ollama chat response received",
         );
         if !status.is_success() {
@@ -174,7 +174,7 @@ impl LlmProvider for OllamaProvider {
                 status = %status,
                 retryable = status.is_server_error(),
                 body_preview = %truncate_for_log(&body),
-                duration_ms = started_at.elapsed().as_millis(),
+                duration_ms = started_at.elapsed_ms(),
                 "Ollama chat failed with non-success status",
             );
             return Err(LlmError::provider(
@@ -196,7 +196,7 @@ impl LlmProvider for OllamaProvider {
             warn!(
                 provider = %self.provider,
                 model = %request.model,
-                duration_ms = started_at.elapsed().as_millis(),
+                duration_ms = started_at.elapsed_ms(),
                 "Ollama chat returned provider error",
             );
             return Err(LlmError::provider(
@@ -222,7 +222,7 @@ impl LlmProvider for OllamaProvider {
             output_tokens,
             total_tokens = input_tokens + output_tokens,
             content_chars = content.chars().count(),
-            duration_ms = started_at.elapsed().as_millis(),
+            duration_ms = started_at.elapsed_ms(),
             "Ollama chat completed",
         );
         Ok(LlmResponse {
