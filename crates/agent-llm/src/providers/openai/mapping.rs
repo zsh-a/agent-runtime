@@ -58,15 +58,66 @@ pub(super) fn openai_user_messages_from_llm(
     };
 
     let mut messages = Vec::new();
-    let mut text_parts = Vec::new();
+    let mut content_parts = Vec::new();
     for block in blocks {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 if let Some(text) = block.get("text").and_then(Value::as_str)
                     && !text.is_empty()
                 {
-                    text_parts.push(json!({"type": "text", "text": text}));
+                    content_parts.push(json!({"type": "text", "text": text}));
                 }
+            }
+            Some("image") => {
+                let source = block
+                    .get("source")
+                    .ok_or_else(|| LlmError::validation("Image block requires a source"))?;
+                let url = match source.get("type").and_then(Value::as_str) {
+                    Some("base64") => {
+                        let media_type = source
+                            .get("media_type")
+                            .and_then(Value::as_str)
+                            .filter(|mime| {
+                                matches!(
+                                    *mime,
+                                    "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+                                )
+                            })
+                            .ok_or_else(|| LlmError::validation("Unsupported image media type"))?;
+                        let data = source
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .filter(|data| !data.is_empty())
+                            .ok_or_else(|| {
+                                LlmError::validation("Image source requires base64 data")
+                            })?;
+                        format!("data:{media_type};base64,{data}")
+                    }
+                    Some("url") => source
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .filter(|url| !url.is_empty())
+                        .ok_or_else(|| LlmError::validation("Image source requires a URL"))?
+                        .to_owned(),
+                    _ => return Err(LlmError::validation("Unsupported image source type")),
+                };
+                content_parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
+            }
+            Some("image_url") => {
+                if block
+                    .get("image_url")
+                    .and_then(|image| image.get("url"))
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                {
+                    return Err(LlmError::validation("Image block requires image_url.url"));
+                }
+                content_parts.push(block.clone());
+            }
+            Some("document") => {
+                return Err(LlmError::validation(
+                    "OpenAI-compatible document blocks are not supported by this adapter",
+                ));
             }
             Some("tool_result") => messages.push(OpenAiMessage {
                 role: "tool".to_owned(),
@@ -82,10 +133,10 @@ pub(super) fn openai_user_messages_from_llm(
             _ => {}
         }
     }
-    if !text_parts.is_empty() {
+    if !content_parts.is_empty() {
         messages.insert(
             0,
-            openai_plain_message("user", Value::Array(text_parts), message.name.clone()),
+            openai_plain_message("user", Value::Array(content_parts), message.name.clone()),
         );
     }
     if messages.is_empty() {

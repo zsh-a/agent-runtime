@@ -1,6 +1,82 @@
 use super::*;
 
 #[tokio::test]
+async fn openai_compatible_provider_preserves_meal_photo_and_text() {
+    for image in [
+        json!({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "AQID"}}),
+        json!({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AQID"}}),
+    ] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                let content = &body["messages"][0]["content"];
+                assert_eq!(content.as_array().expect("content blocks").len(), 2);
+                assert_eq!(content[0]["type"], "image_url");
+                assert_eq!(
+                    content[0]["image_url"]["url"],
+                    "data:image/jpeg;base64,AQID"
+                );
+                assert_eq!(content[1]["text"], "Identify foods");
+                Json(
+                    json!({"choices": [{"message": {"content": "meal"}, "finish_reason": "stop"}]}),
+                )
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let provider =
+            OpenAiCompatibleProvider::new("openai", format!("http://{addr}"), "test-key")
+                .expect("provider");
+        let mut request = LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai".to_owned(),
+            model: "vision-test".to_owned(),
+            messages: vec![user_message("unused")],
+            temperature: None,
+            max_output_tokens: Some(32),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        };
+        request.messages[0].content = json!([image, {"type": "text", "text": "Identify foods"}]);
+        let response = provider.complete(request).await.expect("complete");
+        assert_eq!(response.content, "meal");
+    }
+}
+
+#[tokio::test]
+async fn openai_compatible_provider_rejects_invalid_images_instead_of_dropping_them() {
+    let provider = OpenAiCompatibleProvider::new("openai", "http://127.0.0.1:1", "test-key")
+        .expect("provider");
+    for image in [
+        json!({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg"}}),
+        json!({"type": "image_url", "image_url": {}}),
+        json!({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "AQID"}}),
+    ] {
+        let mut message = user_message("unused");
+        message.content = json!([image, {"type": "text", "text": "Identify"}]);
+        let error = provider
+            .complete(LlmRequest {
+                protocol_version: PROTOCOL_VERSION.to_owned(),
+                provider: "openai".to_owned(),
+                model: "vision-test".to_owned(),
+                messages: vec![message],
+                temperature: None,
+                max_output_tokens: Some(32),
+                tools: vec![],
+                response_format: None,
+                metadata: json!({}),
+            })
+            .await
+            .expect_err("invalid image must fail validation");
+        assert_eq!(error.record.kind, LlmErrorKind::ValidationError);
+    }
+}
+
+#[tokio::test]
 async fn openai_compatible_provider_completes_against_chat_api() {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
