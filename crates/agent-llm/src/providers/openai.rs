@@ -1,11 +1,8 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::pin::Pin;
-use std::time::Duration;
 
 use agent_core::{PROTOCOL_VERSION, ToolSpec};
 use async_trait::async_trait;
-use bytes::Bytes;
-use futures::{Stream, StreamExt, stream};
+use futures::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
@@ -45,17 +42,7 @@ impl OpenAiCompatibleProvider {
                 "OpenAI-compatible API key is required",
             ));
         }
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .map_err(|err| {
-                LlmError::provider(
-                    "http_client_build_failed",
-                    err.to_string(),
-                    false,
-                    json!({}),
-                )
-            })?;
+        let client = crate::http::client()?;
         Ok(Self {
             provider: provider.into(),
             base_url,

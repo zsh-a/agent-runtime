@@ -6,7 +6,7 @@ impl AnthropicSseState {
         model: String,
         anthropic_version: String,
         response_format: Option<LlmResponseFormat>,
-        chunks: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+        body: crate::http::ResponseBody,
     ) -> Self {
         let mut pending = VecDeque::new();
         pending.push_back(Ok(LlmEvent {
@@ -23,7 +23,7 @@ impl AnthropicSseState {
             provider,
             model,
             anthropic_version,
-            chunks,
+            body,
             buffer: String::new(),
             pending,
             content: String::new(),
@@ -42,12 +42,15 @@ impl AnthropicSseState {
     pub(super) async fn next_event(&mut self) -> Option<Result<LlmEvent, LlmError>> {
         loop {
             if let Some(event) = self.pending.pop_front() {
+                if let Ok(event) = &event {
+                    self.body.record_event(event);
+                }
                 return Some(event);
             }
             if self.finished {
                 return None;
             }
-            match self.chunks.next().await {
+            match self.body.read_chunk().await {
                 Some(Ok(bytes)) => {
                     self.buffer.push_str(&String::from_utf8_lossy(&bytes));
                     self.drain_frames();
@@ -60,12 +63,7 @@ impl AnthropicSseState {
                         error = %err,
                         "Anthropic stream read failed",
                     );
-                    return Some(Err(LlmError::provider(
-                        "provider_stream_read_failed",
-                        err.to_string(),
-                        true,
-                        json!({}),
-                    )));
+                    return Some(Err(err));
                 }
                 None => {
                     if !self.buffer.trim().is_empty()

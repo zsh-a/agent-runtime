@@ -7,6 +7,8 @@ use tokio::net::TcpListener;
 use super::*;
 
 mod anthropic;
+mod http;
+mod http_activity;
 mod mock;
 mod ollama;
 mod openai;
