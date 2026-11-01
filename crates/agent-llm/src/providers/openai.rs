@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
 
 use agent_core::{PROTOCOL_VERSION, ToolSpec};
-use bytes::Bytes;
-use futures::{StreamExt, stream};
+use futures::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
@@ -38,19 +36,7 @@ impl OpenAiCompatibleProvider {
                 "OpenAI-compatible base URL is required",
             ));
         }
-        // The wasm fetch backend has no request timeout builder; the browser
-        // applies its own. Native keeps an explicit deadline.
-        let builder = reqwest::Client::builder();
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        let builder = builder.timeout(Duration::from_secs(60));
-        let client = builder.build().map_err(|err| {
-            LlmError::provider(
-                "http_client_build_failed",
-                err.to_string(),
-                false,
-                json!({}),
-            )
-        })?;
+        let client = crate::http::client()?;
         Ok(Self {
             provider: provider.into(),
             base_url,

@@ -1,3 +1,4 @@
+mod http;
 mod mock;
 mod providers;
 mod sse;

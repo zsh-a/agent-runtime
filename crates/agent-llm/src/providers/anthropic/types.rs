@@ -83,7 +83,7 @@ pub(super) struct AnthropicSseState {
     pub(super) provider: String,
     pub(super) model: String,
     pub(super) anthropic_version: String,
-    pub(super) chunks: agent_core::bounds::MaybeBoxStream<'static, Result<Bytes, reqwest::Error>>,
+    pub(super) body: crate::http::ResponseBody,
     pub(super) buffer: String,
     pub(super) pending: VecDeque<Result<LlmEvent, LlmError>>,
     pub(super) content: String,

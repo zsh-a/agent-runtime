@@ -60,25 +60,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
             stream_options: None,
             response_format: openai_response_format(request.response_format.as_ref()),
         };
-        let response = self
-            .client
-            .post(&url)
-            .bearer_auth_optional(&self.api_key)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|err| {
-                LlmError::provider("provider_request_failed", err.to_string(), true, json!({}))
-            })?;
+        let response = crate::http::send(
+            self.client
+                .post(&url)
+                .bearer_auth_optional(&self.api_key)
+                .json(&payload),
+        )
+        .await?;
         let status = response.status();
-        let body = response.text().await.map_err(|err| {
-            LlmError::provider(
-                "provider_body_read_failed",
-                err.to_string(),
-                true,
-                json!({}),
-            )
-        })?;
+        let body = crate::http::read_text(response).await?;
         debug!(
             provider = %self.provider,
             model = %request.model,
@@ -233,16 +223,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
             }),
             response_format: openai_response_format(request.response_format.as_ref()),
         };
-        let response = self
-            .client
-            .post(&url)
-            .bearer_auth_optional(&self.api_key)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|err| {
-                LlmError::provider("provider_request_failed", err.to_string(), true, json!({}))
-            })?;
+        let response = crate::http::send(
+            self.client
+                .post(&url)
+                .bearer_auth_optional(&self.api_key)
+                .json(&payload),
+        )
+        .await?;
         let status = response.status();
         debug!(
             provider = %self.provider,
@@ -252,14 +239,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             "OpenAI-compatible stream response headers received",
         );
         if !status.is_success() {
-            let body = response.text().await.map_err(|err| {
-                LlmError::provider(
-                    "provider_body_read_failed",
-                    err.to_string(),
-                    true,
-                    json!({}),
-                )
-            })?;
+            let body = crate::http::read_text(response).await?;
             let details = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!({}));
             let message = details
                 .pointer("/error/message")
@@ -289,7 +269,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             self.provider.clone(),
             request.model,
             request.response_format,
-            Box::pin(response.bytes_stream()),
+            crate::http::ResponseBody::new(response, true),
         );
         Ok(Box::pin(stream::unfold(state, |mut state| async move {
             state.next_event().await.map(|event| (event, state))
