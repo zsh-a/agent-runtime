@@ -18,11 +18,11 @@ use std::sync::Arc;
 use agent_chat::{
     ChatResumeRequest, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner,
 };
+use agent_core::spawn_detached;
 use agent_core::{
     AgentError, AgentStateStore, RunId, RunScope, ToolContext, ToolError, ToolRegistry, ToolSpec,
     UserContext,
 };
-use agent_core::spawn_detached;
 use agent_llm::OpenAiCompatibleProvider;
 use agent_runtime::BasicAgentServices;
 use agent_store::InMemoryStateStore;
