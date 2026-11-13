@@ -1,4 +1,4 @@
-use agent_llm::{LlmEvent, LlmEventKind};
+use llm_protocol::{LlmEvent, LlmEventKind};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 

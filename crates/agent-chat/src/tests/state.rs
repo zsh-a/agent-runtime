@@ -178,7 +178,7 @@ fn chat_turn_state_applies_tool_results_for_resume() {
     assert_eq!(resumed.messages[1].role, LlmRole::Assistant);
     assert_eq!(resumed.messages[2].role, LlmRole::User);
     assert_eq!(
-        resumed.messages[2].content[0]["tool_use_id"],
+        resumed.messages[2].content.to_value()[0]["tool_use_id"],
         Value::String("call_1".to_owned())
     );
 }
@@ -249,11 +249,21 @@ fn chat_turn_suspends_and_resumes_through_interaction_contract() {
 
     assert!(resumed.pending_interaction.is_none());
     assert_eq!(
-        resumed.messages.last().expect("interaction result").content[0]["type"],
+        resumed
+            .messages
+            .last()
+            .expect("interaction result")
+            .content
+            .to_value()[0]["type"],
         "interaction_result"
     );
     assert_eq!(
-        resumed.messages.last().expect("interaction result").content[0]["value"]["option_id"],
+        resumed
+            .messages
+            .last()
+            .expect("interaction result")
+            .content
+            .to_value()[0]["value"]["option_id"],
         "safe"
     );
 }
@@ -332,7 +342,9 @@ fn interaction_resume_rejects_mixed_tool_results() {
 fn chat_turn_prepare_llm_request_compacts_over_budget_context() {
     let mut messages = vec![LlmMessage {
         role: LlmRole::System,
-        content: Value::String("system instructions stay pinned".to_owned()),
+        content: (Value::String("system instructions stay pinned".to_owned()))
+            .try_into()
+            .expect("typed message content"),
         name: None,
         metadata: json!({}),
     }];
@@ -404,7 +416,9 @@ fn context_plan_reports_required_and_dynamic_layers() {
         messages: vec![
             LlmMessage {
                 role: LlmRole::System,
-                content: Value::String("policy".to_owned()),
+                content: (Value::String("policy".to_owned()))
+                    .try_into()
+                    .expect("typed message content"),
                 name: None,
                 metadata: json!({}),
             },
@@ -482,22 +496,26 @@ fn compaction_keeps_tool_call_and_result_in_one_protocol_unit() {
         user_message("old context ".repeat(8)),
         LlmMessage {
             role: LlmRole::Assistant,
-            content: json!([{
+            content: (json!([{
                 "type": "tool_use",
                 "id": "call_pair",
                 "name": "read",
                 "input": {}
-            }]),
+            }]))
+            .try_into()
+            .expect("typed message content"),
             name: None,
             metadata: json!({}),
         },
         LlmMessage {
             role: LlmRole::User,
-            content: json!([{
+            content: (json!([{
                 "type": "tool_result",
                 "tool_use_id": "call_pair",
                 "content": "result"
-            }]),
+            }]))
+            .try_into()
+            .expect("typed message content"),
             name: None,
             metadata: json!({}),
         },

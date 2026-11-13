@@ -27,7 +27,9 @@ crates/
   agent-runtime/    AgentRunner, scheduler, retry/timeout, lease locking, trace capture
   agent-store/      In-memory and file-backed run/state/proposal/session stores
   agent-tools/      Reusable process, MCP stdio, HTTP JSON, mock, and builtin tool adapters
-  agent-llm/        Provider-neutral LLM DTOs, mock/OpenAI/Anthropic/Ollama providers
+  llm-protocol/     Typed LLM contracts, pure codecs, schema validation, SSE state
+  llm-client/       Runtime-neutral transport driver, retry/deadline policy, mocks
+  llm-reqwest/      Reqwest transport and OpenAI/Anthropic/Ollama host providers
   agent-chat/       Shared ChatTurn request/event contract and provider/tool loop
   agent-cli/        Local developer surfaces and host adapters
 
@@ -113,20 +115,25 @@ crates/agent-tools/src/
   error.rs          Shared ToolError helpers
   tests.rs          Tool override, schema, timeout, retry, and environment tests
 
-crates/agent-llm/src/
-  lib.rs            Public exports only
-  types.rs          Provider-neutral LLM DTOs, stream events, errors, provider trait
-  mock.rs           Mock provider for local tests and deterministic runners
-  usage.rs          Rough token usage estimator for mock/local responses
-  sse.rs            Shared server-sent event frame parsing helpers
-  providers/
-    mod.rs          Provider exports and shared mapping helpers
-    openai.rs, openai/
-                    OpenAI facade plus wire types, mappings, HTTP provider, and SSE state
-    anthropic.rs, anthropic/
-                    Anthropic facade plus wire types, mappings, HTTP provider, and SSE state
-    ollama.rs       Ollama chat request, response, synthetic stream mapping
-  tests.rs, tests/  Thin test facade plus provider-specific request/SSE tests
+crates/llm-protocol/src/
+  content.rs        Typed text, image bytes, tool, thinking and document blocks
+  endpoint.rs       Endpoint, redacted ApiKey and HTTP request contracts
+  wire.rs           Pure encoding/decoding, capabilities, Anthropic schema lowering
+  decoder.rs        Incremental bytes-to-events decoder; validates UTF-8 across reads
+  openai/, anthropic/
+                    Provider mappings and deterministic SSE state machines
+  structured.rs     Local validation against the caller's original JSON schema
+
+crates/llm-client/src/
+  transport.rs      Host HTTP/body/timer/monotonic-clock trait; no Send requirement
+  client.rs         Shared deadlines, establishment-only retries, cancellation by drop,
+                    structured fallback cache, bounded JSON repair and extraction
+  provider.rs       Thread-safe runtime provider trait (local on wasm)
+  mock.rs           Deterministic provider for tests and local runners
+
+crates/llm-reqwest/src/
+  lib.rs            Reqwest HTTP/body/timer adapter and concrete provider constructors
+  tests/            HTTP request and SSE integration regressions
 
 crates/agent-chat/src/
   lib.rs            Public exports only
@@ -245,8 +252,9 @@ docs/architecture/roadmap.md
 1. `agent-core` defines protocol shapes and host-facing traits.
 2. `agent-tools` owns reusable tool-source loading and process/MCP/HTTP tool
    adapters.
-3. `agent-llm` owns provider-neutral request/response/event DTOs and provider
-   clients.
+3. `llm-protocol` owns typed requests and pure provider codecs; `llm-client`
+   drives a host `Transport` without imposing a runtime or thread model;
+   `llm-reqwest` supplies the HTTP/timer adapter for CLI, native and browser hosts.
 4. `agent-chat` owns provider-neutral interactive ChatTurn request/event
    contracts and the LLM/tool continuation loop over `AgentServices`.
 5. `agent-runtime` executes scheduled or explicit `Agent` instances through
@@ -302,7 +310,7 @@ manifest tools, and `agent.run`.
 |---|---|---|
 | Add or change a wire field | `schemas/`, `crates/agent-core/`, fixtures | schema validation tests, `rtk cargo test -p agent-cli` |
 | Change runner lifecycle | `crates/agent-runtime/src/lib.rs` | `rtk cargo test -p agent-runtime`, `rtk cargo test -p agent-cli` |
-| Change LLM provider behavior | `crates/agent-llm/src/providers/` | `rtk cargo test -p agent-llm` |
+| Change LLM provider behavior | `crates/llm-protocol/`, `crates/llm-client/`, `crates/llm-reqwest/` | `rtk cargo test -p llm-protocol -p llm-client -p llm-reqwest` |
 | Change ChatTurn behavior | `crates/agent-chat/`, `schemas/chat-turn-*.schema.json`, ChatTurn fixtures | `rtk cargo test -p agent-chat`, `rtk cargo test -p agent-cli --test contracts` |
 | Change HTTP ChatTurn streaming | `crates/agent-cli/src/interfaces/`, `openapi/agent-runtime-api.yaml`, `bindings/ts/` | `rtk cargo test -p agent-cli --test cli http_server_streams_chat_turn_events`, TS binding tests |
 | Change CLI command behavior | `crates/agent-cli/src/commands/` plus supporting module | focused command test, `rtk cargo test -p agent-cli` |
@@ -448,3 +456,37 @@ These are intentional or pending differences from the long-term design:
   pause/resume remains future work.
 
 Use this document and the current test suite as the implementation authority.
+
+## LLM Transport Boundary
+
+`llm-protocol` performs no network or timer operations. Host `LlmMessage` wire
+content deserializes into `MessageContent` and exhaustively mapped `ContentBlock`
+variants; unknown or malformed blocks fail closed. Image bytes are base64-encoded
+only by wire serialization. PDF documents remain available on Anthropic.
+
+`Client<T>` accepts local, non-Send transports even on native platforms. When the
+transport/body/futures satisfy the runtime thread bounds, the same client also
+implements `LlmProvider`. The host supplies response chunks, monotonic time and
+sleep; the shared driver owns deadlines and retries. Dropping the completion or
+stream cancels work. Retrying stops once a successful body is exposed; partial
+SSE and tool calls are never replayed. Long/date Retry-After values are surfaced.
+
+Structured requests try native formatting, downgrade only explicit unsupported
+option responses, and cache the accepted mode by endpoint/protocol/version/model
+and credential fingerprint. The original schema is always validated locally;
+Anthropic receives its supported subset with numeric/string/array bounds moved
+into descriptions. Invalid whole-response JSON can be repaired once within the
+same total deadline; refusal, truncation, tool calls and partial streams cannot.
+Hidden reasoning is never substituted for the answer. Hosts may share a
+`CapabilityCache` across short-lived clients without storing plaintext keys.
+
+`ApiKey`, `Endpoint`, `HttpRequest` and `LlmRequest` debug output omit credentials,
+request bodies and images. Upstream error bodies are classified in memory and
+never copied into diagnostics. Reqwest does not follow redirects carrying keys.
+
+Protocol references checked 2026-11-13:
+- https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+- https://platform.claude.com/docs/en/build-with-claude/thinking
+- https://platform.claude.com/docs/en/build-with-claude/effort
+- https://developers.openai.com/api/docs/guides/reasoning
+- https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create

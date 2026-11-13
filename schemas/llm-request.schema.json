@@ -26,6 +26,7 @@
         "additionalProperties": false
       }
     },
+    "effort": { "type": ["string", "null"], "enum": ["low", "medium", "high", "max", null] },
     "temperature": { "type": ["number", "null"], "minimum": 0 },
     "max_output_tokens": { "type": ["integer", "null"], "minimum": 1 },
     "tools": {

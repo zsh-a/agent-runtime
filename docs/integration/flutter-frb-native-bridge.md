@@ -17,7 +17,7 @@ Flutter UI
   -> Feature-owned Dart agent adapter
   -> App-level AgentRuntimeBridge
   -> FRB native Rust bridge
-  -> agent-chat / agent-runtime / agent-llm
+  -> agent-chat / agent-runtime / llm-protocol / llm-client / llm-reqwest
   -> Dart ToolHost
   -> Riverpod providers / repositories / platform APIs
 ```
@@ -45,7 +45,7 @@ Runtime crates may depend on:
 
 - `agent-core` wire DTOs, traits, errors, trace/session/proposal contracts
 - `agent-chat` ChatTurn request/event/state contracts
-- `agent-llm` provider-neutral LLM request/response/event contracts
+- `llm-protocol / llm-client / llm-reqwest` provider-neutral LLM request/response/event contracts
 - `agent-runtime` explicit or scheduled agent execution
 - `agent-store` storage traits or local development stores
 

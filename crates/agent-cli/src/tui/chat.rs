@@ -3,8 +3,8 @@ use agent_chat::{
     ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner, ChatTurnState,
 };
 use agent_core::PROTOCOL_VERSION;
-use agent_llm::{LlmMessage, LlmRole, user_message};
 use futures::StreamExt;
+use llm_protocol::{LlmMessage, LlmRole, user_message};
 use miette::{Result, miette};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
@@ -337,7 +337,7 @@ where
 fn finish_completed_chat<Emit>(
     mut surface_messages: Vec<LlmMessage>,
     assistant_text: String,
-    final_response: Option<agent_llm::LlmResponse>,
+    final_response: Option<llm_protocol::LlmResponse>,
     mut emit: Emit,
 ) where
     Emit: FnMut(TuiUpdate),
@@ -351,7 +351,9 @@ fn finish_completed_chat<Emit>(
         emit(TuiUpdate::AssistantReplace(assistant_content.clone()));
         surface_messages.push(LlmMessage {
             role: LlmRole::Assistant,
-            content: Value::String(assistant_content),
+            content: (Value::String(assistant_content))
+                .try_into()
+                .expect("typed message content"),
             name: None,
             metadata: json!({}),
         });
@@ -541,7 +543,7 @@ mod tests {
     };
     use agent_chat::{ChatTurnEvent, ChatTurnEventKind, chat_turn_initial_state};
     use agent_core::ContextPolicy;
-    use agent_llm::{LlmFinishReason, user_message};
+    use llm_protocol::{LlmFinishReason, user_message};
     use serde_json::json;
 
     #[tokio::test]
@@ -647,7 +649,7 @@ mod tests {
         let event = ChatTurnEvent {
             kind: ChatTurnEventKind::RoundFinished,
             content: None,
-            response: Some(agent_llm::LlmResponse {
+            response: Some(llm_protocol::LlmResponse {
                 protocol_version: PROTOCOL_VERSION.to_owned(),
                 provider: "mock".to_owned(),
                 model: "mock-model".to_owned(),

@@ -2,7 +2,7 @@ use agent_core::{
     CompactionRecord, ContextBlock, ContextPolicy, ContextSnapshot, InteractionEnvelope,
     InteractionResponse, PROTOCOL_VERSION, ToolOutcome, ToolSpec, infer_tool_outcome,
 };
-use agent_llm::{LlmMessage, LlmResponse, LlmUsage};
+use llm_protocol::{LlmMessage, LlmResponse, LlmUsage};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

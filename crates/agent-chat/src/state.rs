@@ -1,7 +1,7 @@
 use agent_core::{
     InteractionEnvelope, InteractionResponse, InteractionResumeKind, InteractionStatus,
 };
-use agent_llm::{LlmFinishReason, LlmMessage, LlmRequest, LlmResponse, LlmRole};
+use llm_protocol::{LlmFinishReason, LlmMessage, LlmRequest, LlmResponse, LlmRole};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
@@ -209,7 +209,9 @@ pub fn chat_turn_apply_tool_results(
     state.pending_tool_calls.clear();
     state.messages.push(LlmMessage {
         role: LlmRole::User,
-        content: Value::Array(result_blocks),
+        content: (Value::Array(result_blocks))
+            .try_into()
+            .expect("typed message content"),
         name: None,
         metadata: json!({}),
     });
@@ -271,14 +273,16 @@ pub fn chat_turn_apply_interaction_response(
         .expect("resolved interaction always carries a response");
     state.messages.push(LlmMessage {
         role: LlmRole::User,
-        content: Value::Array(vec![json!({
+        content: (Value::Array(vec![json!({
             "type": "interaction_result",
             "interaction_id": interaction.interaction_id,
             "interaction_kind": interaction.kind,
             "action": response.action,
             "value": response.value,
             "responded_at": response.responded_at,
-        })]),
+        })]))
+        .try_into()
+        .expect("typed message content"),
         name: None,
         metadata: json!({
             "interaction_status": interaction.status,
@@ -398,7 +402,9 @@ fn assistant_message(text: &str, tool_calls: &[ChatToolCall]) -> LlmMessage {
     }
     LlmMessage {
         role: LlmRole::Assistant,
-        content: Value::Array(blocks),
+        content: (Value::Array(blocks))
+            .try_into()
+            .expect("typed message content"),
         name: None,
         metadata: json!({}),
     }
@@ -407,7 +413,9 @@ fn assistant_message(text: &str, tool_calls: &[ChatToolCall]) -> LlmMessage {
 fn assistant_text_message(text: &str) -> LlmMessage {
     LlmMessage {
         role: LlmRole::Assistant,
-        content: Value::String(text.to_owned()),
+        content: (Value::String(text.to_owned()))
+            .try_into()
+            .expect("typed message content"),
         name: None,
         metadata: json!({}),
     }

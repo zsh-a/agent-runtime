@@ -5,7 +5,9 @@ members = [
   "crates/agent-runtime",
   "crates/agent-store",
   "crates/agent-tools",
-  "crates/agent-llm",
+  "crates/llm-protocol",
+  "crates/llm-client",
+  "crates/llm-reqwest",
   "crates/agent-chat",
   "crates/agent-cli",
   "crates/agent-wasm",
@@ -20,7 +22,9 @@ rust-version = "1.96"
 [workspace.dependencies]
 agent-core = { path = "crates/agent-core" }
 agent-chat = { path = "crates/agent-chat" }
-agent-llm = { path = "crates/agent-llm" }
+llm-protocol = { path = "crates/llm-protocol" }
+llm-client = { path = "crates/llm-client" }
+llm-reqwest = { path = "crates/llm-reqwest" }
 agent-runtime = { path = "crates/agent-runtime" }
 agent-store = { path = "crates/agent-store" }
 agent-tools = { path = "crates/agent-tools" }

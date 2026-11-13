@@ -1,0 +1,654 @@
+use super::*;
+
+#[tokio::test]
+async fn openai_compatible_provider_preserves_meal_photo_and_text() {
+    for image in [
+        json!({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "AQID"}}),
+        json!({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AQID"}}),
+    ] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                let content = &body["messages"][0]["content"];
+                assert_eq!(content.as_array().expect("content blocks").len(), 2);
+                assert_eq!(content[0]["type"], "image_url");
+                assert_eq!(
+                    content[0]["image_url"]["url"],
+                    "data:image/jpeg;base64,AQID"
+                );
+                assert_eq!(content[1]["text"], "Identify foods");
+                Json(
+                    json!({"choices": [{"message": {"content": "meal"}, "finish_reason": "stop"}]}),
+                )
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let provider =
+            OpenAiCompatibleProvider::new("openai", format!("http://{addr}"), "test-key")
+                .expect("provider");
+        let mut request = LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai".to_owned(),
+            model: "vision-test".to_owned(),
+            messages: vec![user_message("unused")],
+            temperature: None,
+            effort: None,
+            max_output_tokens: Some(32),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        };
+        request.messages[0].content = json!([image, {"type": "text", "text": "Identify foods"}])
+            .try_into()
+            .expect("typed image");
+        let response = provider.complete(request).await.expect("complete");
+        assert_eq!(response.content, "meal");
+    }
+}
+
+#[tokio::test]
+async fn openai_compatible_provider_preserves_all_meal_views_and_roles() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let addr = listener.local_addr().expect("address");
+    let views = [
+        ("overview", "AQID"),
+        ("side", "BAUG"),
+        ("detail", "BwgJ"),
+        ("after_meal", "CgsM"),
+    ];
+    let app = Router::new().route(
+        "/chat/completions",
+        post(move |Json(body): Json<Value>| async move {
+            let content = body["messages"][0]["content"].as_array().expect("blocks");
+            assert_eq!(content.len(), 9);
+            for (index, (role, data)) in views.iter().enumerate() {
+                let metadata: Value = serde_json::from_str(
+                    content[index * 2]["text"].as_str().expect("view metadata"),
+                )
+                .expect("view JSON");
+                assert_eq!(metadata, json!({"view": index + 1, "role": role}));
+                assert_eq!(content[index * 2 + 1]["type"], "image_url");
+                assert_eq!(
+                    content[index * 2 + 1]["image_url"]["url"],
+                    format!("data:image/jpeg;base64,{data}"),
+                );
+            }
+            assert_eq!(content[8]["text"], "Identify this one meal");
+            Json(json!({"choices": [{"message": {"content": "meal"}, "finish_reason": "stop"}]}))
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+    let provider = OpenAiCompatibleProvider::new("openai", format!("http://{addr}"), "test-key")
+        .expect("provider");
+    let mut blocks = Vec::new();
+    for (index, (role, data)) in views.iter().enumerate() {
+        blocks.push(
+            json!({"type": "text", "text": json!({"view": index + 1, "role": role}).to_string()}),
+        );
+        blocks.push(json!({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}));
+    }
+    blocks.push(json!({"type": "text", "text": "Identify this one meal"}));
+    let mut message = user_message("unused");
+    message.content = Value::Array(blocks).try_into().expect("typed image");
+    let response = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai".to_owned(),
+            model: "vision-test".to_owned(),
+            messages: vec![message],
+            temperature: None,
+            effort: None,
+            max_output_tokens: Some(32),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("complete");
+    assert_eq!(response.content, "meal");
+}
+
+#[tokio::test]
+async fn openai_compatible_provider_rejects_invalid_images_instead_of_dropping_them() {
+    let provider = OpenAiCompatibleProvider::new("openai", "http://127.0.0.1:1", "test-key")
+        .expect("provider");
+    for image in [
+        json!({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg"}}),
+        json!({"type": "image_url", "image_url": {}}),
+        json!({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "AQID"}}),
+    ] {
+        let mut message = user_message("unused");
+        let Ok(content) =
+            MessageContent::try_from(json!([image, {"type": "text", "text": "Identify"}]))
+        else {
+            continue;
+        };
+        message.content = content;
+        let error = provider
+            .complete(LlmRequest {
+                protocol_version: PROTOCOL_VERSION.to_owned(),
+                provider: "openai".to_owned(),
+                model: "vision-test".to_owned(),
+                messages: vec![message],
+                temperature: None,
+                effort: None,
+                max_output_tokens: Some(32),
+                tools: vec![],
+                response_format: None,
+                metadata: json!({}),
+            })
+            .await
+            .expect_err("invalid image must fail validation");
+        assert_eq!(error.record.kind, LlmErrorKind::ValidationError);
+    }
+}
+
+#[tokio::test]
+async fn openai_compatible_provider_completes_against_chat_api() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            assert_eq!(body["model"], "gpt-test");
+            assert_eq!(body["messages"][0]["role"], "user");
+            Json(json!({
+                "choices": [{
+                    "message": {"content": "provider answer"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5
+                }
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let response = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "gpt-test".to_owned(),
+            messages: vec![user_message("ping")],
+            temperature: Some(0.2),
+            effort: None,
+            max_output_tokens: Some(32),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider completes");
+
+    assert_eq!(response.provider, "openai-compatible");
+    assert_eq!(response.model, "gpt-test");
+    assert_eq!(response.content, "provider answer");
+    assert_eq!(response.finish_reason, LlmFinishReason::Stop);
+    assert_eq!(
+        response.usage.expect("usage").total_tokens,
+        5,
+        "usage maps from provider response"
+    );
+}
+
+#[tokio::test]
+async fn openai_compatible_provider_sends_json_schema_response_format() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            assert_eq!(body["response_format"]["type"], "json_schema");
+            assert_eq!(
+                body["response_format"]["json_schema"]["name"],
+                "project_summary"
+            );
+            assert_eq!(
+                body["response_format"]["json_schema"]["schema"]["required"][0],
+                "title"
+            );
+            assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+            Json(json!({
+                "choices": [{
+                    "message": {"content": "{\"title\":\"Runtime\",\"status\":\"ok\"}"},
+                    "finish_reason": "stop"
+                }]
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let response = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "gpt-test".to_owned(),
+            messages: vec![user_message("summarize")],
+            temperature: None,
+            effort: None,
+            max_output_tokens: Some(64),
+            tools: vec![],
+            response_format: Some(LlmResponseFormat::JsonSchema {
+                name: "project_summary".to_owned(),
+                schema: json!({
+                    "type": "object",
+                    "required": ["title", "status"],
+                    "properties": {
+                        "title": {"type": "string"},
+                        "status": {"type": "string"}
+                    },
+                    "additionalProperties": false
+                }),
+                strict: Some(true),
+            }),
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider completes");
+
+    assert_eq!(
+        response.object,
+        Some(json!({"title": "Runtime", "status": "ok"}))
+    );
+}
+
+#[tokio::test]
+async fn openai_structured_completion_does_not_treat_reasoning_as_answer() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            assert_eq!(body["response_format"]["type"], "json_object");
+            Json(json!({
+                "choices": [{
+                    "message": {
+                        "content": null,
+                        "reasoning_content": "{\"title\":\"Recovered\"}"
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let error = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "reasoning-test".to_owned(),
+            messages: vec![user_message("return json")],
+            temperature: None,
+            effort: None,
+            max_output_tokens: Some(64),
+            tools: vec![],
+            response_format: Some(LlmResponseFormat::JsonObject),
+            metadata: json!({}),
+        })
+        .await
+        .expect_err("hidden reasoning is not a structured answer");
+
+    assert_eq!(error.record.code, "structured_output_parse_failed");
+}
+
+#[tokio::test]
+async fn openai_compatible_provider_streams_sse_text_and_usage() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            assert_eq!(body["model"], "gpt-stream-test");
+            assert_eq!(body["stream"], true);
+            assert_eq!(body["stream_options"]["include_usage"], true);
+            (
+                [("content-type", "text/event-stream")],
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let events = provider
+        .stream(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "gpt-stream-test".to_owned(),
+            messages: vec![user_message("ping")],
+            temperature: None,
+            effort: None,
+            max_output_tokens: Some(32),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider streams")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream events ok");
+
+    assert!(matches!(events[0].kind, LlmEventKind::Started));
+    assert_eq!(events[1].content.as_deref(), Some("hel"));
+    assert_eq!(events[2].content.as_deref(), Some("lo"));
+    let finished = events.last().expect("finished event");
+    assert!(matches!(finished.kind, LlmEventKind::Finished));
+    let response = finished.response.as_ref().expect("response");
+    assert_eq!(response.content, "hello");
+    assert_eq!(response.finish_reason, LlmFinishReason::Stop);
+    assert_eq!(response.usage.as_ref().expect("usage").total_tokens, 6);
+    assert_eq!(response.metadata["stream"], true);
+}
+
+#[tokio::test]
+async fn openai_compatible_provider_streams_reasoning_and_tool_calls() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            assert_eq!(body["stream"], true);
+            (
+                [("content-type", "text/event-stream")],
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_task\",\"arguments\":\"{\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"id\\\":\\\"task_1\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let events = provider
+        .stream(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "gpt-stream-test".to_owned(),
+            messages: vec![user_message("ping")],
+            temperature: None,
+            effort: None,
+            max_output_tokens: Some(32),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider streams")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream events ok");
+
+    assert!(matches!(events[1].kind, LlmEventKind::ThinkingDelta));
+    assert_eq!(events[1].content.as_deref(), Some("think"));
+    assert!(matches!(events[2].kind, LlmEventKind::ToolCallStart));
+    assert_eq!(events[2].tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(events[2].tool_name.as_deref(), Some("read_task"));
+    assert_eq!(events[3].partial_input_json.as_deref(), Some("{\""));
+    assert_eq!(
+        events[4].partial_input_json.as_deref(),
+        Some("id\":\"task_1\"}")
+    );
+    assert!(matches!(events[5].kind, LlmEventKind::ToolCallEnd));
+    assert_eq!(events[5].tool_input, Some(json!({"id": "task_1"})));
+    let response = events
+        .last()
+        .and_then(|event| event.response.as_ref())
+        .unwrap();
+    assert_eq!(response.finish_reason, LlmFinishReason::ToolCall);
+}
+
+#[tokio::test]
+async fn openai_compatible_provider_sends_tools_and_tool_results() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|Json(body): Json<Value>| async move {
+            assert_eq!(body["tools"][0]["type"], "function");
+            assert_eq!(body["tools"][0]["function"]["name"], "read_task");
+            assert_eq!(
+                body["tools"][0]["function"]["parameters"]["required"][0],
+                "id"
+            );
+            assert_eq!(body["messages"][1]["role"], "assistant");
+            assert_eq!(body["messages"][1]["content"], Value::Null);
+            assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call_1");
+            assert_eq!(
+                body["messages"][1]["tool_calls"][0]["function"]["arguments"],
+                "{\"id\":\"task_1\"}"
+            );
+            assert_eq!(body["messages"][2]["role"], "tool");
+            assert_eq!(body["messages"][2]["tool_call_id"], "call_1");
+            assert_eq!(body["messages"][2]["content"], "{\"title\":\"Task\"}");
+            Json(json!({
+                "choices": [{
+                    "message": {"content": "done"},
+                    "finish_reason": "stop"
+                }]
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let response = provider
+        .complete(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "gpt-tool-test".to_owned(),
+            messages: vec![
+                user_message("read task"),
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: (json!([{
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "read_task",
+                        "input": {"id": "task_1"}
+                    }]))
+                    .try_into()
+                    .expect("typed test message"),
+                    name: None,
+                    metadata: json!({}),
+                },
+                LlmMessage {
+                    role: LlmRole::User,
+                    content: (json!([{
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": {"title": "Task"}
+                    }]))
+                    .try_into()
+                    .expect("typed test message"),
+                    name: None,
+                    metadata: json!({}),
+                },
+            ],
+            temperature: None,
+            effort: None,
+            max_output_tokens: Some(32),
+            tools: vec![ToolSpec {
+                name: "read_task".to_owned(),
+                description: "Read a task".to_owned(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"]
+                }),
+                output_schema: None,
+                risk: agent_core::ToolRisk::ReadOnly,
+                replay_policy: agent_core::ToolReplayPolicy::SafeRetry,
+                metadata: json!({}),
+            }],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider completes");
+
+    assert_eq!(response.content, "done");
+}
+
+#[tokio::test]
+async fn openai_stream_without_terminal_signal_is_reported_as_incomplete() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let error = provider
+        .stream(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "gpt-stream-test".to_owned(),
+            messages: vec![user_message("ping")],
+            temperature: None,
+            effort: None,
+            max_output_tokens: Some(32),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider streams")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .find_map(Result::err)
+        .expect("missing terminal signal is an error");
+
+    assert_eq!(error.record.code, "provider_stream_incomplete");
+}
+
+#[tokio::test]
+async fn openai_stream_preserves_tool_call_when_finish_reason_is_stop() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("listener binds");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_stop\",\"function\":{\"name\":\"read_task\",\"arguments\":\"{\\\"id\\\":\\\"task_1\\\"}\"}}]},\"finish_reason\":\"stop\"}]}\n\n",
+            )
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("test server runs");
+    });
+
+    let provider =
+        OpenAiCompatibleProvider::new("openai-compatible", format!("http://{addr}"), "test-key")
+            .expect("provider builds");
+    let events = provider
+        .stream(LlmRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: "gpt-stream-test".to_owned(),
+            messages: vec![user_message("read task")],
+            temperature: None,
+            effort: None,
+            max_output_tokens: Some(32),
+            tools: vec![],
+            response_format: None,
+            metadata: json!({}),
+        })
+        .await
+        .expect("provider streams")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream events ok");
+
+    let tool_end = events
+        .iter()
+        .find(|event| matches!(event.kind, LlmEventKind::ToolCallEnd))
+        .expect("tool call end");
+    assert_eq!(tool_end.tool_call_id.as_deref(), Some("call_stop"));
+    assert_eq!(tool_end.tool_input, Some(json!({"id": "task_1"})));
+    let response = events
+        .last()
+        .and_then(|event| event.response.as_ref())
+        .expect("finished response");
+    assert_eq!(response.finish_reason, LlmFinishReason::Stop);
+}

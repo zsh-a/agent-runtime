@@ -12,7 +12,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 agent-core.workspace = true
-agent-llm.workspace = true
+llm-protocol.workspace = true
+llm-client.workspace = true
+llm-reqwest.workspace = true
 agent-chat.workspace = true
 agent-runtime.workspace = true
 agent-store.workspace = true

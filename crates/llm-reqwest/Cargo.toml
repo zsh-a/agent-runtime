@@ -1,0 +1,25 @@
+[package]
+name = "llm-reqwest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+llm-protocol.workspace = true
+llm-client.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+bytes = "1"
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+agent-core.workspace = true
+axum.workspace = true
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+gloo-timers = { version = "0.3", features = ["futures"] }
+web-time = "1.1"

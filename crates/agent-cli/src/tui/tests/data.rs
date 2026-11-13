@@ -1,7 +1,7 @@
 use super::*;
 use agent_chat::{ChatToolExecution, ChatTurnRequest, chat_turn_initial_state};
 use agent_core::PROTOCOL_VERSION;
-use agent_llm::user_message;
+use llm_protocol::user_message;
 use serde_json::json;
 
 fn test_state() -> TuiState {

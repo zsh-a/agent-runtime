@@ -45,7 +45,7 @@ agent-runtime/
     agent-core/
     agent-runtime/
     agent-tools/
-    agent-llm/
+    llm-protocol / llm-client / llm-reqwest/
     agent-store/
     agent-cli/
   bindings/
@@ -79,7 +79,7 @@ agent-runtime
    |
    +-- agent-core
    +-- agent-tools
-   +-- agent-llm
+   +-- llm-protocol / llm-client / llm-reqwest
    +-- agent-store
    +-- trace / replay
 ```

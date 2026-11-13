@@ -15,23 +15,20 @@
 
 use std::sync::Arc;
 
-use agent_chat::{
-    ChatResumeRequest, ChatTurnEvent, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner,
-};
+use agent_chat::{ChatResumeRequest, ChatTurnEventKind, ChatTurnRequest, ChatTurnRunner};
 use agent_core::spawn_detached;
 use agent_core::{
     AgentError, AgentStateStore, RunId, RunScope, ToolContext, ToolError, ToolRegistry, ToolSpec,
     UserContext,
 };
-use agent_llm::OpenAiCompatibleProvider;
 use agent_runtime::BasicAgentServices;
 use agent_store::InMemoryStateStore;
 use futures::StreamExt;
 use js_sys::Function;
+use llm_reqwest::OpenAiCompatibleProvider;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::future_to_promise;
 
 #[wasm_bindgen(typescript_custom_section)]
 const CANCEL_TYPES: &str = r#"

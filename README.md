@@ -8,7 +8,9 @@ and CLI/server development.
 - `crates/agent-core`: DTOs, traits, IDs, errors, trace/session/proposal contracts.
 - `crates/agent-runtime`: runner, scheduler, retry/timeout, lease locking, trace capture.
 - `crates/agent-store`: in-memory and file-backed run/proposal/session stores.
-- `crates/agent-llm`: provider-neutral LLM DTOs and mock/OpenAI/Anthropic/Ollama providers.
+- `crates/llm-protocol`: typed model content, pure provider codecs and incremental SSE decoders.
+- `crates/llm-client`: runtime-neutral deadlines, retries, capability fallback, and mock provider.
+- `crates/llm-reqwest`: native/browser HTTP transport and ready-to-use providers.
 - `crates/agent-chat`: shared ChatTurn request/event contract and tool-round loop.
 - Typed, versioned embedded run snapshots for pause/resume hosts such as
   Flutter/FRB, including Rust-owned effect/subagent limits and JSON Schemas.

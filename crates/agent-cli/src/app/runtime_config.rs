@@ -3,9 +3,9 @@ use std::{collections::BTreeSet, sync::Arc};
 use agent_core::{
     Agent, AgentRuntimeCatalog, AgentSpec, PROTOCOL_VERSION, ToolSpec, catalog_version,
 };
-use agent_llm::{LlmMessage, LlmRole};
 use agent_runtime::InMemoryAgentRegistry;
 use camino::{Utf8Path, Utf8PathBuf};
+use llm_protocol::{LlmMessage, LlmRole};
 use miette::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -104,7 +104,9 @@ impl RuntimeComposition {
         let mut request_messages = Vec::with_capacity(messages.len() + 1);
         request_messages.push(LlmMessage {
             role: LlmRole::System,
-            content: Value::String(system_prompt),
+            content: (Value::String(system_prompt))
+                .try_into()
+                .expect("typed message content"),
             name: None,
             metadata: json!({"source": "runtime_config"}),
         });
@@ -267,7 +269,7 @@ pub(crate) fn tool_source_label(tool: &ToolSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_llm::user_message;
+    use llm_protocol::user_message;
 
     #[tokio::test]
     async fn composition_merges_registry_and_catalog_agents() {

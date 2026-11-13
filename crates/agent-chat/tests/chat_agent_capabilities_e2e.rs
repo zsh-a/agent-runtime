@@ -11,12 +11,13 @@ use agent_core::{
     AgentError, AgentEvent, AgentEventEmitter, AgentStateAccess, ArtifactPublisher,
     PROTOCOL_VERSION, ProposalCreator, SubagentRunner, ToolCaller, ToolError, ToolRisk, ToolSpec,
 };
-use agent_llm::{
-    LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmProvider, LlmRequest,
-    LlmResponse, LlmUsage, user_message,
-};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use llm_client::{LlmEventStream, LlmProvider};
+use llm_protocol::{
+    LlmError, LlmEvent, LlmEventKind, LlmFinishReason, LlmRequest, LlmResponse, LlmUsage,
+    user_message,
+};
 use serde_json::{Value, json};
 
 #[tokio::test]
@@ -444,9 +445,14 @@ fn tool_result_ids(request: &LlmRequest) -> Vec<&str> {
     request
         .messages
         .iter()
-        .filter_map(|message| message.content.as_array())
+        .filter_map(|message| message.content.blocks())
         .flat_map(|blocks| blocks.iter())
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
-        .filter_map(|block| block.get("tool_use_id").and_then(Value::as_str))
+        .filter_map(|block| {
+            if let llm_protocol::ContentBlock::ToolResult { tool_use_id, .. } = block {
+                Some(tool_use_id.as_str())
+            } else {
+                None
+            }
+        })
         .collect()
 }

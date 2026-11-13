@@ -9,8 +9,8 @@ use agent_core::{
     HookSpec, InteractionEnvelope, InteractionResponse, PromptManifest, ProposalEnvelope,
     RunRequest, SessionRecord, StepRecord, ThreadRecord, WorkflowRunRequest, WorkflowRunResult,
 };
-use agent_llm::{LlmRequest, LlmResponse};
 use agent_runtime::RecoveryReport;
+use llm_protocol::{LlmRequest, LlmResponse};
 use serde_json::Value;
 
 #[test]

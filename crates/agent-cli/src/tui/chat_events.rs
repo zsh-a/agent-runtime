@@ -13,7 +13,7 @@ pub(super) fn apply_chat_event_to_tui(
     state: &mut TuiState,
     event: &ChatTurnEvent,
     assistant_text: &mut String,
-    final_response: &mut Option<agent_llm::LlmResponse>,
+    final_response: &mut Option<llm_protocol::LlmResponse>,
 ) {
     for update in updates_from_chat_event(event, assistant_text, final_response) {
         state.apply_update(update);
@@ -23,7 +23,7 @@ pub(super) fn apply_chat_event_to_tui(
 pub(super) fn updates_from_chat_event(
     event: &ChatTurnEvent,
     assistant_text: &mut String,
-    final_response: &mut Option<agent_llm::LlmResponse>,
+    final_response: &mut Option<llm_protocol::LlmResponse>,
 ) -> Vec<TuiUpdate> {
     let mut updates = Vec::new();
     match event.kind {

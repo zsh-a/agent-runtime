@@ -4,8 +4,9 @@ use agent_core::{
     AgentCancellation, AgentServices, CancellationFuture, CancellationSignal, PROTOCOL_VERSION,
     infer_tool_outcome,
 };
-use agent_llm::{LlmEventKind, LlmProvider, LlmResponse};
 use futures::stream;
+use llm_client::LlmProvider;
+use llm_protocol::{LlmEventKind, LlmResponse};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -710,13 +711,13 @@ async fn send_round_finished(
     .await;
 }
 
-fn finish_reason_label(reason: &agent_llm::LlmFinishReason) -> &'static str {
+fn finish_reason_label(reason: &llm_protocol::LlmFinishReason) -> &'static str {
     match reason {
-        agent_llm::LlmFinishReason::Stop => "end_turn",
-        agent_llm::LlmFinishReason::Length => "max_tokens",
-        agent_llm::LlmFinishReason::ToolCall => "tool_use",
-        agent_llm::LlmFinishReason::ContentFilter => "content_filter",
-        agent_llm::LlmFinishReason::Error => "error",
+        llm_protocol::LlmFinishReason::Stop => "end_turn",
+        llm_protocol::LlmFinishReason::Length => "max_tokens",
+        llm_protocol::LlmFinishReason::ToolCall => "tool_use",
+        llm_protocol::LlmFinishReason::ContentFilter => "content_filter",
+        llm_protocol::LlmFinishReason::Error => "error",
     }
 }
 

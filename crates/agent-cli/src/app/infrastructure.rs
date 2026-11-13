@@ -6,8 +6,7 @@ use serde::Serialize;
 
 use crate::trace_store::read_json;
 
-const DEFAULT_LOG_FILTER: &str =
-    "warn,agent_cli=info,agent_runtime=info,agent_chat=info,agent_llm=info";
+const DEFAULT_LOG_FILTER: &str = "warn,agent_cli=info,agent_runtime=info,agent_chat=info,llm_protocol=info,llm_client=info,llm_reqwest=info";
 pub(super) const TUI_LOG_FILE: &str = "tui.log";
 
 pub(super) enum LogMode {

@@ -2,8 +2,8 @@ use std::{collections::VecDeque, time::Instant};
 
 use agent_chat::{ChatToolCall, ChatTurnState};
 use agent_core::{AgentRunRecord, AgentSpec, ContextPolicy, HookSpec};
-use agent_llm::LlmMessage;
 use camino::{Utf8Path, Utf8PathBuf};
+use llm_protocol::LlmMessage;
 use miette::{IntoDiagnostic, Result, miette};
 use serde_json::Value;
 

@@ -1,5 +1,5 @@
 use agent_core::{AgentErrorKind, AgentErrorRecord};
-use agent_llm::LlmError;
+use llm_protocol::LlmError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

@@ -237,7 +237,7 @@ mod tests {
 
     use super::*;
     use crate::{ChatToolExecution, ChatTurnRequest, chat_turn_initial_state};
-    use agent_llm::user_message;
+    use llm_protocol::user_message;
 
     fn pending_state(replay_policy: ToolReplayPolicy) -> ChatTurnState {
         let mut state = chat_turn_initial_state(&ChatTurnRequest {

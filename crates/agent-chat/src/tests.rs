@@ -9,12 +9,13 @@ use agent_core::{
     InteractionAction, InteractionEnvelope, InteractionOption, InteractionResponse,
     PROTOCOL_VERSION, ProposalCreator, SubagentRunner, ToolCaller, ToolError, TraceEvent,
 };
-use agent_llm::{
-    LlmError, LlmEvent, LlmEventKind, LlmEventStream, LlmFinishReason, LlmMessage, LlmProvider,
-    LlmRequest, LlmResponse, LlmRole, LlmUsage, MockLlmProvider, user_message,
-};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use llm_client::{LlmEventStream, LlmProvider, MockLlmProvider};
+use llm_protocol::{
+    LlmError, LlmEvent, LlmEventKind, LlmFinishReason, LlmMessage, LlmRequest, LlmResponse,
+    LlmRole, LlmUsage, user_message,
+};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 

@@ -1,0 +1,342 @@
+use super::*;
+
+impl OpenAiSseState {
+    pub(crate) fn new(
+        provider: String,
+        model: String,
+        response_format: Option<LlmResponseFormat>,
+    ) -> Self {
+        let mut pending = VecDeque::new();
+        pending.push_back(Ok(LlmEvent {
+            kind: LlmEventKind::Started,
+            content: None,
+            response: None,
+            tool_call_id: None,
+            tool_name: None,
+            partial_input_json: None,
+            tool_input: None,
+            metadata: json!({"provider": provider, "model": model, "stream": true}),
+        }));
+        Self {
+            provider,
+            model,
+            buffer: String::new(),
+            pending,
+            content: String::new(),
+            finish_reason: None,
+            raw_finish_reason: None,
+            terminal_signal: None,
+            usage: None,
+            tools: BTreeMap::new(),
+            response_format,
+            finished: false,
+            refused: false,
+        }
+    }
+
+    pub(crate) fn finish(&mut self) {
+        if !self.buffer.trim().is_empty()
+            && let Some(frame) = take_remaining_sse_frame(&mut self.buffer)
+        {
+            self.handle_frame(&frame);
+        }
+        if !self.finished {
+            if self.terminal_signal.is_some() {
+                self.push_finished();
+            } else {
+                self.push_stream_incomplete();
+            }
+        }
+    }
+
+    pub(crate) fn drain_frames(&mut self) {
+        while let Some(frame) = take_next_sse_frame(&mut self.buffer) {
+            self.handle_frame(&frame);
+        }
+    }
+
+    pub(crate) fn handle_frame(&mut self, frame: &str) {
+        let data = sse_data(frame);
+        if data.is_empty() {
+            return;
+        }
+        if data.trim() == "[DONE]" {
+            self.terminal_signal = Some("done_marker".to_owned());
+            self.push_finished();
+            return;
+        }
+        let decoded = match serde_json::from_str::<OpenAiChatCompletionResponse>(&data) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                self.finished = true;
+                warn!(
+                    provider = %self.provider,
+                    model = %self.model,
+
+                    frame_bytes = data.len(),
+                    "OpenAI-compatible stream frame decode failed",
+                );
+                self.pending.push_back(Err(LlmError::provider(
+                    "provider_stream_decode_failed",
+                    "Provider stream frame could not be decoded",
+                    false,
+                    json!({}),
+                )));
+                return;
+            }
+        };
+        if decoded.error.is_some() {
+            self.finished = true;
+            warn!(
+                provider = %self.provider,
+                model = %self.model,
+
+                "OpenAI-compatible stream returned provider error",
+            );
+            self.pending.push_back(Err(LlmError::provider(
+                "provider_error",
+                "Provider stream returned an error",
+                false,
+                json!({}),
+            )));
+            return;
+        }
+        if let Some(usage) = decoded.usage {
+            self.usage = Some(LlmUsage {
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
+                total_tokens: usage.total_tokens,
+            });
+        }
+        for choice in decoded.choices {
+            if let Some(delta) = choice.delta {
+                if delta.refusal.as_ref().is_some_and(|s| !s.is_empty()) {
+                    self.refused = true;
+                }
+                if let Some(content) = delta.content
+                    && !content.is_empty()
+                {
+                    self.content.push_str(&content);
+                    self.pending.push_back(Ok(LlmEvent {
+                        kind: LlmEventKind::Delta,
+                        content: Some(content),
+                        response: None,
+                        tool_call_id: None,
+                        tool_name: None,
+                        partial_input_json: None,
+                        tool_input: None,
+                        metadata: json!({"api": "openai_chat_completions", "stream": true}),
+                    }));
+                }
+                if let Some(reasoning) = delta.reasoning_content.or(delta.reasoning)
+                    && !reasoning.is_empty()
+                {
+                    self.pending.push_back(Ok(LlmEvent {
+                        kind: LlmEventKind::ThinkingDelta,
+                        content: Some(reasoning),
+                        response: None,
+                        tool_call_id: None,
+                        tool_name: None,
+                        partial_input_json: None,
+                        tool_input: None,
+                        metadata: json!({"api": "openai_chat_completions", "stream": true}),
+                    }));
+                }
+                if let Some(tool_calls) = delta.tool_calls {
+                    for tool_call in tool_calls {
+                        let index = tool_call.index.unwrap_or(0);
+                        let state = self.tools.entry(index).or_default();
+                        if let Some(id) = tool_call.id
+                            && !id.is_empty()
+                        {
+                            state.id = id;
+                        }
+                        if let Some(function) = tool_call.function {
+                            if let Some(name) = function.name
+                                && !name.is_empty()
+                            {
+                                state.name = name;
+                            }
+                            if let Some(arguments) = function.arguments {
+                                if !state.started
+                                    && (!state.id.is_empty() || !state.name.is_empty())
+                                {
+                                    state.started = true;
+                                    self.pending.push_back(Ok(LlmEvent {
+                                        kind: LlmEventKind::ToolCallStart,
+                                        content: None,
+                                        response: None,
+                                        tool_call_id: Some(openai_tool_id(index, state)),
+                                        tool_name: Some(state.name.clone()),
+                                        partial_input_json: None,
+                                        tool_input: None,
+                                        metadata: json!({"api": "openai_chat_completions", "stream": true}),
+                                    }));
+                                }
+                                if !arguments.is_empty() {
+                                    state.arguments.push_str(&arguments);
+                                    self.pending.push_back(Ok(LlmEvent {
+                                        kind: LlmEventKind::ToolCallDelta,
+                                        content: None,
+                                        response: None,
+                                        tool_call_id: Some(openai_tool_id(index, state)),
+                                        tool_name: Some(state.name.clone()),
+                                        partial_input_json: Some(arguments),
+                                        tool_input: None,
+                                        metadata: json!({"api": "openai_chat_completions", "stream": true}),
+                                    }));
+                                }
+                            } else if !state.started
+                                && (!state.id.is_empty() || !state.name.is_empty())
+                            {
+                                state.started = true;
+                                self.pending.push_back(Ok(LlmEvent {
+                                    kind: LlmEventKind::ToolCallStart,
+                                    content: None,
+                                    response: None,
+                                    tool_call_id: Some(openai_tool_id(index, state)),
+                                    tool_name: Some(state.name.clone()),
+                                    partial_input_json: None,
+                                    tool_input: None,
+                                    metadata: json!({"api": "openai_chat_completions", "stream": true}),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(reason) = choice.finish_reason {
+                self.raw_finish_reason = Some(reason.clone());
+                self.terminal_signal = Some("finish_reason".to_owned());
+                self.finish_reason = Some(if self.refused {
+                    LlmFinishReason::ContentFilter
+                } else {
+                    openai_finish_reason(Some(&reason))
+                });
+                if !matches!(
+                    self.finish_reason,
+                    Some(LlmFinishReason::ContentFilter | LlmFinishReason::Error)
+                ) {
+                    // OpenAI-compatible gateways occasionally report `stop`
+                    // or `length` together with tool deltas. The deltas are
+                    // authoritative; close those calls before the response.
+                    self.push_openai_tool_call_ends();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn push_openai_tool_call_ends(&mut self) {
+        for (index, state) in self.tools.iter_mut() {
+            if state.ended {
+                continue;
+            }
+            if !state.started {
+                state.started = true;
+                self.pending.push_back(Ok(LlmEvent {
+                    kind: LlmEventKind::ToolCallStart,
+                    content: None,
+                    response: None,
+                    tool_call_id: Some(openai_tool_id(*index, state)),
+                    tool_name: Some(state.name.clone()),
+                    partial_input_json: None,
+                    tool_input: None,
+                    metadata: json!({"api": "openai_chat_completions", "stream": true}),
+                }));
+            }
+            state.ended = true;
+            self.pending.push_back(Ok(LlmEvent {
+                kind: LlmEventKind::ToolCallEnd,
+                content: None,
+                response: None,
+                tool_call_id: Some(openai_tool_id(*index, state)),
+                tool_name: Some(state.name.clone()),
+                partial_input_json: None,
+                tool_input: decode_json_value_or_null(&state.arguments),
+                metadata: json!({"api": "openai_chat_completions", "stream": true}),
+            }));
+        }
+    }
+
+    pub(crate) fn push_finished(&mut self) {
+        if self.finished {
+            return;
+        }
+        // `[DONE]` is also a valid terminal signal when the gateway omitted a
+        // choice.finish_reason. Do not lose tool calls accumulated in deltas.
+        if !matches!(
+            self.finish_reason,
+            Some(LlmFinishReason::ContentFilter | LlmFinishReason::Error)
+        ) {
+            self.push_openai_tool_call_ends();
+        }
+        self.finished = true;
+        let object = match if matches!(
+            self.finish_reason,
+            Some(LlmFinishReason::ContentFilter | LlmFinishReason::Length | LlmFinishReason::Error)
+        ) {
+            Ok(None)
+        } else {
+            structured_output_from_content(&self.response_format, &self.content)
+        } {
+            Ok(object) => object,
+            Err(error) => {
+                self.pending.push_back(Err(error));
+                return;
+            }
+        };
+        let response = LlmResponse {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            content: self.content.clone(),
+            finish_reason: self.finish_reason.clone().unwrap_or(LlmFinishReason::Stop),
+            object,
+            usage: self.usage.clone(),
+            metadata: json!({
+                "api": "openai_chat_completions",
+                "stream": true,
+                "termination_signal": self.terminal_signal.clone(),
+                "raw_finish_reason": self.raw_finish_reason.clone(),
+                "refusal":self.refused,
+            }),
+        };
+        info!(
+            provider = %self.provider,
+            model = %self.model,
+            finish_reason = ?response.finish_reason,
+            input_tokens = response.usage.as_ref().map(|usage| usage.input_tokens).unwrap_or(0),
+            output_tokens = response.usage.as_ref().map(|usage| usage.output_tokens).unwrap_or(0),
+            total_tokens = response.usage.as_ref().map(|usage| usage.total_tokens).unwrap_or(0),
+            content_chars = response.content.chars().count(),
+            "OpenAI-compatible stream finished",
+        );
+        self.pending.push_back(Ok(LlmEvent {
+            kind: LlmEventKind::Finished,
+            content: None,
+            response: Some(response),
+            tool_call_id: None,
+            tool_name: None,
+            partial_input_json: None,
+            tool_input: None,
+            metadata: json!({"api": "openai_chat_completions", "stream": true}),
+        }));
+    }
+
+    fn push_stream_incomplete(&mut self) {
+        self.finished = true;
+        self.pending.push_back(Err(LlmError::provider(
+            "provider_stream_incomplete",
+            format!(
+                "OpenAI-compatible stream ended before a terminal signal ({})",
+                self.provider
+            ),
+            false,
+            json!({
+                "provider": self.provider,
+                "model": self.model,
+                "termination_signal": Value::Null,
+            }),
+        )));
+    }
+}

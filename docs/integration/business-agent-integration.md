@@ -171,7 +171,7 @@ Flutter UI
   -> Feature-owned Dart agent adapter
   -> App-level AgentRuntimeBridge
   -> FRB native Rust bridge
-  -> agent-chat / agent-runtime / agent-llm
+  -> agent-chat / agent-runtime / llm-protocol / llm-client / llm-reqwest
   -> Dart ToolHost
   -> Riverpod providers / repositories / platform APIs
 ```

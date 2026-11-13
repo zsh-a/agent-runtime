@@ -1,6 +1,8 @@
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::process::Stdio;
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use std::time::Duration;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use agent_core::{
     AgentError, HookEffect, HookEvent, HookEventName, HookInvocationStatus, HookKind, HookSpec,

@@ -6,9 +6,9 @@ use agent_core::{
     ProposalCreator, RunId, RunRequest, SubagentRunner, ToolCaller, ToolError, ToolSpec,
     WorkflowRunRequest, WorkflowRunResult,
 };
-use agent_llm::LlmMessage;
 use agent_runtime::{AgentRunner, RunControl, RunOutcome};
 use async_trait::async_trait;
+use llm_protocol::LlmMessage;
 use miette::{IntoDiagnostic, Result, miette};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;

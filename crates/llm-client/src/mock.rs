@@ -1,0 +1,138 @@
+use crate::{LlmEventStream, LlmProvider};
+use agent_core::PROTOCOL_VERSION;
+use futures::stream;
+use serde_json::{Value, json};
+use tracing::{debug, info};
+
+use crate::usage::estimate_usage;
+use llm_protocol::structured_output_from_content;
+use llm_protocol::{LlmError, LlmEvent, LlmEventKind, LlmFinishReason, LlmRequest, LlmResponse};
+
+#[derive(Debug, Clone)]
+pub struct MockLlmProvider {
+    provider: String,
+    model: String,
+    response_text: String,
+}
+
+impl Default for MockLlmProvider {
+    fn default() -> Self {
+        Self {
+            provider: "mock".to_owned(),
+            model: "mock-model".to_owned(),
+            response_text: "mock response".to_owned(),
+        }
+    }
+}
+
+impl MockLlmProvider {
+    pub fn new(
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        response_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            response_text: response_text.into(),
+        }
+    }
+
+    fn response_for(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        if request.messages.is_empty() {
+            return Err(LlmError::validation(
+                "llm request requires at least one message",
+            ));
+        }
+        let content = request
+            .metadata
+            .get("mock_response")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.response_text.clone());
+        let object = structured_output_from_content(&request.response_format, &content)?;
+        Ok(LlmResponse {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provider: self.provider.clone(),
+            model: if request.model.is_empty() {
+                self.model.clone()
+            } else {
+                request.model.clone()
+            },
+            usage: Some(estimate_usage(request, &content)),
+            content,
+            finish_reason: LlmFinishReason::Stop,
+            object,
+            metadata: json!({"mock": true}),
+        })
+    }
+}
+
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    async_trait::async_trait
+)]
+impl LlmProvider for MockLlmProvider {
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        request.validate_protocol()?;
+        debug!(
+            provider = %self.provider,
+            model = %request.model,
+            message_count = request.messages.len(),
+            "starting mock LLM completion",
+        );
+        let response = self.response_for(&request)?;
+        info!(
+            provider = %response.provider,
+            model = %response.model,
+            content_chars = response.content.chars().count(),
+            "mock LLM completion completed",
+        );
+        Ok(response)
+    }
+
+    async fn stream(&self, request: LlmRequest) -> Result<LlmEventStream, LlmError> {
+        request.validate_protocol()?;
+        debug!(
+            provider = %self.provider,
+            model = %request.model,
+            message_count = request.messages.len(),
+            "starting mock LLM stream",
+        );
+        let response = self.response_for(&request)?;
+        let events = vec![
+            Ok(LlmEvent {
+                kind: LlmEventKind::Started,
+                content: None,
+                response: None,
+                tool_call_id: None,
+                tool_name: None,
+                partial_input_json: None,
+                tool_input: None,
+                metadata: json!({"provider": response.provider, "model": response.model}),
+            }),
+            Ok(LlmEvent {
+                kind: LlmEventKind::Delta,
+                content: Some(response.content.clone()),
+                response: None,
+                tool_call_id: None,
+                tool_name: None,
+                partial_input_json: None,
+                tool_input: None,
+                metadata: json!({}),
+            }),
+            Ok(LlmEvent {
+                kind: LlmEventKind::Finished,
+                content: None,
+                response: Some(response),
+                tool_call_id: None,
+                tool_name: None,
+                partial_input_json: None,
+                tool_input: None,
+                metadata: json!({}),
+            }),
+        ];
+        Ok(Box::pin(stream::iter(events)))
+    }
+}

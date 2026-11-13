@@ -161,10 +161,11 @@ impl std::error::Error for TaskJoinError {}
 /// observable shape (spawn, then `join_next` in completion order) while
 /// polling on the single thread.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+type LocalTask<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub struct TaskGroup<T> {
-    pending: std::rc::Rc<
-        std::cell::RefCell<Vec<Pin<Box<dyn std::future::Future<Output = T> + 'static>>>>,
-    >,
+    pending: std::rc::Rc<std::cell::RefCell<Vec<LocalTask<T>>>>,
 }
 
 /// See the wasm `TaskGroup`.

@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use agent_llm::{
-    AnthropicProvider, LlmProvider, MockLlmProvider, OllamaProvider, OpenAiCompatibleProvider,
-};
+use llm_client::{LlmProvider, MockLlmProvider};
+use llm_reqwest::{AnthropicProvider, OllamaProvider, OpenAiCompatibleProvider};
 use miette::{Result, miette};
 
 #[derive(Debug, Clone)]

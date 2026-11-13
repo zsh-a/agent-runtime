@@ -1,8 +1,7 @@
 use agent_core::PROTOCOL_VERSION;
-use agent_llm::{
-    AnthropicProvider, LlmProvider, LlmRequest, MockLlmProvider, OllamaProvider,
-    OpenAiCompatibleProvider, user_message,
-};
+use llm_client::{LlmProvider, MockLlmProvider};
+use llm_protocol::{LlmRequest, user_message};
+use llm_reqwest::{AnthropicProvider, OllamaProvider, OpenAiCompatibleProvider};
 use miette::{Result, miette};
 use serde_json::json;
 
@@ -27,6 +26,7 @@ pub(crate) async fn run_llm_complete(options: LlmCompleteOptions) -> Result<()> 
         model: options.model.clone(),
         messages: vec![user_message(options.prompt)],
         temperature: options.temperature,
+        effort: None,
         max_output_tokens: options.max_output_tokens,
         tools: vec![],
         response_format: None,
@@ -93,7 +93,7 @@ pub(crate) async fn run_llm_complete(options: LlmCompleteOptions) -> Result<()> 
                 .complete(request)
                 .await
         }
-        other => Err(agent_llm::LlmError::validation(format!(
+        other => Err(llm_protocol::LlmError::validation(format!(
             "unsupported LLM provider '{other}'"
         ))),
     }
