@@ -276,3 +276,59 @@ fn streaming_preserves_order_and_rejects_bare_eof() {
     );
     assert_eq!(transport.requests.borrow().len(), 1);
 }
+
+#[test]
+fn responses_downgrade_cache_and_repair_preserve_native_items() {
+    let output = |text: &str| json!([{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]},{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":text,"annotations":[]}]}]);
+    let (old_client, transport) = setup(vec![
+        reply(
+            400,
+            json!({"error":{"message":"text.format json_schema unsupported"}}),
+        ),
+        reply(
+            400,
+            json!({"error":{"message":"text.format json_object unsupported"}}),
+        ),
+        reply(
+            200,
+            json!({"status":"completed","output":output("{\"n\":0}")}),
+        ),
+        reply(
+            200,
+            json!({"status":"completed","output":output("{\"n\":2}")}),
+        ),
+        reply(
+            200,
+            json!({"status":"completed","output":output("{\"n\":3}")}),
+        ),
+    ]);
+    drop(old_client);
+    let ep = Endpoint::new(
+        Protocol::OpenAiResponses,
+        "test",
+        "https://example.test/v1",
+        "key",
+    )
+    .unwrap();
+    let client = Client::new(ep, transport.clone());
+    let response = block_on(client.complete(request())).unwrap();
+    assert_eq!(response.object.unwrap()["n"], 2);
+    assert_eq!(
+        payload(&transport, 0)["text"]["format"]["type"],
+        "json_schema"
+    );
+    assert_eq!(
+        payload(&transport, 1)["text"]["format"]["type"],
+        "json_object"
+    );
+    assert!(payload(&transport, 2).get("text").is_none());
+    assert_eq!(payload(&transport, 3)["input"][1], output("{\"n\":0}")[0]);
+    assert_eq!(payload(&transport, 3)["input"][2], output("{\"n\":0}")[1]);
+    block_on(client.complete(request())).unwrap();
+    assert!(payload(&transport, 4).get("text").is_none());
+    for request in transport.requests.borrow().iter() {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["store"], false);
+        assert!(request.url.ends_with("/responses"));
+    }
+}

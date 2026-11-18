@@ -7,6 +7,7 @@ use std::fmt;
 pub enum Protocol {
     Anthropic,
     OpenAiCompatible,
+    OpenAiResponses,
     Ollama,
 }
 #[derive(Clone)]

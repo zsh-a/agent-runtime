@@ -4,6 +4,7 @@ mod content;
 mod decoder;
 mod endpoint;
 mod openai;
+mod responses;
 mod sse;
 mod structured;
 mod types;

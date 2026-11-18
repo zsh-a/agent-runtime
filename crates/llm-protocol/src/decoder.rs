@@ -25,6 +25,11 @@ impl StreamDecoder {
                 endpoint.anthropic_version.clone(),
                 request.response_format.clone(),
             )),
+            Protocol::OpenAiResponses => {
+                return Err(LlmError::validation(
+                    "Responses streaming is not supported; use whole-response completion",
+                ));
+            }
             Protocol::Ollama => return Err(LlmError::validation("Ollama uses a whole response")),
         };
         Ok(Self {

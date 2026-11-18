@@ -12,7 +12,9 @@ pub enum StructuredMode {
 impl StructuredMode {
     pub fn downgrade(self, protocol: Protocol) -> Option<Self> {
         match (self, protocol) {
-            (Self::Native, Protocol::OpenAiCompatible) => Some(Self::JsonObject),
+            (Self::Native, Protocol::OpenAiCompatible | Protocol::OpenAiResponses) => {
+                Some(Self::JsonObject)
+            }
             (Self::Native, _) | (Self::JsonObject, _) => Some(Self::Prompt),
             (Self::Prompt, _) => None,
         }
@@ -170,6 +172,18 @@ pub fn encode(
             }
             ("/chat/completions", body)
         }
+        Protocol::OpenAiResponses => {
+            if !ep.api_key().expose().is_empty() {
+                headers.push((
+                    "authorization".into(),
+                    format!("Bearer {}", ep.api_key().expose()),
+                ));
+            }
+            (
+                "/responses",
+                crate::responses::encode(request, stream, mode)?,
+            )
+        }
         Protocol::Ollama => {
             if !request.tools.is_empty() {
                 return Err(LlmError::validation(
@@ -249,6 +263,9 @@ pub fn decode(
             json!({}),
         )
     })?;
+    if ep.protocol == Protocol::OpenAiResponses {
+        return crate::responses::decode(ep, request, value);
+    }
     let (content, finish_reason, usage, metadata, model) = match ep.protocol {
         Protocol::Anthropic => {
             let blocks = value
@@ -330,6 +347,7 @@ pub fn decode(
                 value["model"].as_str().unwrap_or(&request.model).to_owned(),
             )
         }
+        Protocol::OpenAiResponses => unreachable!("Responses decoded above"),
         Protocol::Ollama => {
             let content = value
                 .pointer("/message/content")
@@ -437,6 +455,7 @@ pub fn rejects_structured_output(status: u16, body: &[u8]) -> bool {
         .to_ascii_lowercase();
     [
         "response_format",
+        "text.format",
         "json_schema",
         "json_object",
         "output_config",

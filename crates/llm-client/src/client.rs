@@ -211,6 +211,16 @@ impl<T: Transport> Client<T> {
                             .pointer("/choices/0/message/content")
                             .and_then(serde_json::Value::as_str)
                             .map(str::to_owned),
+                        Protocol::OpenAiResponses => value["output"].as_array().map(|items| {
+                            items
+                                .iter()
+                                .filter(|item| item["type"] == "message")
+                                .flat_map(|item| item["content"].as_array().into_iter().flatten())
+                                .filter(|part| part["type"] == "output_text")
+                                .filter_map(|part| part["text"].as_str())
+                                .collect::<Vec<_>>()
+                                .join("")
+                        }),
                         Protocol::Ollama => value
                             .pointer("/message/content")
                             .and_then(serde_json::Value::as_str)
@@ -221,7 +231,11 @@ impl<T: Transport> Client<T> {
                             role: LlmRole::Assistant,
                             content: previous.into(),
                             name: None,
-                            metadata: serde_json::json!({}),
+                            metadata: if self.endpoint.protocol == Protocol::OpenAiResponses {
+                                serde_json::json!({"responses_output":value["output"]})
+                            } else {
+                                serde_json::json!({})
+                            },
                         });
                     }
                     request.messages.push(user_message("The previous answer failed JSON/schema validation. Return only a valid JSON value matching every constraint of the requested schema, without explanations or markdown. Correct the answer once."));
